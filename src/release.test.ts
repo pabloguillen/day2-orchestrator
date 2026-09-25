@@ -1,5 +1,8 @@
 import { describe, expect, test, afterEach, mock } from "bun:test";
-import { evaluateGuardrail, fetchCanaryErrorCount } from "./release";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { evaluateGuardrail, fetchCanaryErrorCount, maybeAutoRelease } from "./release";
+import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
+import type { ChangeForAutonomy } from "./types";
 
 describe("evaluateGuardrail", () => {
   test("zero errors against the default zero-tolerance threshold promotes", () => {
@@ -70,5 +73,59 @@ describe("fetchCanaryErrorCount", () => {
   test("throws without a Sentry token rather than silently skipping the guardrail", async () => {
     process.env.SENTRY_AUTH_TOKEN = "";
     await expect(fetchCanaryErrorCount("org", "project", "sha")).rejects.toThrow(/SENTRY_AUTH_TOKEN/);
+  });
+});
+
+describe("maybeAutoRelease", () => {
+  const auditFile = "/tmp/day2-w3-test-audit.jsonl";
+  const baseChange: ChangeForAutonomy = {
+    sourceId: "test-source",
+    filesChanged: ["src/routes/index.tsx"],
+    isBugfix: true,
+    verifierApproved: true,
+    ciPassed: true,
+  };
+  const releaseOpts = {
+    repoPath: "/nonexistent",
+    sha: "deadbeef",
+    sentryOrg: "org",
+    sentryProject: "project",
+    workerName: "worker",
+  };
+
+  afterEach(() => {
+    if (existsSync(auditFile)) rmSync(auditFile);
+  });
+
+  test("with the default (L2) config, never auto-ships and never touches release mechanics", async () => {
+    const { decision, result } = await maybeAutoRelease(
+      baseChange,
+      releaseOpts,
+      DEFAULT_AUTONOMY_CONFIG,
+      auditFile,
+    );
+    expect(decision.autoShip).toBe(false);
+    expect(result).toBeUndefined();
+  });
+
+  test("always writes an audit entry, shipped or not", async () => {
+    await maybeAutoRelease(baseChange, releaseOpts, DEFAULT_AUTONOMY_CONFIG, auditFile);
+    expect(existsSync(auditFile)).toBe(true);
+    const lines = readFileSync(auditFile, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(1);
+    const entry = JSON.parse(lines[0]!);
+    expect(entry.sourceId).toBe("test-source");
+    expect(entry.autoShip).toBe(false);
+  });
+
+  test("an unverified change never auto-ships even at L3+", async () => {
+    const config = { defaultLevel: "L3" as const, areas: [] };
+    const { decision } = await maybeAutoRelease(
+      { ...baseChange, verifierApproved: false },
+      releaseOpts,
+      config,
+      auditFile,
+    );
+    expect(decision.autoShip).toBe(false);
   });
 });

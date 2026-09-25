@@ -1,6 +1,8 @@
 import { $ } from "bun";
 import { rmSync } from "node:fs";
+import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy, recordAutonomyAudit } from "./autonomy";
 import { checkoutSha, cloneIsolatedWorkspace } from "./git";
+import type { AutonomyConfig, AutonomyDecision, ChangeForAutonomy } from "./types";
 
 /**
  * Canary rollout + automatic rollback for the release pipeline — Step 1
@@ -230,4 +232,35 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+}
+
+/**
+ * The join point between W3 (this file) and W4 (`autonomy.ts`): gates an
+ * actual canary release behind the autonomy-level model rather than running
+ * unconditionally. Always writes an audit entry, shipped or not — the
+ * source doc's audit-trail requirement applies to every evaluated change,
+ * not just the ones that auto-ship.
+ *
+ * With `DEFAULT_AUTONOMY_CONFIG` (L2 everywhere), `evaluateAutonomy` always
+ * returns `autoShip: false`, so this always defers to a human — no change
+ * to today's default behavior. Nothing currently *calls* this
+ * automatically on merge (that needs a merge-detection mechanism — e.g. a
+ * GitHub Actions workflow on `push` to `main` — which doesn't exist yet;
+ * see STAGE1.md). This function is the building block for when it does.
+ */
+export async function maybeAutoRelease(
+  change: ChangeForAutonomy,
+  releaseOpts: CanaryReleaseOptions,
+  config: AutonomyConfig = DEFAULT_AUTONOMY_CONFIG,
+  auditFile = "day2-autonomy-audit.jsonl",
+): Promise<{ decision: AutonomyDecision; result?: CanaryReleaseResult }> {
+  const decision = evaluateAutonomy(change, config);
+  recordAutonomyAudit(auditFile, change, decision);
+  if (!decision.autoShip) {
+    console.log(`[day2-release] Not auto-shipping (${decision.reason}) — leave as a PR for a human.`);
+    return { decision };
+  }
+  console.log(`[day2-release] Autonomy check passed (${decision.reason}) — starting canary release.`);
+  const result = await runCanaryRelease(releaseOpts);
+  return { decision, result };
 }
