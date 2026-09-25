@@ -20,7 +20,7 @@ import type { AutonomyConfig, ChangeForAutonomy } from "./types";
  * autonomy config exists.
  */
 
-function parseArgs() {
+export function parseArgs() {
   const args = process.argv.slice(2);
   const get = (flag: string) => {
     const i = args.indexOf(flag);
@@ -42,6 +42,7 @@ function parseArgs() {
     errorThreshold: get("--error-threshold"),
     auditFile: get("--audit-file"),
     dryRun: args.includes("--dry-run"),
+    summary: get("--summary"),
   };
 }
 
@@ -80,7 +81,8 @@ async function main() {
       "Usage: bun run auto-release -- --repo <path> --sha <merged-commit-sha> " +
         "--sentry-org <org> --sentry-project <project> --worker-name <cloudflare-worker-name> " +
         "[--source-id <id>] [--files-changed a.ts,b.ts] [--bugfix] [--verifier-approved] [--ci-passed] " +
-        "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--audit-file path] [--dry-run]\n\n" +
+        "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--audit-file path] [--dry-run] " +
+        "[--summary \"human-readable title\"]\n\n" +
         "Decision-only by default: with no .day2-autonomy.json in --repo, this always defers to a " +
         "human (L2) — see COORDINATION.md W5 for why nothing triggers this automatically yet.",
     );
@@ -121,6 +123,7 @@ async function main() {
     },
     config,
     opts.auditFile ?? "day2-autonomy-audit.jsonl",
+    opts.summary,
   );
 
   console.log(

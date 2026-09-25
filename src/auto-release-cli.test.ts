@@ -3,8 +3,40 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
-import { deriveFilesChanged, loadAutonomyConfig } from "./auto-release-cli";
+import { deriveFilesChanged, loadAutonomyConfig, parseArgs } from "./auto-release-cli";
 import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
+
+describe("parseArgs", () => {
+  test("parses --summary as a single value even with embedded spaces (W8: PR titles are multi-word)", () => {
+    // Mirrors how the value actually arrives: a shell array element like
+    // `ARGS+=(--summary "$PR_TITLE")` hands this process one argv entry
+    // containing the whole title, not a value that itself needs splitting —
+    // same reasoning as --repo or --sha, unlike the comma-split
+    // --files-changed.
+    const original = process.argv;
+    try {
+      process.argv = [
+        ...original.slice(0, 2),
+        "--repo", "/tmp/x",
+        "--sha", "abc123",
+        "--summary", "Fix checkout crash on empty cart",
+      ];
+      expect(parseArgs().summary).toBe("Fix checkout crash on empty cart");
+    } finally {
+      process.argv = original;
+    }
+  });
+
+  test("summary is undefined when --summary isn't passed", () => {
+    const original = process.argv;
+    try {
+      process.argv = [...original.slice(0, 2), "--repo", "/tmp/x", "--sha", "abc123"];
+      expect(parseArgs().summary).toBeUndefined();
+    } finally {
+      process.argv = original;
+    }
+  });
+});
 
 describe("loadAutonomyConfig", () => {
   test("falls back to DEFAULT_AUTONOMY_CONFIG (L2 everywhere) when no .day2-autonomy.json exists", () => {

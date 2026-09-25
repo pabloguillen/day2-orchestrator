@@ -118,6 +118,24 @@ describe("maybeAutoRelease", () => {
     expect(entry.autoShip).toBe(false);
   });
 
+  test("an optional summary reaches the audit entry (W8: feeds the owner feed's plain-language output)", async () => {
+    await maybeAutoRelease(
+      baseChange,
+      releaseOpts,
+      DEFAULT_AUTONOMY_CONFIG,
+      auditFile,
+      "Fix checkout crash on empty cart",
+    );
+    const entry = JSON.parse(readFileSync(auditFile, "utf-8").trim());
+    expect(entry.summary).toBe("Fix checkout crash on empty cart");
+  });
+
+  test("omitting summary leaves it out of the audit entry entirely (not even undefined)", async () => {
+    await maybeAutoRelease(baseChange, releaseOpts, DEFAULT_AUTONOMY_CONFIG, auditFile);
+    const entry = JSON.parse(readFileSync(auditFile, "utf-8").trim());
+    expect("summary" in entry).toBe(false);
+  });
+
   test("an unverified change never auto-ships even at L3+", async () => {
     const config = { defaultLevel: "L3" as const, areas: [] };
     const { decision } = await maybeAutoRelease(

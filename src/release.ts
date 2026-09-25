@@ -253,9 +253,10 @@ export async function maybeAutoRelease(
   releaseOpts: CanaryReleaseOptions,
   config: AutonomyConfig = DEFAULT_AUTONOMY_CONFIG,
   auditFile = "day2-autonomy-audit.jsonl",
+  summary?: string,
 ): Promise<{ decision: AutonomyDecision; result?: CanaryReleaseResult }> {
   const decision = evaluateAutonomy(change, config);
-  recordAutonomyAudit(auditFile, change, decision);
+  recordAutonomyAudit(auditFile, change, decision, summary);
   if (!decision.autoShip) {
     console.log(`[day2-release] Not auto-shipping (${decision.reason}) — leave as a PR for a human.`);
     return { decision };
