@@ -5,6 +5,7 @@
   "scripts": {
     "fix": "bun run src/index.ts",
     "canary": "bun run src/canary-cli.ts",
+    "auto-release": "bun run src/auto-release-cli.ts",
     "test": "bun test"
   },
   "dependencies": {
