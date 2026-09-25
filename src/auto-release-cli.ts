@@ -47,9 +47,22 @@ function parseArgs() {
 
 /** Derives the changed-files list from the commit itself when the caller
  * doesn't supply one — a merge trigger typically only knows the SHA, not
- * the diff. Read-only; requires the SHA to already exist in `repoPath`. */
+ * the diff. Read-only; requires the SHA to already exist in `repoPath`.
+ *
+ * Diffs against the commit's first parent (`<sha>^1`), not a plain
+ * `git diff-tree <sha>`. Found live (auto-release.yml's first real run
+ * against a merge commit): plain `diff-tree` on a merge commit returns
+ * *nothing* without `-m`/`-c`, since git doesn't know which parent to diff
+ * against by default. That silently produced `filesChanged: []` for every
+ * real GitHub-merge trigger — which happened to still resolve to the right
+ * level here (falls back to `defaultLevel`, already L2), but would silently
+ * skip the sensitive-path override and any area-specific config once either
+ * is actually in use, since both key off the real file list. `^1` is the
+ * pre-merge tip of the target branch for a standard two-parent merge
+ * commit — "what this merge actually changed", matching what a human
+ * reviewing the PR saw. */
 export async function deriveFilesChanged(repoPath: string, sha: string): Promise<string[]> {
-  const output = await $`git diff-tree --no-commit-id --name-only -r ${sha}`.cwd(repoPath).text();
+  const output = await $`git diff --name-only ${sha}^1 ${sha}`.cwd(repoPath).text();
   return output.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 

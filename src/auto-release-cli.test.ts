@@ -51,4 +51,36 @@ describe("deriveFilesChanged", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("lists the files touched by a real merge commit — the actual GitHub-trigger shape", async () => {
+    // A plain `git diff-tree <sha>` (no -m/-c) returns nothing for a merge
+    // commit, since git doesn't know which parent to diff against by
+    // default — this is exactly the bug a live auto-release.yml run
+    // surfaced (filesChanged came back empty on a real PR merge). Every
+    // real trigger for this function is a merge commit, so this case
+    // matters more than the linear-history one above.
+    const dir = mkdtempSync(join(tmpdir(), "day2-derive-files-merge-"));
+    try {
+      await $`git init -q -b main`.cwd(dir);
+      await $`git config user.email test@example.com`.cwd(dir);
+      await $`git config user.name test`.cwd(dir);
+      writeFileSync(join(dir, "base.txt"), "base");
+      await $`git add base.txt`.cwd(dir);
+      await $`git commit -q -m init`.cwd(dir);
+
+      await $`git checkout -q -b feature`.cwd(dir);
+      writeFileSync(join(dir, "feature.txt"), "new");
+      await $`git add feature.txt`.cwd(dir);
+      await $`git commit -q -m "add feature file"`.cwd(dir);
+
+      await $`git checkout -q main`.cwd(dir);
+      await $`git merge -q --no-ff -m "Merge pull request #1 from x/feature" feature`.cwd(dir);
+
+      const sha = (await $`git rev-parse HEAD`.cwd(dir).text()).trim();
+      const files = await deriveFilesChanged(dir, sha);
+      expect(files).toEqual(["feature.txt"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
