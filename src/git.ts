@@ -20,6 +20,14 @@ export async function cloneIsolatedWorkspace(sourceRepoPath: string): Promise<st
   return workDir;
 }
 
+/** Checks out a specific commit in an already-cloned isolated workspace —
+ * used by the canary release path, which deploys a specific merged SHA
+ * rather than whatever's currently at `origin/main`'s tip. */
+export async function checkoutSha(cwd: string, sha: string) {
+  await $`git -C ${cwd} fetch origin`.quiet();
+  await $`git -C ${cwd} checkout ${sha}`.quiet();
+}
+
 /** Slugify a bug title into a git-safe branch suffix. */
 function slugify(title: string): string {
   return title
