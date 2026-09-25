@@ -6,6 +6,7 @@
     "fix": "bun run src/index.ts",
     "canary": "bun run src/canary-cli.ts",
     "auto-release": "bun run src/auto-release-cli.ts",
+    "feed": "bun run src/owner-feed.ts",
     "test": "bun test"
   },
   "dependencies": {
