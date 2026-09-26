@@ -236,3 +236,155 @@ export async function runSwarm(
   const results = await Promise.all(personas.map((p) => runPersona(previewUrl, p)));
   return { allPassed: results.every((r) => r.passed), results };
 }
+
+/**
+ * Comparison-test mode (COORDINATION.md W16): not a pre-release gate like
+ * `runSwarm` above — this runs the *same* task for a persona under a
+ * specific, pre-seeded device ID, so the same scenario can be run once
+ * against the real default config and once against a real, different
+ * config, and the two outcomes compared. This is synthetic evidence toward
+ * the still-blocked real-user retention-lift question, not a replacement
+ * for it — see docs/w16-swarm-comparison-results.md for the honest framing.
+ *
+ * Deliberately not reusing `Persona`'s viewport-crossing shape: this needs
+ * one fixed condition (a specific device ID) per run, not a persona×viewport
+ * matrix. Shares `runPersona`'s SDK invocation pattern (same model/turn/
+ * budget/sandbox setup) rather than the prompt template, since the prompt
+ * itself is structurally different (task-completion + friction/action-count
+ * reporting, not a pass/fail audit verdict).
+ */
+export type ComparisonResult = {
+  condition: string;
+  deviceId: string;
+  completed: boolean;
+  actionCount: number | null;
+  friction: string;
+  isError: boolean;
+  costUsd: number;
+};
+
+function buildComparisonPrompt(previewUrl: string, deviceId: string, task: string): string {
+  return `You are testing a deployed web app as part of a controlled comparison
+test. The app is live at exactly this URL — never guess or construct a
+different one:
+
+${previewUrl}
+
+**Critical setup step, do this before navigating anywhere:** this test
+needs your browser session to be identified as a specific existing device,
+not a fresh one. Before your first \`page.goto()\`, call
+\`page.addInitScript(() => { localStorage.setItem("day2-device-id", "${deviceId}"); })\`
+on the page/context. This must run via \`addInitScript\`, not a
+\`page.evaluate()\` after the page loads — the app reads this value from
+\`localStorage\` in its own startup code, immediately on mount, so setting
+it any later means the app already started up before your value existed.
+
+Your task:
+
+${task}
+
+Playwright is already installed in this directory —
+\`import { chromium } from "playwright"\` works without any install step.
+Write a small script (e.g. check.mjs) that launches a real browser,
+sets up the device ID exactly as described above, navigates to the URL,
+and actually performs the task — click, type, use the keyboard — rather
+than only reading the page's raw HTML. Run it with \`node check.mjs\`.
+This is a real, live app but the actions in this task (adding and deleting
+a handful of test expense entries) are safe, expected, and exactly what
+this test is for.
+
+While doing the task, count every distinct UI action you take (each click,
+each tap, each field you type into, each key you press) — you'll report
+this count.
+
+Also note anything that caused you confusion, hesitation, or extra steps
+you wouldn't have expected to need — be specific about what happened, not
+a general impression.
+
+When finished, end your final message with exactly these three lines, in
+this exact format (all three required):
+COMPARISON_COMPLETED: <true or false — true only if you finished every part of the task>
+COMPARISON_ACTIONS: <the integer count of distinct UI actions you took>
+COMPARISON_FRICTION: <one or two sentences on what caused friction, confusion, or extra steps — or "none" if genuinely nothing did>`;
+}
+
+export function parseComparisonResult(
+  finalText: string,
+  isError: boolean,
+): { completed: boolean; actionCount: number | null; friction: string } {
+  const line = (prefix: string) =>
+    finalText
+      .split("\n")
+      .find((l) => l.trim().startsWith(prefix))
+      ?.slice(prefix.length)
+      .trim();
+
+  const completedRaw = line("COMPARISON_COMPLETED:");
+  const actionsRaw = line("COMPARISON_ACTIONS:");
+  const frictionRaw = line("COMPARISON_FRICTION:");
+
+  // Same fail-closed discipline as parseVerdict: a transcript that never
+  // reached a real, well-formed completion line is not a completed run,
+  // regardless of how the rest of the transcript reads.
+  const completed = !isError && completedRaw?.toLowerCase() === "true";
+  const parsedActions = actionsRaw ? Number.parseInt(actionsRaw, 10) : NaN;
+  const actionCount = Number.isFinite(parsedActions) ? parsedActions : null;
+  const friction = frictionRaw || (isError ? "(agent run did not complete)" : "(no friction line reported)");
+
+  return { completed, actionCount, friction };
+}
+
+export async function runComparisonPersona(
+  previewUrl: string,
+  condition: string,
+  deviceId: string,
+  task: string,
+): Promise<ComparisonResult> {
+  const cwd = mkdtempSync(join(tmpdir(), "day2-comparison-"));
+  symlinkSync(SHARED_NODE_MODULES, join(cwd, "node_modules"));
+
+  let finalText = "";
+  let isError = false;
+  let costUsd = 0;
+
+  try {
+    try {
+      for await (const message of query({
+        prompt: buildComparisonPrompt(previewUrl, deviceId, task),
+        options: {
+          cwd,
+          model: MODEL,
+          permissionMode: "bypassPermissions",
+          maxTurns: MAX_TURNS,
+          maxBudgetUsd: MAX_BUDGET_USD,
+          persistSession: false,
+          settingSources: [],
+          settings: { disableClaudeAiConnectors: true },
+          tools: ["Bash", "Read", "Write", "Edit"],
+          sandbox: {
+            enabled: true,
+            autoAllowBashIfSandboxed: true,
+            failIfUnavailable: true,
+            credentials: {
+              envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
+            },
+            filesystem: { denyRead: DENIED_READ_PATHS },
+          },
+        },
+      })) {
+        if (message.type === "result") {
+          finalText = message.result ?? "";
+          isError = Boolean(message.is_error);
+          costUsd = message.total_cost_usd ?? 0;
+        }
+      }
+    } catch (err) {
+      isError = true;
+      finalText = `(agent run threw before producing a result: ${(err as Error).message})`;
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+
+  return { condition, deviceId, ...parseComparisonResult(finalText, isError), isError, costUsd };
+}

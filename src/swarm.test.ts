@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_PERSONAS, parseVerdict } from "./swarm";
+import { DEFAULT_PERSONAS, parseComparisonResult, parseVerdict } from "./swarm";
 
 describe("parseVerdict", () => {
   test("a clean PASS verdict passes", () => {
@@ -41,6 +41,55 @@ describe("parseVerdict", () => {
     );
     expect(result.passed).toBe(false);
     expect(result.summary).toContain("found a bug");
+  });
+});
+
+describe("parseComparisonResult", () => {
+  test("a well-formed completed run parses all three fields", () => {
+    const result = parseComparisonResult(
+      "Did the task.\nCOMPARISON_COMPLETED: true\nCOMPARISON_ACTIONS: 14\nCOMPARISON_FRICTION: none",
+      false,
+    );
+    expect(result.completed).toBe(true);
+    expect(result.actionCount).toBe(14);
+    expect(result.friction).toBe("none");
+  });
+
+  test("COMPARISON_COMPLETED: false is not completed, even with other fields present", () => {
+    const result = parseComparisonResult(
+      "COMPARISON_COMPLETED: false\nCOMPARISON_ACTIONS: 5\nCOMPARISON_FRICTION: got stuck on the date picker",
+      false,
+    );
+    expect(result.completed).toBe(false);
+    expect(result.friction).toContain("date picker");
+  });
+
+  test("isError true fails closed even if the transcript claims completion", () => {
+    const result = parseComparisonResult(
+      "COMPARISON_COMPLETED: true\nCOMPARISON_ACTIONS: 10\nCOMPARISON_FRICTION: none",
+      true,
+    );
+    expect(result.completed).toBe(false);
+  });
+
+  test("missing the completion line entirely fails closed, not defaults to completed", () => {
+    const result = parseComparisonResult("The agent rambled and never finished.", false);
+    expect(result.completed).toBe(false);
+    expect(result.actionCount).toBeNull();
+    expect(result.friction).toBe("(no friction line reported)");
+  });
+
+  test("a non-numeric action count is reported as null rather than 0 or NaN", () => {
+    const result = parseComparisonResult(
+      "COMPARISON_COMPLETED: true\nCOMPARISON_ACTIONS: several\nCOMPARISON_FRICTION: none",
+      false,
+    );
+    expect(result.actionCount).toBeNull();
+  });
+
+  test("an error run gets an explicit placeholder friction message, not empty", () => {
+    const result = parseComparisonResult("(agent run threw before producing a result: timeout)", true);
+    expect(result.friction).toBe("(agent run did not complete)");
   });
 });
 
