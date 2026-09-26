@@ -7,6 +7,7 @@
     "canary": "bun run src/canary-cli.ts",
     "auto-release": "bun run src/auto-release-cli.ts",
     "feed": "bun run src/owner-feed.ts",
+    "swarm-fix": "bun run src/swarm-fix-cli.ts",
     "test": "bun test"
   },
   "dependencies": {
