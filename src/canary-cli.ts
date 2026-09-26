@@ -23,6 +23,7 @@ function parseArgs() {
     monitorMinutes: get("--monitor-minutes"),
     errorThreshold: get("--error-threshold"),
     dryRun: args.includes("--dry-run"),
+    skipSwarmCheck: args.includes("--skip-swarm-check"),
   };
 }
 
@@ -32,7 +33,8 @@ async function main() {
     console.error(
       "Usage: bun run canary -- --repo <path> --sha <merged-commit-sha> " +
         "--sentry-org <org> --sentry-project <project> --worker-name <cloudflare-worker-name> " +
-        "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--dry-run]",
+        "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--dry-run] " +
+        "[--skip-swarm-check]",
     );
     process.exit(1);
   }
@@ -51,10 +53,15 @@ async function main() {
     monitorMinutes: opts.monitorMinutes ? Number(opts.monitorMinutes) : undefined,
     errorThreshold: opts.errorThreshold ? Number(opts.errorThreshold) : undefined,
     dryRun: opts.dryRun,
+    skipSwarmCheck: opts.skipSwarmCheck,
   });
 
   console.log(`[day2-release] Result: ${JSON.stringify(result, null, 2)}`);
-  if (result.status === "smoke_check_failed" || result.status === "rolled_back") {
+  if (
+    result.status === "smoke_check_failed" ||
+    result.status === "swarm_check_failed" ||
+    result.status === "rolled_back"
+  ) {
     process.exitCode = 1;
   }
 }

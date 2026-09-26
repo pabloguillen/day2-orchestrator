@@ -2,6 +2,7 @@ import { $ } from "bun";
 import { rmSync } from "node:fs";
 import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy, recordAutonomyAudit } from "./autonomy";
 import { checkoutSha, cloneIsolatedWorkspace } from "./git";
+import { runSwarm, type PersonaResult } from "./swarm";
 import type { AutonomyConfig, AutonomyDecision, ChangeForAutonomy } from "./types";
 
 /**
@@ -48,10 +49,21 @@ export type CanaryReleaseOptions = {
    * production traffic. Used to validate the mechanism without touching
    * live traffic — see STAGE1.md's safety stance. */
   dryRun?: boolean;
+  /** Skips the swarm v1 persona check (STAGE1.md/COORDINATION.md W13).
+   * Off by default — this is a real pre-release safety gate, not an
+   * optional extra. Exists for cheap iteration/testing of the release
+   * mechanism itself without paying the swarm's agent cost every time. */
+  skipSwarmCheck?: boolean;
 };
 
 export type CanaryReleaseResult =
   | { status: "smoke_check_failed"; reason: string; canaryVersionId: string }
+  | {
+      status: "swarm_check_failed";
+      reason: string;
+      canaryVersionId: string;
+      personaResults: PersonaResult[];
+    }
   | {
       status: "rolled_back";
       reason: string;
@@ -185,6 +197,30 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
     const smoke = await smokeCheckPreview(previewUrl);
     if (!smoke.ok) {
       return { status: "smoke_check_failed", reason: smoke.reason ?? "unknown", canaryVersionId };
+    }
+
+    if (!opts.skipSwarmCheck) {
+      console.log(
+        `[day2-release] Running swarm v1 (persona pre-release checks) against the preview...`,
+      );
+      const swarm = await runSwarm(previewUrl);
+      for (const r of swarm.results) {
+        console.log(
+          `[day2-release]   ${r.persona}: ${r.passed ? "PASS" : "FAIL"} — ${r.summary} ` +
+            `($${r.costUsd.toFixed(3)})`,
+        );
+      }
+      if (!swarm.allPassed) {
+        return {
+          status: "swarm_check_failed",
+          reason: swarm.results
+            .filter((r) => !r.passed)
+            .map((r) => `${r.persona}: ${r.summary}`)
+            .join("; "),
+          canaryVersionId,
+          personaResults: swarm.results,
+        };
+      }
     }
 
     if (opts.dryRun) {
