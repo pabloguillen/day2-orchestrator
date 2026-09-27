@@ -74,6 +74,50 @@ describe("fetchCanaryErrorCount", () => {
     process.env.SENTRY_AUTH_TOKEN = "";
     await expect(fetchCanaryErrorCount("org", "project", "sha")).rejects.toThrow(/SENTRY_AUTH_TOKEN/);
   });
+
+  test("with `since`, only counts events at or after that time — not the same SHA's earlier pre-flight test traffic", async () => {
+    // Real bug this guards against (day2/COORDINATION.md W21): the same SHA
+    // got uploaded and hit by swarm v1's own pre-flight persona checks
+    // *before* a later, separate canary attempt ever shifted real traffic.
+    // Those earlier events shared the exact same `release` tag and got
+    // counted against the later attempt's error budget, triggering a
+    // false-alarm rollback even though the actual canary window was clean.
+    process.env.SENTRY_AUTH_TOKEN = "test-token";
+    const since = new Date("2026-09-26T22:20:00Z");
+    globalThis.fetch = mock(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/issues/?query=")) {
+        return new Response(JSON.stringify([{ id: "1", count: "3" }]), { status: 200 });
+      }
+      if (u.includes("/issues/1/events/")) {
+        return new Response(
+          JSON.stringify([
+            { dateCreated: "2026-09-26T22:12:47Z" }, // before `since` — earlier pre-flight test traffic
+            { dateCreated: "2026-09-26T22:13:14Z" }, // before `since` — same
+            { dateCreated: "2026-09-26T22:25:00Z" }, // after `since` — real canary-window event
+          ]),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected URL: ${u}`);
+    }) as unknown as typeof fetch;
+
+    const count = await fetchCanaryErrorCount("org", "project", "abc123", since);
+    expect(count).toBe(1);
+  });
+
+  test("without `since`, behaves exactly as before (sums aggregate counts, no per-event fetch)", async () => {
+    process.env.SENTRY_AUTH_TOKEN = "test-token";
+    let eventsEndpointCalled = false;
+    globalThis.fetch = mock(async (url: string) => {
+      if (String(url).includes("/events/")) eventsEndpointCalled = true;
+      return new Response(JSON.stringify([{ count: "3" }, { count: "2" }]), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const count = await fetchCanaryErrorCount("org", "project", "abc123");
+    expect(count).toBe(5);
+    expect(eventsEndpointCalled).toBe(false);
+  });
 });
 
 describe("maybeAutoRelease", () => {

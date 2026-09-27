@@ -94,29 +94,58 @@ export function evaluateGuardrail(
 }
 
 /** Counts Sentry issue events tagged with this exact release (git SHA).
- * Since each SHA is only ever deployed once, "all events ever tagged with
- * this release" and "all events during this canary's window" are the same
- * set — no need for Sentry's coarse `statsPeriod` buckets (`''`, `24h`,
- * `14d` only — verified against the real API) to line up with the actual
- * monitoring window. */
+ *
+ * `since`, if given, restricts the count to events at or after that time —
+ * pass the moment *this* canary attempt's traffic shift actually happened.
+ * Without it, this counts *all* events ever tagged with the release, which
+ * is wrong whenever the same SHA gets uploaded/tested more than once before
+ * traffic is ever shifted for a given attempt (the assumption this function
+ * originally shipped with — "each SHA is only ever deployed once, so
+ * all-time and this-window are the same set" — turned out to be false: hit
+ * for real when swarm v1's own pre-flight persona checks exercised an
+ * earlier, never-promoted preview of the same commit, and a hydration error
+ * from *that* test traffic got counted against a later, separate canary
+ * attempt of the identical SHA, triggering a false-alarm rollback — day2/
+ * COORDINATION.md W21). Filtering requires per-event timestamps, which the
+ * issues-list endpoint's aggregate `count` doesn't carry, so `since` fans
+ * out to each candidate issue's own events endpoint. */
 export async function fetchCanaryErrorCount(
   sentryOrg: string,
   sentryProject: string,
   release: string,
+  since?: Date,
 ): Promise<number> {
   const token = process.env.SENTRY_AUTH_TOKEN;
   const regionUrl = process.env.SENTRY_REGION_URL ?? "https://sentry.io";
   if (!token) throw new Error("SENTRY_AUTH_TOKEN is not set.");
+  const headers = { Authorization: `Bearer ${token}` };
 
   const res = await fetch(
     `${regionUrl}/api/0/projects/${sentryOrg}/${sentryProject}/issues/?query=${encodeURIComponent(`release:${release}`)}&statsPeriod=24h&limit=100`,
-    { headers: { Authorization: `Bearer ${token}` } },
+    { headers },
   );
   if (!res.ok) {
     throw new Error(`Sentry API error ${res.status}: ${await res.text()}`);
   }
-  const issues = (await res.json()) as Array<{ count: string }>;
-  return issues.reduce((sum, issue) => sum + (Number(issue.count) || 0), 0);
+  const issues = (await res.json()) as Array<{ id: string; count: string }>;
+  if (!since) {
+    return issues.reduce((sum, issue) => sum + (Number(issue.count) || 0), 0);
+  }
+
+  let total = 0;
+  for (const issue of issues) {
+    if (!(Number(issue.count) > 0)) continue;
+    const eventsRes = await fetch(
+      `${regionUrl}/api/0/organizations/${sentryOrg}/issues/${issue.id}/events/`,
+      { headers },
+    );
+    if (!eventsRes.ok) {
+      throw new Error(`Sentry API error ${eventsRes.status}: ${await eventsRes.text()}`);
+    }
+    const events = (await eventsRes.json()) as Array<{ dateCreated: string }>;
+    total += events.filter((e) => new Date(e.dateCreated) >= since).length;
+  }
+  return total;
 }
 
 /** Registers a new Worker version. This alone never affects production
@@ -243,10 +272,15 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
       `[day2-release] Monitoring release:${opts.sha} for ${monitorMinutes}m ` +
         `(polling every ${pollIntervalSeconds}s, threshold ${errorThreshold})...`,
     );
+    // Captured *after* the traffic shift above, not before — only errors
+    // from this attempt's actual canary window should count (see
+    // fetchCanaryErrorCount's own doc comment for why that distinction is
+    // real, not pedantic).
+    const canaryStartedAt = new Date();
     const deadline = Date.now() + monitorMinutes * 60_000;
     let errorCount = 0;
     while (Date.now() < deadline) {
-      errorCount = await fetchCanaryErrorCount(opts.sentryOrg, opts.sentryProject, opts.sha);
+      errorCount = await fetchCanaryErrorCount(opts.sentryOrg, opts.sentryProject, opts.sha, canaryStartedAt);
       if (errorCount > errorThreshold) break;
       await new Promise((resolve) => setTimeout(resolve, pollIntervalSeconds * 1000));
     }
