@@ -109,4 +109,61 @@ PROPOSAL_JSON: null`;
     const result = parseFeatureProposal(text, false);
     expect(result.status).toBe("proposed");
   });
+
+  test("accepts a proposal with no competitorContext key at all — it's optional, not required", () => {
+    const result = parseFeatureProposal(validProposalText, false);
+    expect(result.status).toBe("proposed");
+    if (result.status === "proposed") {
+      expect(result.proposal.competitorContext).toBeUndefined();
+    }
+  });
+
+  test("a well-formed, non-empty competitorContext is captured", () => {
+    const text = `PROPOSAL_JSON:
+\`\`\`json
+{
+  "title": "x",
+  "rationale": "x",
+  "observedEvidence": "x",
+  "proposedContract": "x",
+  "openQuestions": [],
+  "competitorContext": "YNAB requires manual approval of imported transactions before they count toward the budget (source: ynab.com/features)"
+}
+\`\`\``;
+    const result = parseFeatureProposal(text, false);
+    expect(result.status).toBe("proposed");
+    if (result.status === "proposed") {
+      expect(result.proposal.competitorContext).toContain("YNAB");
+    }
+  });
+
+  test("fails closed when competitorContext is present but empty — omit the key, don't set it empty", () => {
+    const text = `PROPOSAL_JSON:
+\`\`\`json
+{
+  "title": "x",
+  "rationale": "x",
+  "observedEvidence": "x",
+  "proposedContract": "x",
+  "openQuestions": [],
+  "competitorContext": "   "
+}
+\`\`\``;
+    expect(parseFeatureProposal(text, false).status).toBe("parse_failed");
+  });
+
+  test("fails closed when competitorContext is present but not a string", () => {
+    const text = `PROPOSAL_JSON:
+\`\`\`json
+{
+  "title": "x",
+  "rationale": "x",
+  "observedEvidence": "x",
+  "proposedContract": "x",
+  "openQuestions": [],
+  "competitorContext": 42
+}
+\`\`\``;
+    expect(parseFeatureProposal(text, false).status).toBe("parse_failed");
+  });
 });

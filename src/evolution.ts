@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { homedir } from "node:os";
+import { sandboxConfig } from "./agent-sandbox";
+import type { CompetitorInsight } from "./competitor-feed";
 
 /**
  * Evolution engine — proposal generation only, not autonomous shipping
@@ -27,25 +28,20 @@ const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 const MAX_TURNS = 30;
 const MAX_BUDGET_USD = 1.5;
 
-const DENIED_ENV_VARS = ["SENTRY_AUTH_TOKEN", "SENTRY_REGION_URL", "ANTHROPIC_API_KEY"];
-const home = homedir();
-const DENIED_READ_PATHS = [
-  `${home}/.ssh`,
-  `${home}/.aws`,
-  `${home}/.claude`,
-  `${home}/.config/gh`,
-  `${home}/.netrc`,
-  `${home}/.npmrc`,
-  `${home}/.docker`,
-  `${home}/.gnupg`,
-];
-
 export type FeatureProposal = {
   title: string;
   rationale: string;
   observedEvidence: string;
   proposedContract: string;
   openQuestions: string[];
+  /** Optional, and deliberately separate from `observedEvidence` — that
+   * field is specifically the real per-user data that justifies this
+   * proposal; this one is market context from Component 4's competitor
+   * feed (docs/step3-self-evolving-plan.md), supporting evidence at most,
+   * never the primary justification. Absent whenever no supplied insight
+   * was genuinely relevant to the pattern actually observed — "nothing
+   * relevant" is honest, not a reason to force a citation in. */
+  competitorContext?: string;
 };
 
 /** Richer than the plan's own `FeatureProposal | null` sketch, on purpose:
@@ -60,7 +56,27 @@ export type ProposalResult =
   | { status: "no_proposal" }
   | { status: "parse_failed"; reason: string };
 
-function buildProposalPrompt(appBaseUrl: string, deviceIds: string[]): string {
+function buildCompetitorContextBlock(competitorInsights: CompetitorInsight[]): string {
+  if (competitorInsights.length === 0) return "";
+  const entries = competitorInsights
+    .map((i) => `- ${i.competitor}: ${i.feature} (relevance: ${i.relevance}, source: ${i.source})`)
+    .join("\n");
+  return `\nFor context only — real features from competing products (Component 4's competitor
+feed), NOT a substitute for real per-user evidence:
+${entries}
+
+Only cite one of these (via the optional "competitorContext" field below) if it's genuinely
+relevant to a pattern you actually found in the real per-user data above. The core justification
+for any proposal must always come from the real profiles you fetched — never propose a feature
+just because a competitor has it, with no matching real usage pattern behind it. Omit
+"competitorContext" entirely if none of these are actually relevant.\n`;
+}
+
+function buildProposalPrompt(
+  appBaseUrl: string,
+  deviceIds: string[],
+  competitorInsights: CompetitorInsight[] = [],
+): string {
   return `You are the evolution engine's proposal generator for a small production app (a personal
 expense tracker). Your job is to notice a real, repeated, currently-unserved usage pattern and
 propose ONE concrete new feature for a human to review — you never write or ship code yourself.
@@ -86,6 +102,7 @@ Look across all of these real profiles for a genuine pattern that isn't already 
 three variants listed above. If you find one, worth proposing a new feature for it. Be honest: if
 the data is too thin, too synthetic, or doesn't show a real repeated pattern, say so and propose
 nothing — a null result is a legitimate, expected outcome, not a failure on your part.
+${buildCompetitorContextBlock(competitorInsights)}
 
 When finished, end your final message with a line reading exactly PROPOSAL_JSON: followed
 immediately by a single fenced \`\`\`json code block. If you have a real proposal, the block must
@@ -96,7 +113,8 @@ contain exactly this shape:
   "rationale": "why this feature, grounded in what you actually observed",
   "observedEvidence": "the specific real data points from the profiles you fetched that support this",
   "proposedContract": "a typed contract sketch for the building block, in the same style as docs/step2-self-adapting-spec.md §3 (fields + types)",
-  "openQuestions": ["anything a human reviewer should resolve before building this"]
+  "openQuestions": ["anything a human reviewer should resolve before building this"],
+  "competitorContext": "OPTIONAL — only include this key at all if one of the competitor items above is genuinely relevant to the real pattern you found; omit the key entirely otherwise, don't set it to null or an empty string"
 }
 
 If you found nothing worth proposing, the block must contain exactly: null`;
@@ -150,6 +168,12 @@ export function parseFeatureProposal(finalText: string, isError: boolean): Propo
   if (!Array.isArray(p.openQuestions) || !p.openQuestions.every((q) => typeof q === "string")) {
     return { status: "parse_failed", reason: "proposal's openQuestions must be an array of strings" };
   }
+  if (p.competitorContext !== undefined && (typeof p.competitorContext !== "string" || !p.competitorContext.trim())) {
+    return {
+      status: "parse_failed",
+      reason: "proposal's competitorContext, if present, must be a non-empty string (omit the key entirely if not relevant)",
+    };
+  }
 
   return {
     status: "proposed",
@@ -159,17 +183,22 @@ export function parseFeatureProposal(finalText: string, isError: boolean): Propo
       observedEvidence: p.observedEvidence,
       proposedContract: p.proposedContract,
       openQuestions: p.openQuestions as string[],
+      ...(typeof p.competitorContext === "string" ? { competitorContext: p.competitorContext } : {}),
     },
   };
 }
 
-async function runProposalAgent(appBaseUrl: string, deviceIds: string[]): Promise<{ finalText: string; isError: boolean }> {
+async function runProposalAgent(
+  appBaseUrl: string,
+  deviceIds: string[],
+  competitorInsights: CompetitorInsight[],
+): Promise<{ finalText: string; isError: boolean }> {
   let finalText = "";
   let isError = false;
 
   try {
     for await (const message of query({
-      prompt: buildProposalPrompt(appBaseUrl, deviceIds),
+      prompt: buildProposalPrompt(appBaseUrl, deviceIds, competitorInsights),
       options: {
         model: MODEL,
         permissionMode: "bypassPermissions",
@@ -182,15 +211,7 @@ async function runProposalAgent(appBaseUrl: string, deviceIds: string[]): Promis
         // none is granted. `Bash` here is used exclusively for `curl`
         // against the app's own public, unauthenticated read endpoints.
         tools: ["Bash"],
-        sandbox: {
-          enabled: true,
-          autoAllowBashIfSandboxed: true,
-          failIfUnavailable: true,
-          credentials: {
-            envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
-          },
-          filesystem: { denyRead: DENIED_READ_PATHS },
-        },
+        sandbox: sandboxConfig(),
       },
     })) {
       if (message.type === "result") {
@@ -206,7 +227,11 @@ async function runProposalAgent(appBaseUrl: string, deviceIds: string[]): Promis
   return { finalText, isError };
 }
 
-export async function proposeFeature(appBaseUrl: string, deviceIds: string[]): Promise<ProposalResult> {
-  const { finalText, isError } = await runProposalAgent(appBaseUrl, deviceIds);
+export async function proposeFeature(
+  appBaseUrl: string,
+  deviceIds: string[],
+  competitorInsights: CompetitorInsight[] = [],
+): Promise<ProposalResult> {
+  const { finalText, isError } = await runProposalAgent(appBaseUrl, deviceIds, competitorInsights);
   return parseFeatureProposal(finalText, isError);
 }

@@ -50,6 +50,10 @@ export function renderProposalCard(proposal: RecordedProposal | FeatureProposal)
   lines.push("```");
   lines.push(proposal.proposedContract);
   lines.push("```");
+  if (proposal.competitorContext) {
+    lines.push("");
+    lines.push(`**Market context (supporting, not the primary justification):** ${proposal.competitorContext}`);
+  }
   if (proposal.openQuestions.length > 0) {
     lines.push("");
     lines.push("**Open questions for the reviewer:**");

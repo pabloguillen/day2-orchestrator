@@ -78,4 +78,19 @@ describe("renderProposalCard", () => {
     const rendered = renderProposalCard(sampleProposal);
     expect(rendered).not.toContain("[ Apply ]");
   });
+
+  test("omits the market-context section entirely when no competitorContext is present", () => {
+    const rendered = renderProposalCard(sampleProposal);
+    expect(rendered).not.toContain("Market context");
+  });
+
+  test("renders competitorContext as a clearly-labeled, supporting-only section when present", () => {
+    const rendered = renderProposalCard({
+      ...sampleProposal,
+      competitorContext: "YNAB requires manual approval of imported transactions (source: ynab.com/features)",
+    });
+    expect(rendered).toContain("Market context");
+    expect(rendered).toContain("not the primary justification");
+    expect(rendered).toContain("YNAB requires manual approval");
+  });
 });
