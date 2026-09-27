@@ -130,4 +130,15 @@ describe("DEFAULT_PERSONAS", () => {
     expect(auditor.task).toMatch(/shadowRoot/);
     expect(auditor.task).toMatch(/activeElement/);
   });
+
+  test("accessibility-auditor is warned that native form-control segments need a screenshot, not a computed-style check (W25)", () => {
+    // A real third false positive: getComputedStyle() on a native
+    // <input type="date">'s outer element can't see its own internal
+    // day/month/year segment highlighting at all (browser-internal UI, not
+    // a CSS property) — confirmed directly against both Chromium and real
+    // WebKit before concluding it was a false positive, not guessed.
+    const auditor = DEFAULT_PERSONAS.find((p) => p.name === "accessibility-auditor-desktop")!;
+    expect(auditor.task).toMatch(/getComputedStyle/);
+    expect(auditor.task).toMatch(/screenshot/i);
+  });
 });
