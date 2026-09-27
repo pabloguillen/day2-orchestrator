@@ -24,6 +24,9 @@ function parseArgs() {
     errorThreshold: get("--error-threshold"),
     dryRun: args.includes("--dry-run"),
     skipSwarmCheck: args.includes("--skip-swarm-check"),
+    skipCalibration: args.includes("--skip-calibration"),
+    allowCalibrationOverride: args.includes("--allow-calibration-override"),
+    calibrationAuditFile: get("--calibration-audit-file"),
   };
 }
 
@@ -34,7 +37,8 @@ async function main() {
       "Usage: bun run canary -- --repo <path> --sha <merged-commit-sha> " +
         "--sentry-org <org> --sentry-project <project> --worker-name <cloudflare-worker-name> " +
         "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--dry-run] " +
-        "[--skip-swarm-check]",
+        "[--skip-swarm-check] [--skip-calibration] [--allow-calibration-override] " +
+        "[--calibration-audit-file <path>]",
     );
     process.exit(1);
   }
@@ -54,6 +58,9 @@ async function main() {
     errorThreshold: opts.errorThreshold ? Number(opts.errorThreshold) : undefined,
     dryRun: opts.dryRun,
     skipSwarmCheck: opts.skipSwarmCheck,
+    skipCalibration: opts.skipCalibration,
+    allowCalibrationOverride: opts.allowCalibrationOverride,
+    calibrationAuditFile: opts.calibrationAuditFile,
   });
 
   console.log(`[day2-release] Result: ${JSON.stringify(result, null, 2)}`);

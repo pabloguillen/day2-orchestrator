@@ -1,6 +1,7 @@
 import { $ } from "bun";
 import { rmSync } from "node:fs";
 import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy, recordAutonomyAudit } from "./autonomy";
+import { calibrateSwarmFailures, recordCalibrationAudit, type CalibrationVerdict } from "./calibration";
 import { checkoutSha, cloneIsolatedWorkspace } from "./git";
 import { runSwarm, type PersonaResult } from "./swarm";
 import type { AutonomyConfig, AutonomyDecision, ChangeForAutonomy } from "./types";
@@ -54,6 +55,20 @@ export type CanaryReleaseOptions = {
    * optional extra. Exists for cheap iteration/testing of the release
    * mechanism itself without paying the swarm's agent cost every time. */
   skipSwarmCheck?: boolean;
+  /** Skips the calibration loop (COORDINATION.md W30) that re-checks a
+   * swarm failure against known false-positive patterns before blocking.
+   * Off by default. */
+  skipCalibration?: boolean;
+  /** If every swarm failure is calibrated as a known false positive, allow
+   * the release to proceed past the swarm gate anyway. Defaults to `false`
+   * — with it off, a fully-cleared calibration still blocks the release,
+   * byte-identical to today's behavior, but the result carries the
+   * calibration verdicts for visibility. This is deliberate: the mechanism
+   * should build a real, auditable track record on real runs before it's
+   * ever trusted to actually skip the gate. */
+  allowCalibrationOverride?: boolean;
+  /** Where calibration runs get logged, append-only JSONL. */
+  calibrationAuditFile?: string;
 };
 
 export type CanaryReleaseResult =
@@ -63,6 +78,7 @@ export type CanaryReleaseResult =
       reason: string;
       canaryVersionId: string;
       personaResults: PersonaResult[];
+      calibration?: CalibrationVerdict[];
     }
   | {
       status: "rolled_back";
@@ -70,9 +86,15 @@ export type CanaryReleaseResult =
       errorCount: number;
       canaryVersionId: string;
       stableVersionId: string;
+      calibrationOverride?: CalibrationVerdict[];
     }
-  | { status: "promoted"; errorCount: number; canaryVersionId: string }
-  | { status: "dry_run_stopped_before_traffic_shift"; canaryVersionId: string; previewUrl: string };
+  | { status: "promoted"; errorCount: number; canaryVersionId: string; calibrationOverride?: CalibrationVerdict[] }
+  | {
+      status: "dry_run_stopped_before_traffic_shift";
+      canaryVersionId: string;
+      previewUrl: string;
+      calibrationOverride?: CalibrationVerdict[];
+    };
 
 /** Pure decision function — unit-tested independently of any live
  * Cloudflare/Sentry call. Errors strictly above `threshold` roll back;
@@ -228,6 +250,8 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
       return { status: "smoke_check_failed", reason: smoke.reason ?? "unknown", canaryVersionId };
     }
 
+    let calibrationOverride: CalibrationVerdict[] | undefined;
+
     if (!opts.skipSwarmCheck) {
       console.log(
         `[day2-release] Running swarm v1 (persona pre-release checks) against the preview...`,
@@ -240,21 +264,58 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
         );
       }
       if (!swarm.allPassed) {
-        return {
-          status: "swarm_check_failed",
-          reason: swarm.results
-            .filter((r) => !r.passed)
-            .map((r) => `${r.persona}: ${r.summary}`)
-            .join("; "),
-          canaryVersionId,
-          personaResults: swarm.results,
-        };
+        const reason = swarm.results
+          .filter((r) => !r.passed)
+          .map((r) => `${r.persona}: ${r.summary}`)
+          .join("; ");
+
+        if (opts.skipCalibration) {
+          return { status: "swarm_check_failed", reason, canaryVersionId, personaResults: swarm.results };
+        }
+
+        console.log(
+          `[day2-release] Swarm blocked — checking failure(s) against known false-positive patterns...`,
+        );
+        const calibration = await calibrateSwarmFailures(previewUrl, swarm.results);
+        recordCalibrationAudit(
+          opts.calibrationAuditFile ?? "day2-calibration-audit.jsonl",
+          opts.sha,
+          previewUrl,
+          calibration.verdicts,
+        );
+        for (const v of calibration.verdicts) {
+          console.log(
+            `[day2-release]   calibration ${v.persona}: ` +
+              `${v.clearedAsFalsePositive ? `CLEARED (${v.matchedPatternId})` : "NOT CLEARED"} — ${v.summary}`,
+          );
+        }
+
+        if (!calibration.allClearedAsFalsePositive || !opts.allowCalibrationOverride) {
+          return {
+            status: "swarm_check_failed",
+            reason,
+            canaryVersionId,
+            personaResults: swarm.results,
+            calibration: calibration.verdicts,
+          };
+        }
+
+        console.log(
+          `[day2-release] CALIBRATION OVERRIDE — all ${calibration.verdicts.length} failure(s) ` +
+            `confirmed as known false positives; proceeding.`,
+        );
+        calibrationOverride = calibration.verdicts;
       }
     }
 
     if (opts.dryRun) {
       console.log(`[day2-release] --dry-run: stopping before any traffic shift.`);
-      return { status: "dry_run_stopped_before_traffic_shift", canaryVersionId, previewUrl };
+      return {
+        status: "dry_run_stopped_before_traffic_shift",
+        canaryVersionId,
+        previewUrl,
+        ...(calibrationOverride ? { calibrationOverride } : {}),
+      };
     }
 
     const stableVersionId = await getCurrentStableVersionId(cwd, opts.workerName);
@@ -293,12 +354,24 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
         [`${stableVersionId}@100`],
         `day2 auto-rollback ${opts.sha.slice(0, 8)}: ${verdict.reason}`,
       );
-      return { status: "rolled_back", reason: verdict.reason, errorCount, canaryVersionId, stableVersionId };
+      return {
+        status: "rolled_back",
+        reason: verdict.reason,
+        errorCount,
+        canaryVersionId,
+        stableVersionId,
+        ...(calibrationOverride ? { calibrationOverride } : {}),
+      };
     }
 
     console.log(`[day2-release] ${verdict.reason} Promoting ${canaryVersionId} to 100%.`);
     await deployTraffic(cwd, [`${canaryVersionId}@100`], `day2 promote ${opts.sha.slice(0, 8)}`);
-    return { status: "promoted", errorCount, canaryVersionId };
+    return {
+      status: "promoted",
+      errorCount,
+      canaryVersionId,
+      ...(calibrationOverride ? { calibrationOverride } : {}),
+    };
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

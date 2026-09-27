@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildPersonaGuidance } from "./false-positive-patterns";
 
 /**
  * Swarm v1 (COORDINATION.md W13, Step 1 roadmap): "persona/adversarial/
@@ -100,28 +101,7 @@ indicator and a programmatically associated label. Report concrete
 violations you actually encountered while doing this, not a general
 checklist.
 
-Three things that will make you misreport a working element as broken if
-you skip them (all three hit real false positives in earlier runs, so
-check for real, don't skip):
-- If an element's focus style is CSS-transitioned (opacity, outline, etc.
-  animating in rather than appearing instantly), reading its computed style
-  immediately after focusing can catch it mid-transition. Wait a few
-  hundred milliseconds after focusing before you read/screenshot it, so you
-  see its settled state, not a snapshot mid-animation.
-- \`document.activeElement\` reports the shadow *host* element, not the
-  actual focused node, when focus lands inside an open shadow root (e.g. a
-  third-party widget). Before judging an element's visibility or label from
-  \`document.activeElement\`, check whether it has a \`shadowRoot\` and, if
-  so, drill into \`el.shadowRoot.activeElement\` (repeat if nested) to find
-  the real focused element first.
-- Native form controls with internal segments that aren't separate DOM
-  nodes (e.g. \`<input type="date">\`'s day/month/year segments) render
-  their own focus highlighting as internal browser UI, not as anything
-  \`getComputedStyle()\` on the outer element can see — it'll report the
-  same value focused or not, every time, regardless of what's actually
-  drawn on screen. A computed-style check alone will always claim these are
-  broken. Take an actual screenshot and look at it before concluding a
-  segment/part like this has no visible focus indicator.`,
+${buildPersonaGuidance("accessibility-auditor")}`,
   },
   {
     name: "adversarial-input",
