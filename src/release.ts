@@ -96,6 +96,20 @@ export type CanaryReleaseResult =
       calibrationOverride?: CalibrationVerdict[];
     };
 
+/** Single source of truth for "did this release attempt fail" — a real
+ * bug (flagged in docs/step3-self-evolving-plan.md's Component 1 section,
+ * fixed here) came from `canary-cli.ts` and `auto-release-cli.ts` each
+ * keeping their own inline copy of this same three-status check, which
+ * drifted out of sync: `auto-release-cli.ts` was missing
+ * `swarm_check_failed`, so a real release blocked by the swarm pre-flight
+ * check still exited 0 (success) from that CLI, unlike `canary-cli.ts`'s
+ * equivalent path. `dry_run_stopped_before_traffic_shift` is deliberately
+ * not a failure — a dry run stopping before the traffic shift is its own
+ * intended, successful outcome. */
+export function isFailureStatus(status: CanaryReleaseResult["status"]): boolean {
+  return status === "smoke_check_failed" || status === "swarm_check_failed" || status === "rolled_back";
+}
+
 /** Pure decision function — unit-tested independently of any live
  * Cloudflare/Sentry call. Errors strictly above `threshold` roll back;
  * everything else promotes. */

@@ -1,8 +1,31 @@
 import { describe, expect, test, afterEach, mock } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { evaluateGuardrail, fetchCanaryErrorCount, maybeAutoRelease } from "./release";
+import { evaluateGuardrail, fetchCanaryErrorCount, isFailureStatus, maybeAutoRelease } from "./release";
 import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
 import type { ChangeForAutonomy } from "./types";
+
+describe("isFailureStatus", () => {
+  // Real bug this guards against (docs/step3-self-evolving-plan.md's
+  // Component 1 "Open items" note): auto-release-cli.ts and canary-cli.ts
+  // each kept their own inline copy of this exact check, and drifted out
+  // of sync — auto-release-cli.ts was missing swarm_check_failed, so a
+  // real release blocked by the swarm pre-flight check still exited 0
+  // from that CLI. A single shared, tested function is the fix, not just
+  // patching the one line that happened to be wrong today.
+  test("smoke_check_failed, swarm_check_failed, and rolled_back are all failures", () => {
+    expect(isFailureStatus("smoke_check_failed")).toBe(true);
+    expect(isFailureStatus("swarm_check_failed")).toBe(true);
+    expect(isFailureStatus("rolled_back")).toBe(true);
+  });
+
+  test("promoted is not a failure", () => {
+    expect(isFailureStatus("promoted")).toBe(false);
+  });
+
+  test("dry_run_stopped_before_traffic_shift is not a failure — it's a dry run's own intended, successful outcome", () => {
+    expect(isFailureStatus("dry_run_stopped_before_traffic_shift")).toBe(false);
+  });
+});
 
 describe("evaluateGuardrail", () => {
   test("zero errors against the default zero-tolerance threshold promotes", () => {

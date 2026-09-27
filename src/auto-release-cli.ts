@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { $ } from "bun";
 import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
-import { maybeAutoRelease } from "./release";
+import { isFailureStatus, maybeAutoRelease } from "./release";
 import type { AutonomyConfig, ChangeForAutonomy } from "./types";
 
 /**
@@ -132,7 +132,7 @@ async function main() {
   );
   if (result) {
     console.log(`[day2-auto-release] Release result: ${JSON.stringify(result, null, 2)}`);
-    if (result.status === "smoke_check_failed" || result.status === "rolled_back") {
+    if (isFailureStatus(result.status)) {
       process.exitCode = 1;
     }
   }

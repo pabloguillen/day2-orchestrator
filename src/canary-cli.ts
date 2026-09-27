@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { runCanaryRelease } from "./release";
+import { isFailureStatus, runCanaryRelease } from "./release";
 
 /**
  * Explicit CLI entrypoint for the canary release path — deliberately
@@ -64,11 +64,7 @@ async function main() {
   });
 
   console.log(`[day2-release] Result: ${JSON.stringify(result, null, 2)}`);
-  if (
-    result.status === "smoke_check_failed" ||
-    result.status === "swarm_check_failed" ||
-    result.status === "rolled_back"
-  ) {
+  if (isFailureStatus(result.status)) {
     process.exitCode = 1;
   }
 }
