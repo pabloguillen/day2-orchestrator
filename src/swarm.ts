@@ -167,7 +167,13 @@ interacting with it freely is safe and expected.
 
 When finished, end your final message with exactly one line: either
 "SWARM_VERDICT: PASS" (no real problem found) or
-"SWARM_VERDICT: FAIL — <concise, specific reason>" (a real, concrete problem).`;
+"SWARM_VERDICT: FAIL — <concise, specific reason>" (a real, concrete problem).
+
+If you're running low on turns, stop investigating further and end with
+your best current verdict right away, based on what you've already found —
+a short, concrete one, not a longer report. A run that never reaches a
+parseable verdict line fails closed regardless, so an unfinished long
+report gets you nothing a timely short one wouldn't.`;
 }
 
 async function runPersona(previewUrl: string, persona: Persona): Promise<PersonaResult> {
