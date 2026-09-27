@@ -98,7 +98,22 @@ expense" form, submit it, and reach the delete control on an existing
 expense row. Check whether each interactive element has a visible focus
 indicator and a programmatically associated label. Report concrete
 violations you actually encountered while doing this, not a general
-checklist.`,
+checklist.
+
+Two things that will make you misreport a working element as broken if you
+skip them (both hit real false positives in earlier runs, so check for
+real, don't skip):
+- If an element's focus style is CSS-transitioned (opacity, outline, etc.
+  animating in rather than appearing instantly), reading its computed style
+  immediately after focusing can catch it mid-transition. Wait a few
+  hundred milliseconds after focusing before you read/screenshot it, so you
+  see its settled state, not a snapshot mid-animation.
+- \`document.activeElement\` reports the shadow *host* element, not the
+  actual focused node, when focus lands inside an open shadow root (e.g. a
+  third-party widget). Before judging an element's visibility or label from
+  \`document.activeElement\`, check whether it has a \`shadowRoot\` and, if
+  so, drill into \`el.shadowRoot.activeElement\` (repeat if nested) to find
+  the real focused element first.`,
   },
   {
     name: "adversarial-input",

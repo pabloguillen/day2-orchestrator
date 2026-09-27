@@ -116,4 +116,18 @@ describe("DEFAULT_PERSONAS", () => {
     expect(desktop.viewport).toBe("desktop");
     expect(mobile.viewport).toBe("mobile");
   });
+
+  test("accessibility-auditor is warned against the two real false positives hit live (W21)", () => {
+    // Both were real, proven false positives, not hypothetical: a CSS
+    // opacity transition read mid-animation (misreported as permanently
+    // invisible), and document.activeElement reporting a shadow host
+    // instead of the real focused node inside an open shadow root
+    // (misreported a real, visible, labeled third-party widget button as an
+    // invisible, unlabeled focus trap). Without this guidance the persona
+    // keeps generating the exact same false blocks on every future run.
+    const auditor = DEFAULT_PERSONAS.find((p) => p.name === "accessibility-auditor-desktop")!;
+    expect(auditor.task).toMatch(/transition/i);
+    expect(auditor.task).toMatch(/shadowRoot/);
+    expect(auditor.task).toMatch(/activeElement/);
+  });
 });
