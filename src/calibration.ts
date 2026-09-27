@@ -1,8 +1,9 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sandboxConfig } from "./agent-sandbox";
 import {
   buildSkepticChecklist,
   hasApplicablePatterns,
@@ -27,10 +28,11 @@ import type { PersonaResult } from "./swarm";
  * a human to investigate and add a new catalogued pattern, same as every
  * one of the three patterns here originated.
  *
- * Deliberately does not import swarm.ts's sandbox/denylist config (that
- * file's sandbox settings are being watched for a separate, in-flight fix —
- * COORDINATION.md W28) — this module keeps its own small, disclosed-
- * duplicate copy instead. Worth deduping into a shared file once W28 lands.
+ * Sandbox/denylist config now comes from the shared agent-sandbox.ts —
+ * originally kept as its own disclosed-duplicate copy here while W28 (a
+ * separate, in-flight fix touching swarm.ts's sandbox settings) was still
+ * landing, per this module's own earlier note. W28 landed (PR #37); deduped
+ * here now that the collision window is closed.
  */
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
@@ -39,19 +41,6 @@ const MAX_BUDGET_USD = 1;
 
 const orchestratorRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED_NODE_MODULES = join(orchestratorRoot, "node_modules");
-
-const DENIED_ENV_VARS = ["SENTRY_AUTH_TOKEN", "SENTRY_REGION_URL", "ANTHROPIC_API_KEY"];
-const home = homedir();
-const DENIED_READ_PATHS = [
-  `${home}/.ssh`,
-  `${home}/.aws`,
-  `${home}/.claude`,
-  `${home}/.config/gh`,
-  `${home}/.netrc`,
-  `${home}/.npmrc`,
-  `${home}/.docker`,
-  `${home}/.gnupg`,
-];
 
 const VIEWPORT_SUFFIXES = ["-desktop", "-mobile"];
 
@@ -197,15 +186,7 @@ export async function runSkepticCheck(
           settingSources: [],
           settings: { disableClaudeAiConnectors: true },
           tools: ["Bash", "Read", "Write", "Edit"],
-          sandbox: {
-            enabled: true,
-            autoAllowBashIfSandboxed: true,
-            failIfUnavailable: true,
-            credentials: {
-              envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
-            },
-            filesystem: { denyRead: DENIED_READ_PATHS },
-          },
+          sandbox: sandboxConfig(),
         },
       })) {
         if (message.type === "result") {

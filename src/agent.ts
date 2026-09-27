@@ -1,32 +1,10 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { homedir } from "node:os";
+import { sandboxConfig } from "./agent-sandbox";
 import type { BugReport } from "./types";
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 const MAX_TURNS = 60;
 const MAX_BUDGET_USD = 3;
-
-/** Env vars the fix/verifier agents must never see, even though the
- * orchestrator process itself needs them (to call Sentry, to authenticate).
- * A report's title/description/context comes from Sentry — effectively
- * attacker-influenceable, since it can echo back whatever a user typed into
- * the app before it crashed — so treat the agent's shell as hostile territory
- * for anything secret. */
-const DENIED_ENV_VARS = ["SENTRY_AUTH_TOKEN", "SENTRY_REGION_URL", "ANTHROPIC_API_KEY"];
-
-/** Host paths that store credentials and have no reason to be readable from
- * inside a repo-scoped bugfix session. */
-const home = homedir();
-const DENIED_READ_PATHS = [
-  `${home}/.ssh`,
-  `${home}/.aws`,
-  `${home}/.claude`,
-  `${home}/.config/gh`,
-  `${home}/.netrc`,
-  `${home}/.npmrc`,
-  `${home}/.docker`,
-  `${home}/.gnupg`,
-];
 
 export type AgentRunResult = {
   finalText: string;
@@ -62,24 +40,10 @@ async function runAgent(prompt: string, cwd: string): Promise<AgentRunResult> {
       // to steer the agent), no Task/orchestration tools, no ambient MCP
       // tools — just what a repo-bound bugfix session needs.
       tools: ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "TodoWrite"],
-      // Real OS-level sandboxing for command execution (fails loud rather
-      // than silently running unsandboxed if unsupported on the host).
-      // Scoped narrowly: this isn't network/filesystem lockdown (the agent
-      // still needs `bun install` and to read its own repo tree), just
-      // denying the two concrete things that must never leak into a shell
-      // an untrusted bug report can influence — the orchestrator's own
-      // secrets, and the credential stores under the operator's home dir.
-      sandbox: {
-        enabled: true,
-        autoAllowBashIfSandboxed: true,
-        failIfUnavailable: true,
-        credentials: {
-          envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
-        },
-        filesystem: {
-          denyRead: DENIED_READ_PATHS,
-        },
-      },
+      // Real OS-level sandboxing (agent-sandbox.ts) — denies the
+      // orchestrator's own secrets and home-dir credential stores to a
+      // shell an untrusted bug report's content could influence.
+      sandbox: sandboxConfig(),
     },
   })) {
     if (message.type === "result") {

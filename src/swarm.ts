@@ -1,8 +1,9 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sandboxConfig } from "./agent-sandbox";
 import { buildPersonaGuidance } from "./false-positive-patterns";
 
 /**
@@ -30,22 +31,6 @@ const MAX_BUDGET_USD = 1;
 
 const orchestratorRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED_NODE_MODULES = join(orchestratorRoot, "node_modules");
-
-/** Same denylist as agent.ts's fix/verifier agents — the orchestrator's own
- * secrets have no reason to be visible to a sandboxed shell testing an
- * unrelated deployed web page. */
-const DENIED_ENV_VARS = ["SENTRY_AUTH_TOKEN", "SENTRY_REGION_URL", "ANTHROPIC_API_KEY"];
-const home = homedir();
-const DENIED_READ_PATHS = [
-  `${home}/.ssh`,
-  `${home}/.aws`,
-  `${home}/.claude`,
-  `${home}/.config/gh`,
-  `${home}/.netrc`,
-  `${home}/.npmrc`,
-  `${home}/.docker`,
-  `${home}/.gnupg`,
-];
 
 /** Playwright's built-in device profiles set viewport, user agent, and touch
  * support together — one line, not a hand-maintained pixel size. "iPhone
@@ -192,15 +177,7 @@ async function runPersona(previewUrl: string, persona: Persona): Promise<Persona
           settingSources: [],
           settings: { disableClaudeAiConnectors: true },
           tools: ["Bash", "Read", "Write", "Edit"],
-          sandbox: {
-            enabled: true,
-            autoAllowBashIfSandboxed: true,
-            failIfUnavailable: true,
-            credentials: {
-              envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
-            },
-            filesystem: { denyRead: DENIED_READ_PATHS },
-          },
+          sandbox: sandboxConfig(),
         },
       })) {
         if (message.type === "result") {
@@ -370,15 +347,7 @@ export async function runComparisonPersona(
           settingSources: [],
           settings: { disableClaudeAiConnectors: true },
           tools: ["Bash", "Read", "Write", "Edit"],
-          sandbox: {
-            enabled: true,
-            autoAllowBashIfSandboxed: true,
-            failIfUnavailable: true,
-            credentials: {
-              envVars: DENIED_ENV_VARS.map((name) => ({ name, mode: "deny" as const })),
-            },
-            filesystem: { denyRead: DENIED_READ_PATHS },
-          },
+          sandbox: sandboxConfig(),
         },
       })) {
         if (message.type === "result") {
