@@ -14,19 +14,22 @@
  * judgment call in a comment next to it — never a silently invented
  * constant.
  *
- * `CompetitorAngleInsight`/`SocialTrendInsight` are specified by the plan
- * as belonging to Component 5 (`growth-creative.ts` / an extended
- * `competitor-feed.ts`), which doesn't exist yet. Defined locally here,
- * matching the plan's exact shapes, so Component 2 isn't blocked on
- * Component 5's build order. `competitor-feed.ts` today only exports the
- * unrelated, Step-3 `CompetitorInsight` — not reused here since its shape
- * (feature/relevance/source, no `channel`/`angle`) doesn't match what this
- * plan specifies for growth strategy. Component 5 should absorb these two
- * types when it lands, not redefine them.
+ * `CompetitorAngleInsight`/`SocialTrendInsight` were originally specified
+ * by the plan as belonging to Component 5 (`growth-creative.ts` / an
+ * extended `competitor-feed.ts`), which didn't exist when this file was
+ * first built — local stand-ins were defined here at the time, disclosed
+ * as "Component 5 should absorb these when it lands." Component 5 (W42)
+ * has now landed them for real in `competitor-feed.ts`; imported from
+ * there below instead of redefined. One real fix picked up by the dedupe:
+ * the local `SocialTrendInsight` was missing `source` (a plain oversight,
+ * not a deliberate simplification) — the real, landed type has it.
  */
 
 import type { AppProfile } from "./onboarding";
+import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
 import type { BudgetConfig, KpiGoal } from "./spend-governance";
+
+export type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
 
 export type AppStage = "launch" | "traction" | "growth" | "scale";
 
@@ -37,21 +40,6 @@ export type StageSignals = {
    * compute a fraction from (never fabricated as 0). Mirrors
    * expense-buddy's `Day2Stats.retentionSignal` exactly. */
   retentionSignal: number | null;
-};
-
-export type CompetitorAngleInsight = {
-  competitor: string;
-  angle: string;
-  channel: string;
-  relevance: string;
-  source: string;
-};
-
-export type SocialTrendInsight = {
-  platform: "tiktok" | "instagram" | "other";
-  trend: string;
-  format: string;
-  relevance: string;
 };
 
 /**

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AppProfile } from "./onboarding";
 import type { BudgetConfig } from "./spend-governance";
 import { deriveAppStage, deriveGrowthStrategy, renderGrowthStrategySummary } from "./growth-strategy";
-import type { CompetitorAngleInsight, SocialTrendInsight } from "./growth-strategy";
+import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
 
 function makeAppProfile(overrides: Partial<AppProfile> = {}): AppProfile {
   return {
@@ -189,6 +189,7 @@ describe("deriveGrowthStrategy — competitor and trend citation", () => {
         trend: "budget-check-in duets",
         format: "short-form talking-head",
         relevance: "matches expense-buddy's daily-check-in feature",
+        source: "https://tiktok.com/trending",
       },
     ];
     const strategy = deriveGrowthStrategy(
