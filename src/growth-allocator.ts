@@ -1,0 +1,356 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { GrowthChannel } from "./growth-strategy";
+import type { BudgetConfig } from "./spend-governance";
+
+/**
+ * Step 4 (self-distributing), Component 3 — adaptive format/content
+ * allocator (COORDINATION.md W41, docs/step4-self-distributing-plan.md).
+ *
+ * Directly answers the user's own requirement: "try different things,
+ * reinforce what works, as fast as possible... within the guardrails."
+ * This is the genuinely new primitive this project didn't have before Step
+ * 4 — confirmed by direct search that no bandit/Thompson-sampling/UCB code
+ * exists anywhere else in this codebase. `experiments.ts`'s
+ * `evaluateExperiment`/`assignVariant` are fixed-split, evaluate-after-the-
+ * fact tools for a different question ("is this difference statistically
+ * real"), not an allocator, and are not reused here.
+ *
+ * Within a channel (Component 2's macro allocation decides *how much*
+ * budget a channel gets), this module decides *which specific format*
+ * — an `Arm` — gets tried next, and reinforces the ones that demonstrably
+ * work. Pure math throughout; `selectArm`/`recordOutcome` never call an
+ * LLM, matching `spend-governance.ts`'s own "pure core, agent-invoking
+ * pieces are a different file" discipline.
+ *
+ * Two disclosed deviations from the plan doc's literal design, both
+ * necessary because of build order, not because the plan was wrong:
+ *
+ * 1. `Arm.channel` is typed as `GrowthChannel` (growth-strategy.ts,
+ *    Component 2, already landed), not `SpendCategory` (spend-governance.ts,
+ *    Component 1). Confirmed by reading the real, merged `growth-strategy.ts`:
+ *    `GrowthChannel` includes `referral_loops`, a real, mechanically-free
+ *    growth channel Component 1 deliberately excludes from `SpendCategory`
+ *    since there's no dollar spend to govern there. The allocator needs to
+ *    reinforce formats across every real growth channel, including the
+ *    free one — `SpendCategory` alone can't express that.
+ * 2. `buildCandidateArms` takes a plain `resolvedCapabilities: GrowthCapability[]`
+ *    instead of the plan's literal `toolsConfig: GrowthToolsConfig` —
+ *    Component 4 (`growth-tools-config.ts`) is claimed and in progress
+ *    (COORDINATION.md W40) but doesn't exist yet. `GrowthCapability` is
+ *    duplicated locally here, matching Component 4's planned shape, rather
+ *    than importing a file that isn't there. Disclosed, not hidden — same
+ *    "duplicate now, dedupe once the collision window closes" precedent
+ *    `agent-sandbox.ts` established for Step 3. Once W40 lands, whoever
+ *    touches this next should replace this local type with an import and
+ *    have callers compute `resolvedCapabilities` via
+ *    `ALL_CAPABILITIES.filter(c => resolveBindings(config, c, appId).length > 0)`
+ *    — a trivial adapter, not a redesign.
+ */
+
+/** Duplicate of Component 4's planned `GrowthCapability` union — see the
+ * file header's deviation note. Kept in sync by hand until W40 lands. */
+export type GrowthCapability =
+  | "creative_generation"
+  | "motion_video_generation"
+  | "ugc_video_generation"
+  | "social_trend_research"
+  | "social_account_operation"
+  | "ad_platform"
+  | "app_store_release"
+  | "seo_content"
+  | "competitor_research"
+  | "website_generation";
+
+export type Arm = {
+  channel: GrowthChannel;
+  assetType: "text" | "image" | "video";
+  /** Only meaningful when `assetType === "video"` — motion-graphics-style
+   * (raylight/autoAE/hyperframes-illustrative) vs. UGC-style AI-presented
+   * testimonial content (Arcads.ai-illustrative). */
+  videoFormat?: "motion_graphics" | "ugc";
+  /** Free-text specifics, e.g. "15s-vertical-product-demo". */
+  formatTag: string;
+};
+
+export type ArmStats = { arm: Arm; attempts: number; successes: number; spendUsd: number };
+export type AllocatorState = { arms: ArmStats[]; updatedAt: string };
+
+/** An arm below this many attempts is "still exploring" for the purposes of
+ * `applyExplorationCeiling` and `renderAllocatorSummary`'s honesty caveat —
+ * a disclosed judgment call, not derived from anything. */
+export const MIN_ARM_OBSERVATIONS = 5;
+
+function armKey(arm: Arm): string {
+  return `${arm.channel}|${arm.assetType}|${arm.videoFormat ?? ""}|${arm.formatTag}`;
+}
+
+function findStats(state: AllocatorState, arm: Arm): ArmStats | undefined {
+  const key = armKey(arm);
+  return state.arms.find((s) => armKey(s.arm) === key);
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Gamma(k, 1) for integer k, sampled as the sum of k independent
+ * Exponential(1) draws (equivalently, -ln of their product) — the standard
+ * construction for integer shape parameters, and the only one needed here
+ * since `sampleBeta`'s two shape parameters are always `successes + 1` and
+ * `failures + 1`, both always positive integers. No stats library exists in
+ * this codebase (dependencies are just the Claude Agent SDK and Playwright)
+ * and none is needed for this restricted, always-integer case. */
+function sampleGamma(shapeInteger: number, rng: () => number): number {
+  let logProduct = 0;
+  for (let i = 0; i < shapeInteger; i++) {
+    const u = Math.max(rng(), Number.EPSILON); // guard against log(0) on a degenerate rng
+    logProduct += Math.log(u);
+  }
+  return -logProduct;
+}
+
+/** Beta(successes + 1, failures + 1) via two independent Gammas — the
+ * standard Beta-Bernoulli Thompson-sampling posterior. Untried arms
+ * (successes = failures = 0) sample from Beta(1, 1), the uniform
+ * distribution — maximally uncertain, so they're just as likely to win a
+ * given draw as anything else until real evidence narrows it. */
+function sampleBeta(successes: number, failures: number, rng: () => number): number {
+  const x = sampleGamma(successes + 1, rng);
+  const y = sampleGamma(failures + 1, rng);
+  return x / (x + y);
+}
+
+/**
+ * Thompson sampling: draws one Beta sample per candidate arm from its
+ * current posterior and returns the arm with the highest draw. Pure given
+ * an injected `rng` — never calls `Math.random()` directly, so this is
+ * fully reproducible under test (and consistent with this project's own
+ * "no ambient randomness" discipline elsewhere).
+ *
+ * No fixed minimum sample size gates reinforcement, unlike `experiments.ts`'s
+ * `MIN_SAMPLE_SIZE_PER_ARM` t-test gate — that answers "is this difference
+ * statistically publishable," a different question from "which way should
+ * I lean right now, honestly weighted by how sure I am." Reinforcement here
+ * starts from the very first outcome, per the user's own "as soon as
+ * possible" requirement — it just naturally reinforces gently at first
+ * (wide posteriors) and more decisively as evidence accumulates.
+ */
+export function selectArm(state: AllocatorState, candidateArms: Arm[], rng: () => number): Arm {
+  if (candidateArms.length === 0) {
+    throw new Error("selectArm: no candidate arms to choose from — check applyExplorationCeiling's result before calling this.");
+  }
+  let best = candidateArms[0]!;
+  let bestSample = -Infinity;
+  for (const arm of candidateArms) {
+    const stats = findStats(state, arm);
+    const successes = stats?.successes ?? 0;
+    const failures = (stats?.attempts ?? 0) - successes;
+    const sample = sampleBeta(successes, failures, rng);
+    if (sample > bestSample) {
+      bestSample = sample;
+      best = arm;
+    }
+  }
+  return best;
+}
+
+/** Pure. Updates the chosen arm's stats; a new arm not yet in `state.arms`
+ * is added on its first outcome. `spendUsd` accumulates across every call
+ * for that arm — used by `applyExplorationCeiling` below. */
+export function recordOutcome(
+  state: AllocatorState,
+  arm: Arm,
+  success: boolean,
+  spendUsd: number,
+): AllocatorState {
+  const key = armKey(arm);
+  const index = state.arms.findIndex((s) => armKey(s.arm) === key);
+  const updatedAt = new Date().toISOString();
+
+  if (index === -1) {
+    return {
+      arms: [...state.arms, { arm, attempts: 1, successes: success ? 1 : 0, spendUsd: round2(spendUsd) }],
+      updatedAt,
+    };
+  }
+
+  const existing = state.arms[index]!;
+  const updated: ArmStats = {
+    arm: existing.arm,
+    attempts: existing.attempts + 1,
+    successes: existing.successes + (success ? 1 : 0),
+    spendUsd: round2(existing.spendUsd + spendUsd),
+  };
+  const arms = [...state.arms];
+  arms[index] = updated;
+  return { arms, updatedAt };
+}
+
+type FormatSpec = {
+  formatTag: string;
+  assetType: Arm["assetType"];
+  videoFormat?: Arm["videoFormat"];
+  /** Absent means "text — no external tool needed," matching this
+   * codebase's own precedent (`evolution.ts`'s proposal generation, this
+   * stage's own creative-generation design) that an agent can always draft
+   * text with zero MCP dependency. Image/video formats each name the one
+   * capability their *real* intended artifact requires — never proposed as
+   * a candidate unless that capability actually resolves, so exploration
+   * budget is never spent testing a degraded text-only stand-in for what
+   * was supposed to be a real image or video. */
+  requiredCapability?: GrowthCapability;
+};
+
+/** Disclosed judgment call, not derived from anything: a starter catalog of
+ * plausible formats per real growth channel (Component 2's `GrowthChannel`).
+ * Deliberately small — this is what the allocator explores from on day
+ * one, not an exhaustive taxonomy; growing it is a content decision for
+ * whoever owns Component 5, not something to over-build here. */
+const FORMATS_BY_CHANNEL: Record<GrowthChannel, FormatSpec[]> = {
+  aso: [{ formatTag: "store-listing-copy", assetType: "text" }],
+  seo_content: [
+    { formatTag: "long-form-article", assetType: "text" },
+    { formatTag: "faq-page", assetType: "text" },
+  ],
+  referral_loops: [{ formatTag: "referral-invite-copy", assetType: "text" }],
+  social_content: [
+    { formatTag: "text-post", assetType: "text" },
+    { formatTag: "static-image-post", assetType: "image", requiredCapability: "creative_generation" },
+    {
+      formatTag: "motion-graphics-short-video",
+      assetType: "video",
+      videoFormat: "motion_graphics",
+      requiredCapability: "motion_video_generation",
+    },
+    {
+      formatTag: "ugc-style-short-video",
+      assetType: "video",
+      videoFormat: "ugc",
+      requiredCapability: "ugc_video_generation",
+    },
+  ],
+  paid_ads: [
+    { formatTag: "single-image-ad", assetType: "image", requiredCapability: "creative_generation" },
+    {
+      formatTag: "motion-graphics-video-ad",
+      assetType: "video",
+      videoFormat: "motion_graphics",
+      requiredCapability: "motion_video_generation",
+    },
+    {
+      formatTag: "ugc-testimonial-video-ad",
+      assetType: "video",
+      videoFormat: "ugc",
+      requiredCapability: "ugc_video_generation",
+    },
+  ],
+  direct_outreach: [{ formatTag: "personalized-email", assetType: "text" }],
+  website: [{ formatTag: "landing-page-copy", assetType: "text" }],
+};
+
+/** Fail-closed, same discipline as every other capability check in this
+ * stage: an arm is only proposed if its real, intended artifact can
+ * actually be produced today. Text is always includable (no external tool
+ * needed); image/video formats are excluded unless their required
+ * capability is in `resolvedCapabilities`. */
+export function buildCandidateArms(channel: GrowthChannel, resolvedCapabilities: GrowthCapability[]): Arm[] {
+  const specs = FORMATS_BY_CHANNEL[channel] ?? [];
+  return specs
+    .filter((s) => !s.requiredCapability || resolvedCapabilities.includes(s.requiredCapability))
+    .map((s) => ({
+      channel,
+      assetType: s.assetType,
+      ...(s.videoFormat ? { videoFormat: s.videoFormat } : {}),
+      formatTag: s.formatTag,
+    }));
+}
+
+/** `BudgetConfig.perCategoryCapUsd` is keyed by Component 1's `SpendCategory`,
+ * which doesn't include every `GrowthChannel` (`referral_loops` has no
+ * entry, by design — see the file header). Reading it with a channel that
+ * isn't a valid key simply yields `undefined` at runtime, same as a
+ * category that's a valid key but was never explicitly capped; both fall
+ * back to the whole monthly budget as the ceiling basis. */
+function categoryCeilingBasis(channelBudget: BudgetConfig, channel: GrowthChannel): number {
+  const perCategoryCapUsd = channelBudget.perCategoryCapUsd as Partial<Record<string, number>> | undefined;
+  return perCategoryCapUsd?.[channel] ?? channelBudget.monthlyBudgetUsd;
+}
+
+/**
+ * Enforces safety rail 7 at the allocator level — a *soft*, selection-time
+ * pre-filter, not a replacement for `spend-governance.ts`'s own hard,
+ * unconditional per-request ceiling (defense in depth: this module can be
+ * bypassed by a bug and the real money is still capped there). This one's
+ * job is different: stop the allocator from even proposing more
+ * under-observed arms once this channel's under-observed-arm spend
+ * (summed across `state`, using each arm's own tracked `spendUsd`) has
+ * reached `explorationCapFraction` of the channel's ceiling — so
+ * `selectArm` isn't left repeatedly picking arms that would just get
+ * denied at spend time anyway. Once an arm clears `MIN_ARM_OBSERVATIONS`,
+ * it's no longer "exploration" and this filter never excludes it.
+ */
+export function applyExplorationCeiling(
+  candidateArms: Arm[],
+  state: AllocatorState,
+  channelBudget: BudgetConfig,
+): Arm[] {
+  if (candidateArms.length === 0) return [];
+  const channel = candidateArms[0]!.channel;
+  const explorationFraction = channelBudget.explorationCapFraction ?? 0.3;
+  const explorationCapUsd = categoryCeilingBasis(channelBudget, channel) * explorationFraction;
+
+  const underObservedSpend = round2(
+    state.arms
+      .filter((s) => s.arm.channel === channel && s.attempts < MIN_ARM_OBSERVATIONS)
+      .reduce((acc, s) => acc + s.spendUsd, 0),
+  );
+
+  if (underObservedSpend < explorationCapUsd) {
+    return candidateArms;
+  }
+
+  return candidateArms.filter((arm) => (findStats(state, arm)?.attempts ?? 0) >= MIN_ARM_OBSERVATIONS);
+}
+
+function isValidAllocatorState(value: unknown): value is AllocatorState {
+  if (!value || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  return Array.isArray(o.arms) && typeof o.updatedAt === "string";
+}
+
+export function loadAllocatorState(path: string): AllocatorState {
+  if (!existsSync(path)) return { arms: [], updatedAt: new Date().toISOString() };
+  const raw = readFileSync(path, "utf-8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${path} exists but isn't valid JSON — fix or remove it by hand before using this tool.`);
+  }
+  if (!isValidAllocatorState(parsed)) {
+    throw new Error(`${path} exists but doesn't look like a valid allocator state — refusing to guess or overwrite it.`);
+  }
+  return parsed;
+}
+
+export function saveAllocatorState(path: string, state: AllocatorState): void {
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** Plain-language, no jargon — feeds directly into `growth-feed.ts`'s
+ * transparency surface (Component 6, not yet built). States sample sizes
+ * plainly alongside win rates, same honesty discipline as
+ * `spend-governance.ts`'s `renderBudgetSummary` and `experiments.ts`'s own
+ * sample-size framing — never implies confidence a handful of outcomes
+ * can't support. */
+export function renderAllocatorSummary(state: AllocatorState): string {
+  if (state.arms.length === 0) return "No formats have been tried yet.";
+  const sorted = [...state.arms].sort((a, b) => b.attempts - a.attempts);
+  const lines = sorted.map((s) => {
+    const winRate = s.attempts > 0 ? Math.round((s.successes / s.attempts) * 100) : 0;
+    const label = `${s.arm.channel} / ${s.arm.assetType}${s.arm.videoFormat ? ` (${s.arm.videoFormat})` : ""} / ${s.arm.formatTag}`;
+    const caveat = s.attempts < MIN_ARM_OBSERVATIONS ? " — still exploring, too early to call" : "";
+    return `  - ${label}: ${s.successes}/${s.attempts} succeeded (${winRate}%), $${s.spendUsd.toFixed(2)} spent${caveat}`;
+  });
+  return `Format performance (${state.arms.length} tried):\n${lines.join("\n")}`;
+}
