@@ -1,0 +1,55 @@
+{
+  "_comment": "Shape reference only — never a real config. Real file (.day2-platform-tools.json, gitignored) is day2-operator-owned, day2-platform-level, and never lives in or is read from an app owner's repo. Placeholder values below are illustrative, not real credentials. See docs/step4-self-distributing-plan.md Component 4 and COORDINATION.md W40.",
+  "bindings": [
+    {
+      "capability": "creative_generation",
+      "mcpServerName": "tryholo",
+      "serverConfig": {
+        "type": "http",
+        "url": "https://mcp.tryholo.ai/v1",
+        "headers": { "Authorization": "Bearer PLACEHOLDER_NEVER_A_REAL_KEY" }
+      },
+      "allowedTools": ["generate_creative", "extract_brand_dna"],
+      "toolPolicy": [{ "name": "generate_creative", "permission_policy": "always_allow" }],
+      "enabled": false,
+      "fitHints": { "assetTypes": ["text", "image"] }
+    },
+    {
+      "capability": "ugc_video_generation",
+      "mcpServerName": "arcads",
+      "serverConfig": {
+        "type": "http",
+        "url": "https://mcp.arcads.ai/v1",
+        "headers": { "Authorization": "Bearer PLACEHOLDER_NEVER_A_REAL_KEY" }
+      },
+      "allowedTools": ["generate_ugc_video"],
+      "toolPolicy": [{ "name": "generate_ugc_video", "permission_policy": "always_ask" }],
+      "enabled": false,
+      "fitHints": { "assetTypes": ["video"], "videoFormats": ["ugc"] }
+    },
+    {
+      "capability": "competitor_research",
+      "mcpServerName": "foreplay",
+      "serverConfig": {
+        "type": "http",
+        "url": "https://mcp.foreplay.co/v1",
+        "headers": { "Authorization": "Bearer PLACEHOLDER_NEVER_A_REAL_KEY" }
+      },
+      "allowedTools": ["search_ad_library", "get_competitor_angles"],
+      "enabled": false
+    },
+    {
+      "capability": "social_account_operation",
+      "mcpServerName": "posteverywhere",
+      "serverConfig": {
+        "type": "http",
+        "url": "https://mcp.posteverywhere.example/v1",
+        "headers": { "Authorization": "Bearer PLACEHOLDER_NEVER_A_REAL_KEY" }
+      },
+      "allowedTools": ["compose_post", "schedule_post", "publish_post"],
+      "toolPolicy": [{ "name": "publish_post", "permission_policy": "always_ask" }],
+      "enabled": false,
+      "connectedAccountRef": "PLACEHOLDER — set only once day2 has actually provisioned a real, app-specific social account for this app under its own agency/multi-tenant relationship (safety rail 5). Unset means this capability fails closed for every app, regardless of 'enabled' above."
+    }
+  ]
+}

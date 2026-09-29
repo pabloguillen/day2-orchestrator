@@ -2,3 +2,9 @@ node_modules/
 test-reports/
 *.log
 .env
+
+# Step 4 Component 4 (growth-tools-config.ts) — platform-level MCP/tool
+# credentials, day2-operator-owned, never per-app or owner-supplied. Real
+# secrets never get committed; .day2-platform-tools.example.json documents
+# the shape with placeholder values only.
+.day2-platform-tools.json
