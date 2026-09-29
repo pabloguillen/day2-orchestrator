@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServerConfig, McpServerToolPolicy } from "@anthropic-ai/claude-agent-sdk";
-import type { SpendCategory } from "./spend-governance";
-import type { GrowthStrategy } from "./growth-strategy";
+import type { GrowthChannel, GrowthStrategy } from "./growth-strategy";
 
 /**
  * Step 4 (self-distributing), Component 4 — config-driven MCP/tool-selection
@@ -22,10 +21,20 @@ import type { GrowthStrategy } from "./growth-strategy";
  * defining `CompetitorAngleInsight`/`SocialTrendInsight` ahead of
  * Component 5. Component 3 should import this file's `Arm` (or re-export
  * an identical one) when it lands, not redefine a diverging shape.
+ *
+ * **Disclosed correction (COORDINATION.md W41, Session A-Swarm's own
+ * finding while building Component 3 in parallel):** `Arm.channel` was
+ * originally typed against Component 1's `SpendCategory` (matching the
+ * plan's own literal snippet), but the plan's snippet predates Component
+ * 2's real, landed `GrowthChannel` type, which deliberately includes
+ * `referral_loops` — a real growth channel `SpendCategory` excludes since
+ * it carries no dollar spend for Component 1 to govern. Fixed here to
+ * `GrowthChannel` so this file's `Arm` doesn't diverge from Component 3's
+ * real one once it lands, shrinking that future dedup to a pure re-export.
  */
 
 export type Arm = {
-  channel: SpendCategory;
+  channel: GrowthChannel;
   assetType: "text" | "image" | "video";
   videoFormat?: "motion_graphics" | "ugc";
   formatTag: string;
@@ -102,7 +111,7 @@ export type ToolBinding = {
   fitHints?: {
     assetTypes?: Array<Arm["assetType"]>;
     videoFormats?: Array<NonNullable<Arm["videoFormat"]>>;
-    channels?: SpendCategory[];
+    channels?: GrowthChannel[];
   };
 };
 

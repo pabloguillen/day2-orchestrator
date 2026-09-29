@@ -205,6 +205,16 @@ describe("selectBestFitBinding", () => {
     });
     expect(result).toBe(twoMatches);
   });
+
+  test("referral_loops is a valid Arm.channel/fitHints.channels value (W41 disclosed correction: GrowthChannel, not SpendCategory)", () => {
+    const referralHinted = makeBinding({ mcpServerName: "referral-tool", fitHints: { channels: ["referral_loops"] } });
+    const other = makeBinding({ mcpServerName: "other-tool", fitHints: { channels: ["paid_ads"] } });
+    const result = selectBestFitBinding([other, referralHinted], {
+      arm: makeArm({ channel: "referral_loops" }),
+      strategy: makeStrategy(),
+    });
+    expect(result).toBe(referralHinted);
+  });
 });
 
 describe("buildMcpServersOption", () => {
