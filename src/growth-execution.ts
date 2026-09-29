@@ -7,6 +7,7 @@ import {
   recordOutcome,
   saveAllocatorState,
 } from "./growth-allocator";
+import type { AuthenticityVerdict, ClaimCheckVerdict, Creative } from "./growth-creative";
 import type { GrowthCapability, ToolBinding } from "./growth-tools-config";
 import { evaluateSpend, type BudgetConfig, type SpendDecision, type SpendLedgerEntry, type SpendRequest } from "./spend-governance";
 
@@ -14,15 +15,12 @@ import { evaluateSpend, type BudgetConfig, type SpendDecision, type SpendLedgerE
  * Step 4 (self-distributing), Component 6 — execution layer + transparency
  * feed (COORDINATION.md W43, docs/step4-self-distributing-plan.md).
  *
- * Composes Components 1-5. Component 5 (`growth-creative.ts`, `Creative`/
- * `ClaimCheckVerdict`/`AuthenticityVerdict`) is claimed and in progress
- * (COORDINATION.md W42) but not landed yet — the three types below are
- * disclosed stand-ins matching the plan's exact documented shapes, same
- * discipline `growth-allocator.ts`/`growth-tools-config.ts` already used
- * for each other while Step 4's components were still landing in parallel.
- * Once W42 lands, whoever touches this next should replace these with
- * real imports and confirm the shapes are byte-identical, same as W41's
- * own `GrowthCapability` dedup did for Component 4.
+ * Composes Components 1-5. Component 5 (`growth-creative.ts`, W42) landed
+ * mid-build here (`9270381`) — confirmed its real `Creative`/
+ * `ClaimCheckVerdict`/`AuthenticityVerdict` match this file's original
+ * disclosed stand-ins byte-for-byte before importing them directly, same
+ * dedup discipline `growth-allocator.ts`'s `GrowthCapability` stand-in
+ * followed for Component 4.
  *
  * Architectural refinement beyond a stopgap, though: `executeChannelAction`
  * is designed to be **pure**, taking already-computed `claimsCheck`/
@@ -34,42 +32,10 @@ import { evaluateSpend, type BudgetConfig, type SpendDecision, type SpendLedgerE
  * wrapper: `evaluateAutonomy`/`evaluateSpend`/`selectArm` are all pure;
  * `calibration.ts` splits `parseCalibrationVerdict` (pure) from
  * `runSkepticCheck` (agent-invoking) the exact same way. Here, that thin
- * wrapper is whichever future orchestration script calls Component 5's
+ * wrapper is whichever future orchestration script calls Component 5's real
  * `checkTruthfulClaims`/`checkAuthenticity` and then this function with
  * their results — not written yet, and not this component's job to write.
  */
-
-// ---------------------------------------------------------------------------
-// Component 5 stand-ins — see file header. Kept byte-for-byte to the plan's
-// own documented shapes so the eventual dedup is a pure re-export.
-// ---------------------------------------------------------------------------
-
-export type Creative = {
-  arm: Arm;
-  segment: string;
-  headline: string;
-  body: string;
-  imageDescription?: string;
-  videoAssetRef?: string;
-  videoStyle?: string;
-  claimsCheckedAgainst: string[];
-  costUsd: number;
-};
-
-export type ClaimCheckVerdict = {
-  creative: Creative;
-  truthful: boolean;
-  issues: string[];
-  /** Safety rail 8 — only meaningful for `arm.videoFormat === "ugc"`. */
-  fabricatesTestimonialIdentity?: boolean;
-};
-
-export type AuthenticityVerdict = {
-  creative: Creative;
-  readsAsGeneric: boolean;
-  matchedPatterns: string[];
-  suggestion: string;
-};
 
 // ---------------------------------------------------------------------------
 // Execution

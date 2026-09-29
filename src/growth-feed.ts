@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import type { AllocatorState, Arm } from "./growth-allocator";
 import { renderAllocatorSummary } from "./growth-allocator";
-import type { AuthenticityVerdict, ChannelExecutionResult, ClaimCheckVerdict } from "./growth-execution";
+import type { ChannelExecutionResult } from "./growth-execution";
+import type { AuthenticityVerdict, ClaimCheckVerdict } from "./growth-creative";
 import type { AppStage } from "./growth-strategy";
 import type { GrowthCapability } from "./growth-tools-config";
 

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AllocatorState, Arm } from "./growth-allocator";
-import type { Creative } from "./growth-execution";
+import type { Creative } from "./growth-creative";
 import { countConsecutiveGenericFlags, loadGrowthActions, recordGrowthAction, renderGrowthFeed, type GrowthActionRecord } from "./growth-feed";
 
 const arm: Arm = { channel: "social_content", assetType: "text", formatTag: "text-post" };

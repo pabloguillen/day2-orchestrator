@@ -10,9 +10,9 @@ import {
   type AcquisitionEvent,
   type ActivationEvent,
   type ChannelExecutionOptions,
-  type Creative,
   type GrowthActionRecordForReconciliation,
 } from "./growth-execution";
+import type { Creative } from "./growth-creative";
 import type { ToolBinding } from "./growth-tools-config";
 import type { BudgetConfig, SpendLedgerEntry, SpendRequest } from "./spend-governance";
 
