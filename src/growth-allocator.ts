@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { GrowthCapability } from "./growth-tools-config";
 import type { GrowthChannel } from "./growth-strategy";
 import type { BudgetConfig } from "./spend-governance";
 
@@ -22,44 +23,31 @@ import type { BudgetConfig } from "./spend-governance";
  * LLM, matching `spend-governance.ts`'s own "pure core, agent-invoking
  * pieces are a different file" discipline.
  *
- * Two disclosed deviations from the plan doc's literal design, both
- * necessary because of build order, not because the plan was wrong:
+ * One disclosed deviation from the plan doc's literal design, necessary
+ * because of build order, not because the plan was wrong: `Arm.channel` is
+ * typed as `GrowthChannel` (growth-strategy.ts, Component 2, already
+ * landed), not `SpendCategory` (spend-governance.ts, Component 1).
+ * Confirmed by reading the real, merged `growth-strategy.ts`: `GrowthChannel`
+ * includes `referral_loops`, a real, mechanically-free growth channel
+ * Component 1 deliberately excludes from `SpendCategory` since there's no
+ * dollar spend to govern there. The allocator needs to reinforce formats
+ * across every real growth channel, including the free one —
+ * `SpendCategory` alone can't express that.
  *
- * 1. `Arm.channel` is typed as `GrowthChannel` (growth-strategy.ts,
- *    Component 2, already landed), not `SpendCategory` (spend-governance.ts,
- *    Component 1). Confirmed by reading the real, merged `growth-strategy.ts`:
- *    `GrowthChannel` includes `referral_loops`, a real, mechanically-free
- *    growth channel Component 1 deliberately excludes from `SpendCategory`
- *    since there's no dollar spend to govern there. The allocator needs to
- *    reinforce formats across every real growth channel, including the
- *    free one — `SpendCategory` alone can't express that.
- * 2. `buildCandidateArms` takes a plain `resolvedCapabilities: GrowthCapability[]`
- *    instead of the plan's literal `toolsConfig: GrowthToolsConfig` —
- *    Component 4 (`growth-tools-config.ts`) is claimed and in progress
- *    (COORDINATION.md W40) but doesn't exist yet. `GrowthCapability` is
- *    duplicated locally here, matching Component 4's planned shape, rather
- *    than importing a file that isn't there. Disclosed, not hidden — same
- *    "duplicate now, dedupe once the collision window closes" precedent
- *    `agent-sandbox.ts` established for Step 3. Once W40 lands, whoever
- *    touches this next should replace this local type with an import and
- *    have callers compute `resolvedCapabilities` via
- *    `ALL_CAPABILITIES.filter(c => resolveBindings(config, c, appId).length > 0)`
- *    — a trivial adapter, not a redesign.
+ * `buildCandidateArms` takes a plain `resolvedCapabilities: GrowthCapability[]`
+ * rather than a full `GrowthToolsConfig` — originally a forced deviation
+ * while Component 4 (`growth-tools-config.ts`, W40) was still in progress;
+ * W40 landed on `main` while this component was being built (`e9fd33a`),
+ * confirmed to define the exact same `GrowthCapability` union used here
+ * (byte-for-byte, same members and order), so this now imports the real
+ * type instead of keeping a hand-synced local copy — the dedupe this file
+ * originally flagged as a future TODO, done immediately rather than left
+ * for someone else, since the collision window closed inside this same
+ * workstream. `resolvedCapabilities` itself is still a plain array, not
+ * `GrowthToolsConfig` — computing it is `growth-execution.ts`'s job
+ * (Component 6, not yet built): `ALL_CAPABILITIES.filter(c =>
+ * resolveBindings(config, c, appId).length > 0)`.
  */
-
-/** Duplicate of Component 4's planned `GrowthCapability` union — see the
- * file header's deviation note. Kept in sync by hand until W40 lands. */
-export type GrowthCapability =
-  | "creative_generation"
-  | "motion_video_generation"
-  | "ugc_video_generation"
-  | "social_trend_research"
-  | "social_account_operation"
-  | "ad_platform"
-  | "app_store_release"
-  | "seo_content"
-  | "competitor_research"
-  | "website_generation";
 
 export type Arm = {
   channel: GrowthChannel;

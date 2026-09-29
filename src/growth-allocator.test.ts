@@ -13,8 +13,8 @@ import {
   selectArm,
   type AllocatorState,
   type Arm,
-  type GrowthCapability,
 } from "./growth-allocator";
+import type { GrowthCapability } from "./growth-tools-config";
 import type { BudgetConfig } from "./spend-governance";
 
 function mulberry32(seed: number): () => number {
