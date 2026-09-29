@@ -5,7 +5,9 @@ import { join } from "node:path";
 import {
   MIN_ARM_OBSERVATIONS,
   applyExplorationCeiling,
+  armKey,
   buildCandidateArms,
+  decodeArmKey,
   loadAllocatorState,
   recordOutcome,
   renderAllocatorSummary,
@@ -273,5 +275,23 @@ describe("renderAllocatorSummary", () => {
 
   test("honest empty-state message rather than a blank render", () => {
     expect(renderAllocatorSummary(emptyState)).toBe("No formats have been tried yet.");
+  });
+});
+
+describe("armKey / decodeArmKey (Component 6's real-event-attribution seam)", () => {
+  test("round-trips a text arm (no videoFormat)", () => {
+    expect(decodeArmKey(armKey(armA))).toEqual(armA);
+  });
+
+  test("round-trips a video arm with a videoFormat", () => {
+    const videoArm: Arm = { channel: "paid_ads", assetType: "video", videoFormat: "ugc", formatTag: "ugc-testimonial-video-ad" };
+    expect(decodeArmKey(armKey(videoArm))).toEqual(videoArm);
+  });
+
+  test("returns undefined on a malformed or foreign key rather than guessing", () => {
+    expect(decodeArmKey("not-a-real-key")).toBeUndefined();
+    expect(decodeArmKey("social_content|not_a_real_asset_type||text-post")).toBeUndefined();
+    expect(decodeArmKey("social_content|video|not_a_real_video_format|x")).toBeUndefined();
+    expect(decodeArmKey("|image||")).toBeUndefined(); // empty channel/formatTag
   });
 });

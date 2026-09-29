@@ -61,15 +61,45 @@ export type Arm = {
 };
 
 export type ArmStats = { arm: Arm; attempts: number; successes: number; spendUsd: number };
-export type AllocatorState = { arms: ArmStats[]; updatedAt: string };
+/** `reconciledCreativeIds` — additive, optional extension for Component 6
+ * (`growth-execution.ts`, COORDINATION.md W43): tracks which real,
+ * `executed` `GrowthActionRecord`s have already had their real-world
+ * outcome folded into this state via `reconcileOutcomes`, so a repeated
+ * on-demand reconciliation run never double-counts the same action.
+ * Backward-compatible — absent on any state file written before this
+ * existed; every reader treats `undefined` the same as `[]`. */
+export type AllocatorState = { arms: ArmStats[]; updatedAt: string; reconciledCreativeIds?: string[] };
 
 /** An arm below this many attempts is "still exploring" for the purposes of
  * `applyExplorationCeiling` and `renderAllocatorSummary`'s honesty caveat —
  * a disclosed judgment call, not derived from anything. */
 export const MIN_ARM_OBSERVATIONS = 5;
 
-function armKey(arm: Arm): string {
+/** Exported for `growth-execution.ts` (Component 6): the `acquisition_landing`
+ * event's `armKey` metadata field is this exact encoding, so a device's
+ * real landing can be matched back to the `Arm` that produced its
+ * creative. See `decodeArmKey` for the inverse. */
+export function armKey(arm: Arm): string {
   return `${arm.channel}|${arm.assetType}|${arm.videoFormat ?? ""}|${arm.formatTag}`;
+}
+
+/** Inverse of `armKey`. Returns `undefined` on anything that doesn't
+ * round-trip to a well-formed `Arm` — a malformed or foreign key (e.g. from
+ * a future format this version doesn't know about) is skipped by callers,
+ * never guessed at. */
+export function decodeArmKey(key: string): Arm | undefined {
+  const parts = key.split("|");
+  if (parts.length !== 4) return undefined;
+  const [channel, assetType, videoFormat, formatTag] = parts as [string, string, string, string];
+  if (assetType !== "text" && assetType !== "image" && assetType !== "video") return undefined;
+  if (videoFormat !== "" && videoFormat !== "motion_graphics" && videoFormat !== "ugc") return undefined;
+  if (!channel || !formatTag) return undefined;
+  return {
+    channel: channel as GrowthChannel,
+    assetType,
+    ...(videoFormat ? { videoFormat } : {}),
+    formatTag,
+  };
 }
 
 function findStats(state: AllocatorState, arm: Arm): ArmStats | undefined {
