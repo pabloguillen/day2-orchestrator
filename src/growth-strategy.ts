@@ -23,10 +23,22 @@
  * there below instead of redefined. One real fix picked up by the dedupe:
  * the local `SocialTrendInsight` was missing `source` (a plain oversight,
  * not a deliberate simplification) — the real, landed type has it.
+ *
+ * **W45 extension**: `deriveGrowthStrategy` gained an optional
+ * `stageComparables: StageComparableInsight[]` (`growth-patterns.ts`) —
+ * real, now-successful companies' growth strategy at an equivalent
+ * *earlier* stage, not their current mature-company playbook. Filtered
+ * internally to only entries whose `observedStage` matches this
+ * strategy's own derived `stage` before ever reaching `stageComparableSignal`
+ * — a stage-mismatched comparable is silently dropped, never surfaced as
+ * if it applied, matching every other supporting-evidence-only field here
+ * (`competitorSignal` included): cited in rationale, never able to
+ * override a stage-based hard rule.
  */
 
 import type { AppProfile } from "./onboarding";
 import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
+import type { StageComparableInsight } from "./growth-patterns";
 import type { BudgetConfig, KpiGoal } from "./spend-governance";
 
 export type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
@@ -80,6 +92,12 @@ export type GrowthStrategy = {
   unlockBasis: string;
   kpiGoals: KpiGoal[];
   competitorSignal?: string;
+  /** W45 extension. Only ever built from `stageComparables` entries whose
+   * `observedStage` matches this strategy's own derived `stage` — a
+   * comparable company's *current, mature* strategy is not evidence for
+   * an app at a different stage, so a mismatched entry is silently
+   * dropped here, not surfaced as if it applied. */
+  stageComparableSignal?: string;
   derivedAt: string;
 };
 
@@ -243,6 +261,7 @@ export function deriveGrowthStrategy(
   kpiGoals: KpiGoal[],
   competitorAngles: CompetitorAngleInsight[] = [],
   trendInsights: SocialTrendInsight[] = [],
+  stageComparables: StageComparableInsight[] = [],
 ): GrowthStrategy {
   const { stage, basis } = deriveAppStage(stageSignals);
   const totalBudgetUsd = budget.monthlyBudgetUsd;
@@ -274,6 +293,13 @@ export function deriveGrowthStrategy(
     ? competitorAngles.map((c) => `${c.competitor} (${c.channel}): ${c.angle} — ${c.relevance}`).join(" | ")
     : undefined;
 
+  const stageMatchedComparables = stageComparables.filter((c) => c.observedStage === stage);
+  const stageComparableSignal = stageMatchedComparables.length > 0
+    ? stageMatchedComparables
+        .map((c) => `${c.company} (${c.approxDate}, at "${c.observedStage}" stage): ${c.strategy}`)
+        .join(" | ")
+    : undefined;
+
   return {
     stage,
     stageBasis: basis,
@@ -283,6 +309,7 @@ export function deriveGrowthStrategy(
     unlockBasis,
     kpiGoals,
     competitorSignal,
+    stageComparableSignal,
     derivedAt: new Date().toISOString(),
   };
 }
@@ -316,6 +343,9 @@ export function renderGrowthStrategySummary(strategy: GrowthStrategy): string {
   }
   if (strategy.competitorSignal) {
     lines.push(`Competitor signal: ${strategy.competitorSignal}`);
+  }
+  if (strategy.stageComparableSignal) {
+    lines.push(`Stage-matched comparables: ${strategy.stageComparableSignal}`);
   }
   lines.push(`Derived at: ${strategy.derivedAt}`);
   return lines.join("\n");

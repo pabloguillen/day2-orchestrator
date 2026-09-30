@@ -3,6 +3,7 @@ import type { AppProfile } from "./onboarding";
 import type { BudgetConfig } from "./spend-governance";
 import { deriveAppStage, deriveGrowthStrategy, renderGrowthStrategySummary } from "./growth-strategy";
 import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
+import type { StageComparableInsight } from "./growth-patterns";
 
 function makeAppProfile(overrides: Partial<AppProfile> = {}): AppProfile {
   return {
@@ -243,5 +244,107 @@ describe("deriveGrowthStrategy — output completeness", () => {
     for (const a of strategy.allocations) {
       expect(summary).toContain(a.channel);
     }
+  });
+});
+
+describe("deriveGrowthStrategy — stage-matched comparables (W45)", () => {
+  function makeComparable(overrides: Partial<StageComparableInsight> = {}): StageComparableInsight {
+    return {
+      company: "Notion",
+      category: "productivity saas",
+      observedStage: "launch",
+      approxDate: "2016",
+      strategy: "Founder-led content, no paid channel yet",
+      evidence: "Wayback Machine snapshot of notion.so from mid-2016",
+      source: "https://web.archive.org/web/2016*/notion.so",
+      ...overrides,
+    };
+  }
+
+  test("a comparable matching the app's current derived stage is cited in stageComparableSignal", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget(),
+      makeAppProfile(),
+      { activeUsers: 5, retentionSignal: null }, // launch stage
+      [],
+      [],
+      [],
+      [makeComparable({ observedStage: "launch" })],
+    );
+    expect(strategy.stage).toBe("launch");
+    expect(strategy.stageComparableSignal).toContain("Notion");
+  });
+
+  test("a comparable observed at a DIFFERENT stage than the app's current one is silently dropped, not cited", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget(),
+      makeAppProfile(),
+      { activeUsers: 5, retentionSignal: null }, // launch stage
+      [],
+      [],
+      [],
+      [makeComparable({ observedStage: "scale", company: "MegaCorp" })],
+    );
+    expect(strategy.stage).toBe("launch");
+    expect(strategy.stageComparableSignal).toBeUndefined();
+  });
+
+  test("no stageComparables means stageComparableSignal is undefined, not an empty-string fabrication", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget(),
+      makeAppProfile(),
+      { activeUsers: 5, retentionSignal: null },
+      [],
+    );
+    expect(strategy.stageComparableSignal).toBeUndefined();
+  });
+
+  test("mixed-stage comparables: only the matching-stage one is cited, the mismatched one is filtered out", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget({ monthlyBudgetUsd: 1000 }),
+      makeAppProfile(),
+      { activeUsers: 500, retentionSignal: 0.5 }, // traction stage
+      [],
+      [],
+      [],
+      [
+        makeComparable({ observedStage: "launch", company: "TooEarlyCo" }),
+        makeComparable({ observedStage: "traction", company: "RightStageCo" }),
+        makeComparable({ observedStage: "scale", company: "TooLateCo" }),
+      ],
+    );
+    expect(strategy.stage).toBe("traction");
+    expect(strategy.stageComparableSignal).toContain("RightStageCo");
+    expect(strategy.stageComparableSignal).not.toContain("TooEarlyCo");
+    expect(strategy.stageComparableSignal).not.toContain("TooLateCo");
+  });
+
+  test("a stage-matched comparable never overrides the launch-stage paid_ads hard lock", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget({ monthlyBudgetUsd: 100_000 }),
+      makeAppProfile(),
+      { activeUsers: 5, retentionSignal: null },
+      [],
+      [],
+      [],
+      [makeComparable({ observedStage: "launch", strategy: "Spent heavily on paid ads from day one" })],
+    );
+    expect(strategy.paidAcquisitionUnlocked).toBe(false);
+    expect(strategy.allocations.some((a) => a.channel === "paid_ads")).toBe(false);
+  });
+
+  test("renderGrowthStrategySummary includes the stage-comparable line when present", () => {
+    const strategy = deriveGrowthStrategy(
+      makeBudget(),
+      makeAppProfile(),
+      { activeUsers: 5, retentionSignal: null },
+      [],
+      [],
+      [],
+      [makeComparable({ observedStage: "launch" })],
+    );
+    const summary = renderGrowthStrategySummary(strategy);
+    expect(summary).toContain("Stage-matched comparables:");
+    expect(summary).toContain("Notion");
   });
 });
