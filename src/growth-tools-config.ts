@@ -50,7 +50,8 @@ export type GrowthCapability =
   | "app_store_release"
   | "seo_content"
   | "competitor_research"
-  | "website_generation";
+  | "website_generation"
+  | "design_reference";
 
 const GROWTH_CAPABILITIES: readonly GrowthCapability[] = [
   "creative_generation",
@@ -63,6 +64,7 @@ const GROWTH_CAPABILITIES: readonly GrowthCapability[] = [
   "seo_content",
   "competitor_research",
   "website_generation",
+  "design_reference",
 ];
 
 /** Safety rail 5: these three domains still need a real, app-specific

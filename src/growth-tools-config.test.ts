@@ -154,6 +154,13 @@ describe("resolveBindings", () => {
       expect(resolveBindings(config, capability, "expense-buddy")).toEqual([]);
     }
   });
+
+  test("design_reference (W46) is NOT identity-bearing — resolves without a connectedAccountRef, unlike the three that are", () => {
+    const config: GrowthToolsConfig = {
+      bindings: [makeBinding({ capability: "design_reference", mcpServerName: "figma", enabled: true })],
+    };
+    expect(resolveBindings(config, "design_reference", "expense-buddy")).toHaveLength(1);
+  });
 });
 
 describe("selectBestFitBinding", () => {

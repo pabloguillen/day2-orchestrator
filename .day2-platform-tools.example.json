@@ -50,6 +50,18 @@
       "toolPolicy": [{ "name": "publish_post", "permission_policy": "always_ask" }],
       "enabled": false,
       "connectedAccountRef": "PLACEHOLDER — set only once day2 has actually provisioned a real, app-specific social account for this app under its own agency/multi-tenant relationship (safety rail 5). Unset means this capability fails closed for every app, regardless of 'enabled' above."
+    },
+    {
+      "capability": "design_reference",
+      "mcpServerName": "figma",
+      "serverConfig": {
+        "type": "http",
+        "url": "https://mcp.figma.com/v1",
+        "headers": { "Authorization": "Bearer PLACEHOLDER_NEVER_A_REAL_KEY" }
+      },
+      "allowedTools": ["get_design_context", "get_screenshot", "get_metadata"],
+      "enabled": false,
+      "_comment": "NOT identity-bearing — day2 holds one platform-level Figma credential reusable across every app, same as tryholo/foreplay above. The app-specific piece (which Figma file) is owner-supplied separately via design-references-cli.ts's .day2-design-references.json, not a connectedAccountRef here."
     }
   ]
 }
