@@ -11,7 +11,7 @@ export type BugReport = {
   context?: string;
   /** Stable ID from the source system, used to avoid double-processing. */
   sourceId: string;
-  source: "sentry" | "manual" | "swarm";
+  source: "sentry" | "manual" | "swarm" | "health-scout";
 };
 
 export type PipelineResult =
