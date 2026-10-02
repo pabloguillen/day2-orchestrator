@@ -2,9 +2,21 @@ import { describe, expect, test } from "bun:test";
 import {
   assignVariant,
   evaluateExperiment,
+  evaluateProportionExperiment,
   MIN_SAMPLE_SIZE_PER_ARM,
   type ExperimentConfig,
 } from "./experiments";
+
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 describe("assignVariant", () => {
   const experiment: ExperimentConfig = {
@@ -205,5 +217,51 @@ describe("evaluateExperiment's underlying t-distribution p-value (verified again
     const smallerT = pValueFromRawStats(1.0, 30);
     const largerT = pValueFromRawStats(3.0, 30);
     expect(largerT).toBeLessThan(smallerT);
+  });
+});
+
+describe("evaluateProportionExperiment — Bayesian two-sample posterior comparison", () => {
+  test("a genuinely better treatment clears the default 90% posterior bar", () => {
+    const rng = mulberry32(99);
+    const control = Array.from({ length: 100 }, (_, i) => i < 35); // 35% success
+    const treatment = Array.from({ length: 100 }, (_, i) => i < 65); // 65% success
+    const result = evaluateProportionExperiment(control, treatment, rng);
+    expect(result.posteriorProbabilityTreatmentBetter).toBeGreaterThan(0.9);
+    expect(result.significant).toBe(true);
+  });
+
+  test("two statistically indistinguishable groups are not reported significant", () => {
+    const rng = mulberry32(5);
+    const control = Array.from({ length: 100 }, (_, i) => i < 49);
+    const treatment = Array.from({ length: 100 }, (_, i) => i < 50);
+    const result = evaluateProportionExperiment(control, treatment, rng);
+    expect(result.significant).toBe(false);
+  });
+
+  test("below minNPerArm reports insufficient power without sampling", () => {
+    const rng = mulberry32(1);
+    const result = evaluateProportionExperiment([true, true], [false], rng);
+    expect(result.sufficientPower).toBe(false);
+    expect(result.significant).toBe(false);
+    expect(result.note).toContain("Insufficient data");
+  });
+
+  test("is deterministic given the same seeded rng", () => {
+    const control = Array.from({ length: 50 }, (_, i) => i < 20);
+    const treatment = Array.from({ length: 50 }, (_, i) => i < 30);
+    const r1 = evaluateProportionExperiment(control, treatment, mulberry32(123));
+    const r2 = evaluateProportionExperiment(control, treatment, mulberry32(123));
+    expect(r1.posteriorProbabilityTreatmentBetter).toBe(r2.posteriorProbabilityTreatmentBetter);
+  });
+
+  test("a custom posteriorThreshold and minNPerArm are honored", () => {
+    const rng = mulberry32(7);
+    const control = Array.from({ length: 10 }, (_, i) => i < 4);
+    const treatment = Array.from({ length: 10 }, (_, i) => i < 6);
+    const result = evaluateProportionExperiment(control, treatment, rng, {
+      minNPerArm: 10,
+      posteriorThreshold: 0.6,
+    });
+    expect(result.sufficientPower).toBe(true);
   });
 });
