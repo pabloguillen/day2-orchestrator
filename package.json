@@ -8,6 +8,7 @@
     "auto-release": "bun run src/auto-release-cli.ts",
     "feed": "bun run src/owner-feed.ts",
     "swarm-fix": "bun run src/swarm-fix-cli.ts",
+    "health-scout": "bun run src/health-scout-cli.ts",
     "test": "bun test"
   },
   "dependencies": {
