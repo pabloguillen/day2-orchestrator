@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Arm } from "./growth-allocator";
 import {
+  acquisitionEventFromStoredEvent,
+  acquisitionEventsFromStoredEvents,
   executeChannelAction,
   reconcileOutcomes,
   reconcileOutcomesIntoAllocator,
@@ -11,6 +13,7 @@ import {
   type ActivationEvent,
   type ChannelExecutionOptions,
   type GrowthActionRecordForReconciliation,
+  type StoredEventLike,
 } from "./growth-execution";
 import type { Creative } from "./growth-creative";
 import type { ToolBinding } from "./growth-tools-config";
@@ -295,5 +298,76 @@ describe("reconcileOutcomesIntoAllocator — file wrapper", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("acquisitionEventFromStoredEvent — closed loop M1", () => {
+  test("maps a real acquisition_landing event with armKey/creativeId into AcquisitionEvent", () => {
+    const event: StoredEventLike = {
+      type: "acquisition_landing",
+      at: "2026-09-30T12:00:00.000Z",
+      metadata: null,
+      acquisition: {
+        touch: "first",
+        channel: "paid_social",
+        creativeId: "creative-42",
+        armKey: "social_content|video|ugc|angle-1",
+        landingPath: "/",
+        firstSeenAt: "2026-09-30T11:59:00.000Z",
+      },
+    };
+    expect(acquisitionEventFromStoredEvent("device-1", event)).toEqual({
+      creativeId: "creative-42",
+      armKey: "social_content|video|ugc|angle-1",
+      deviceId: "device-1",
+      // Uses the server-assigned `at`, not the client-supplied `firstSeenAt`.
+      landedAt: "2026-09-30T12:00:00.000Z",
+    });
+  });
+
+  test("returns null for a non-acquisition_landing event", () => {
+    const event: StoredEventLike = { type: "session_start", at: "2026-09-30T12:00:00.000Z", metadata: null };
+    expect(acquisitionEventFromStoredEvent("device-1", event)).toBeNull();
+  });
+
+  test("returns null for an organic landing with no armKey (never fabricates attribution)", () => {
+    const event: StoredEventLike = {
+      type: "acquisition_landing",
+      at: "2026-09-30T12:00:00.000Z",
+      metadata: null,
+      acquisition: {
+        touch: "first",
+        channel: "seo",
+        landingPath: "/",
+        firstSeenAt: "2026-09-30T11:59:00.000Z",
+      },
+    };
+    expect(acquisitionEventFromStoredEvent("device-1", event)).toBeNull();
+  });
+
+  test("returns null when acquisition is entirely absent (pre-M1 event)", () => {
+    const event: StoredEventLike = { type: "acquisition_landing", at: "2026-09-30T12:00:00.000Z", metadata: null };
+    expect(acquisitionEventFromStoredEvent("device-1", event)).toBeNull();
+  });
+
+  test("acquisitionEventsFromStoredEvents filters a mixed real event log down to attributable landings only", () => {
+    const events: StoredEventLike[] = [
+      { type: "session_start", at: "t0", metadata: null },
+      {
+        type: "acquisition_landing",
+        at: "t1",
+        metadata: null,
+        acquisition: { touch: "first", channel: "paid_social", creativeId: "c1", armKey: "arm1", landingPath: "/", firstSeenAt: "t0" },
+      },
+      { type: "expense_added", at: "t2", metadata: null },
+      {
+        type: "acquisition_landing",
+        at: "t3",
+        metadata: null,
+        acquisition: { touch: "first", channel: "seo", landingPath: "/", firstSeenAt: "t2" }, // organic, no arm
+      },
+    ];
+    const result = acquisitionEventsFromStoredEvents("device-9", events);
+    expect(result).toEqual([{ creativeId: "c1", armKey: "arm1", deviceId: "device-9", landedAt: "t1" }]);
   });
 });

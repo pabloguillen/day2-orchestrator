@@ -304,3 +304,66 @@ export function reconcileOutcomesIntoAllocator(
 // `armKey` metadata field (or decoding one back) doesn't need a second
 // import from `growth-allocator.ts` just for this.
 export { armKey, decodeArmKey };
+
+// ---------------------------------------------------------------------------
+// Closed loop M1 (docs/closed-loop-spec.md) — real acquisition events in
+// ---------------------------------------------------------------------------
+
+/** Structural, not imported — `orchestrator/` and `expense-buddy/` are
+ * separate deployable repos with no runtime dependency between them, same
+ * disclosed-duplication call this file already makes for its own stand-in
+ * types (see the file header, Component 5's `Creative` stand-in). Matches
+ * `expense-buddy/src/server.ts`'s real `StoredEvent` shape field-for-field. */
+export type StoredEventLike = {
+  type: string;
+  at: string;
+  metadata: unknown;
+  acquisition?: {
+    touch: "first";
+    channel: string;
+    source?: string;
+    medium?: string;
+    campaignId?: string;
+    creativeId?: string;
+    armKey?: string;
+    referrerUserId?: string;
+    landingPath: string;
+    firstSeenAt: string;
+  };
+};
+
+/**
+ * Resolves the spec's flagged conflict #3 (docs/closed-loop-spec.md
+ * header): `day2-acquisition.ts` (expense-buddy) deliberately reuses this
+ * file's own `armKey`/`creativeId` field names in its richer
+ * `AcquisitionContext`, so this adapter needs no field-mapping logic beyond
+ * picking the two fields `reconcileOutcomes` actually reads. Returns `null`
+ * for a non-`acquisition_landing` event, or one missing `armKey`/`creativeId`
+ * (an organic/unattributed landing — not every real visit came from a day2
+ * arm) — never fabricates an `AcquisitionEvent` for a landing this arm's
+ * own allocator can't attribute back to anything. Uses the event's
+ * server-assigned `at` for `landedAt`, not the client-supplied
+ * `firstSeenAt` — `at` is trustworthy (server clock, set inside
+ * `handleEvents`), a client timestamp isn't. */
+export function acquisitionEventFromStoredEvent(
+  deviceId: string,
+  event: StoredEventLike,
+): AcquisitionEvent | null {
+  if (event.type !== "acquisition_landing") return null;
+  const acq = event.acquisition;
+  if (!acq?.armKey || !acq.creativeId) return null;
+  return { creativeId: acq.creativeId, armKey: acq.armKey, deviceId, landedAt: event.at };
+}
+
+/** Batches the above over one device's full stored event log — the shape
+ * `reconcileOutcomesIntoAllocator` actually needs its `acquisitionEvents`
+ * argument built from. Filters, doesn't throw, on events with no
+ * attributable landing. */
+export function acquisitionEventsFromStoredEvents(
+  deviceId: string,
+  events: StoredEventLike[],
+): AcquisitionEvent[] {
+  return events
+    .map((e) => acquisitionEventFromStoredEvent(deviceId, e))
+    .filter((e): e is AcquisitionEvent => e !== null);
+}
