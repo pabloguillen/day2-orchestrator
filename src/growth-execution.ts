@@ -8,6 +8,7 @@ import {
   saveAllocatorState,
 } from "./growth-allocator";
 import type { AuthenticityVerdict, ClaimCheckVerdict, Creative } from "./growth-creative";
+import type { ArmLaunchGateResult } from "./growth-arm-check";
 import type { GrowthCapability, ToolBinding } from "./growth-tools-config";
 import { evaluateSpend, type BudgetConfig, type SpendDecision, type SpendLedgerEntry, type SpendRequest } from "./spend-governance";
 
@@ -68,6 +69,14 @@ export type ChannelExecutionOptions = {
    * rail 6's mechanical bar. Tracked by the caller (`growth-feed.ts`'s own
    * audit trail is the natural source), not by this function. */
   consecutiveGenericFlags: number;
+  /** Closed loop M5 (docs/closed-loop-spec.md §10): "before any spend on a
+   * new arm." Undefined for an arm that's already cleared this check in a
+   * prior execution — the caller (whoever operates the allocator) tracks
+   * "is this arm new" and only runs/supplies `growth-arm-check.ts`'s
+   * `evaluateArmLaunchGate` result for genuinely new arms; re-checking an
+   * already-cleared arm on every single execution isn't what the spec
+   * asks for and would be wasted real agent spend. */
+  armLaunchGate?: ArmLaunchGateResult;
   /** Default FALSE — opposite polarity from `release.ts`'s `dryRun`, same
    * late placement (checked last, immediately before the one real external
    * call). See the file header on why the polarity must differ: everything
@@ -80,6 +89,7 @@ export type ChannelExecutionOptions = {
 export type ChannelExecutionResult =
   | { status: "blocked_by_claims_check"; verdict: ClaimCheckVerdict }
   | { status: "blocked_by_authenticity_check"; verdict: AuthenticityVerdict }
+  | { status: "blocked_by_arm_launch_gate"; gateResult: Exclude<ArmLaunchGateResult, { allowed: true }> }
   | { status: "blocked_by_budget"; spendDecision: SpendDecision }
   | { status: "blocked_by_tool_policy"; reason: string }
   | { status: "blocked_by_unconnected_account"; capability: GrowthCapability }
@@ -99,14 +109,15 @@ function hasAlwaysDenyPolicy(binding: ToolBinding): boolean {
  * Pure — see the file header. Order, real and unconditional up to the last
  * step, matching the plan exactly: claims-check → authenticity-check
  * (blocks only on the repeated-consecutive-flag rule, safety rail 6) →
- * account-connection check (`blocked_by_unconnected_account`, safety rail
- * 5) → `evaluateSpend` (real budget math, safety rails 1/2/3/7 all apply
- * here since they live inside `evaluateSpend` itself) → tool-policy check
- * → only then `allowLiveAction`, immediately before the one real external
- * call. The caller is responsible for calling `recordSpend` with the
- * returned `spendDecision` afterward — this function never writes to disk,
- * matching `spend-governance.ts`'s own "the ledger write is the caller's
- * job, evaluation is pure" split.
+ * arm-launch gate (closed loop M5, §10 — only when the caller supplies one,
+ * for a genuinely new arm) → account-connection check
+ * (`blocked_by_unconnected_account`, safety rail 5) → `evaluateSpend` (real
+ * budget math, safety rails 1/2/3/7 all apply here since they live inside
+ * `evaluateSpend` itself) → tool-policy check → only then `allowLiveAction`,
+ * immediately before the one real external call. The caller is responsible
+ * for calling `recordSpend` with the returned `spendDecision` afterward —
+ * this function never writes to disk, matching `spend-governance.ts`'s own
+ * "the ledger write is the caller's job, evaluation is pure" split.
  */
 export async function executeChannelAction(opts: ChannelExecutionOptions): Promise<ChannelExecutionResult> {
   if (!opts.claimsCheck.truthful || opts.claimsCheck.fabricatesTestimonialIdentity) {
@@ -115,6 +126,10 @@ export async function executeChannelAction(opts: ChannelExecutionOptions): Promi
 
   if (opts.authenticityCheck.readsAsGeneric && opts.consecutiveGenericFlags >= 1) {
     return { status: "blocked_by_authenticity_check", verdict: opts.authenticityCheck };
+  }
+
+  if (opts.armLaunchGate && !opts.armLaunchGate.allowed) {
+    return { status: "blocked_by_arm_launch_gate", gateResult: opts.armLaunchGate };
   }
 
   if (opts.requiredCapability && !opts.toolBinding) {
