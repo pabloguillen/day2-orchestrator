@@ -169,6 +169,50 @@ describe("executeChannelAction — ordering and gates", () => {
   });
 });
 
+describe("executeChannelAction — closed loop M5, armLaunchGate", () => {
+  test("undefined armLaunchGate (the default — an already-cleared arm) never blocks anything new", async () => {
+    const result = await executeChannelAction(baseOptions());
+    expect(result.status).not.toBe("blocked_by_arm_launch_gate");
+  });
+
+  test("a real blocked armLaunchGate result blocks before spend is ever evaluated", async () => {
+    const gateResult = {
+      allowed: false as const,
+      reason: "broken_path" as const,
+      reachabilityVerdict: {
+        reachedActivationWithinSteps: false,
+        stepsToActivation: null,
+        maxSteps: 10,
+        errorsSeen: [],
+        accessibilityIssues: [],
+        isError: false,
+        summary: "Did not reach activation within 10 steps.",
+        costUsd: 0.02,
+      },
+    };
+    const result = await executeChannelAction(baseOptions({ armLaunchGate: gateResult }));
+    expect(result.status).toBe("blocked_by_arm_launch_gate");
+    if (result.status !== "blocked_by_arm_launch_gate") throw new Error("unreachable");
+    expect(result.gateResult).toBe(gateResult);
+  });
+
+  test("an allowed armLaunchGate result never blocks — real spend evaluation proceeds normally", async () => {
+    const result = await executeChannelAction(baseOptions({ armLaunchGate: { allowed: true } }));
+    expect(result.status).not.toBe("blocked_by_arm_launch_gate");
+  });
+
+  test("armLaunchGate is checked before budget — a blocked arm never even reaches evaluateSpend", async () => {
+    const gateResult = {
+      allowed: false as const,
+      reason: "unsupported_claims" as const,
+      claimsVerdict: truthfulClaims, // shape only matters for typing here
+    };
+    const tinyBudget: BudgetConfig = { monthlyBudgetUsd: 10000, periodStart: "2026-09-01T00:00:00.000Z", killSwitch: false };
+    const result = await executeChannelAction(baseOptions({ armLaunchGate: gateResult, budget: tinyBudget }));
+    expect(result.status).toBe("blocked_by_arm_launch_gate"); // not blocked_by_budget, even with a huge budget available
+  });
+});
+
 const goodArm: Arm = { channel: "paid_ads", assetType: "video", videoFormat: "ugc", formatTag: "ugc-testimonial-video-ad" };
 
 function record(overrides: Partial<GrowthActionRecordForReconciliation> = {}): GrowthActionRecordForReconciliation {
