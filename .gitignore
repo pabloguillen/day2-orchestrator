@@ -8,3 +8,19 @@ test-reports/
 # secrets never get committed; .day2-platform-tools.example.json documents
 # the shape with placeholder values only.
 .day2-platform-tools.json
+
+# day2 console (day2 console plan §4) — the multi-app registry and any
+# zip-uploaded/cloned app checkouts it manages. `repoPath` values are
+# absolute, machine-specific paths meaningless in version control;
+# managed-repos/ holds real extracted/cloned source trees that don't belong
+# in the orchestrator's own history.
+.day2-apps.json
+managed-repos/
+
+# Generated run output — append-only, machine/run-specific, not source.
+# Same precedent as removing the orchestrator state file from tracking
+# (expense-buddy's "remove-orchestrator-state-file" commit).
+day2-proposals.jsonl
+day2-release-results.jsonl
+day2-autonomy-audit.jsonl
+worktrees-tmp-check/
