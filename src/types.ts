@@ -24,14 +24,31 @@ export type PipelineResult =
 
 /** Governance levels L0-L5, per source doc "Autonomy levels and governance".
  * Autonomy is earned per area, not granted platform-wide — an area only
- * moves up after a track record at the level below. */
+ * moves up after a track record at the level below.
+ *
+ * **Current implementation reality (decided 2026-10-03, documented not
+ * built):** only the L3 threshold is behaviorally real. `autonomy.ts`'s
+ * `evaluateAutonomy` checks exactly one thing — `level >= L3` — to decide
+ * whether an area auto-ships. L4 ("runs product-wide experiments") and L5
+ * ("promotes new features") are real target definitions from the source
+ * doc, kept here as the north star for where per-area trust eventually
+ * goes, but they are NOT yet distinct code paths: setting an area to L4 or
+ * L5 today has the exact same effect as L3. This was a deliberate choice,
+ * not an oversight — graduated autonomy beyond "ships low-risk fixes
+ * automatically" isn't something this project has decided it wants yet
+ * (there's nothing today that would exercise L4's "product-wide
+ * experiments" or L5's "promotes new features" — Step 3's experiment
+ * engine has zero active experiments, and Step 4 has never executed a
+ * real external action). Revisit this comment, not just the behavior,
+ * when/if that changes. See `docs/platform-audit-findings.md` (Cross-
+ * cutting #3) for the audit that surfaced this gap. */
 export type AutonomyLevel =
   | "L0" // Observe — reports issues/opportunities; human decides and builds everything
   | "L1" // Suggest — diagnoses and drafts fixes/proposals; human reviews and implements
   | "L2" // Prepare — opens tested PRs and experiment plans; human approves and merges
   | "L3" // Act on low risk — ships low-risk fixes and per-user adaptations; human reviews summaries, can veto
-  | "L4" // Experiment — runs product-wide experiments within guardrails; human sets goals and guardrails
-  | "L5"; // Evolve — promotes new features and blocks; human owns vision and core
+  | "L4" // Experiment (not yet behaviorally distinct from L3 — see note above) — runs product-wide experiments within guardrails; human sets goals and guardrails
+  | "L5"; // Evolve (not yet behaviorally distinct from L3 — see note above) — promotes new features and blocks; human owns vision and core
 
 /** One named zone of the app (e.g. "ui", "billing") mapped to the path globs
  * its files live under, with its own autonomy level. */

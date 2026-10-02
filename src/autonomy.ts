@@ -10,6 +10,12 @@ import type { AutonomyConfig, AutonomyDecision, AutonomyLevel, ChangeForAutonomy
  * touching real release mechanics.
  */
 
+/** L4/L5 are ordered above L3 here (for `levelIndex`/`minLevel`) but nothing
+ * in this file branches on them specifically — see the "Current
+ * implementation reality" note on `AutonomyLevel` in types.ts. Setting an
+ * area to L4 or L5 ships exactly like L3 today; this is a deliberate,
+ * documented decision (2026-10-03), not a bug to fix by adding more branches
+ * here without a real L4/L5 behavior to attach them to first. */
 const LEVEL_ORDER: AutonomyLevel[] = ["L0", "L1", "L2", "L3", "L4", "L5"];
 
 function levelIndex(level: AutonomyLevel): number {

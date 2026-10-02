@@ -67,9 +67,19 @@ import type { AutonomyLevel } from "./types";
  * JSON-error wrapping, which is simpler to apply once here than to repeat
  * per route.
  *
- * No auth in this phase — acceptable only because this binds to localhost
- * only (day2 console plan §5/§8 open question 2). A hard blocker before this
- * ever runs anywhere else.
+ * No auth, no multi-tenancy, in this phase — acceptable only because this
+ * binds to localhost only (day2 console plan §5/§8 open question 2) and
+ * there is exactly one operator and, today, one real app. **Documented
+ * decision, not an oversight (2026-10-03):** this is deliberately deferred
+ * until there's a second real app or a second real user of the console —
+ * neither exists yet, so building a login/session/tenant model now would be
+ * speculative. A hard blocker before any of the following become true:
+ * this server binds to anything but localhost, a second person needs their
+ * own view/permissions, or app data needs to be isolated between operators.
+ * See `docs/platform-audit-findings.md` (Cross-cutting #8) for the audit
+ * that raised this; the CORS header below was tightened as part of this
+ * same pass since a wildcard origin is a real localhost drive-by exposure
+ * regardless of the auth decision.
  */
 
 const PORT = Number(process.env.DAY2_CONSOLE_API_PORT ?? 4700);
@@ -429,8 +439,17 @@ route("GET", "/api/apps/:id/evolution/proposals", (_req, params) => {
 
 // ---- Dispatch ----
 
+/** Scoped to the console's own origin, not "*" — this server binds to
+ * localhost only, so a wildcard CORS header's one real effect is letting
+ * ANY webpage open in the operator's browser read responses from it (a
+ * classic localhost drive-by: the exposure CORS exists to prevent is same-
+ * machine-different-origin, not off-machine). Override via
+ * DAY2_CONSOLE_ORIGIN if the console is ever served from somewhere other
+ * than its `vite dev --port 3000` default. */
+const CONSOLE_ORIGIN = process.env.DAY2_CONSOLE_ORIGIN ?? "http://localhost:3000";
+
 const CORS_HEADERS = {
-  "access-control-allow-origin": "*",
+  "access-control-allow-origin": CONSOLE_ORIGIN,
   "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
   "access-control-allow-headers": "content-type",
 };
