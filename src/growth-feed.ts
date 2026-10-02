@@ -3,6 +3,7 @@ import type { AllocatorState, Arm } from "./growth-allocator";
 import { renderAllocatorSummary } from "./growth-allocator";
 import type { ChannelExecutionResult } from "./growth-execution";
 import type { AuthenticityVerdict, ClaimCheckVerdict } from "./growth-creative";
+import type { JudgePrediction } from "./growth-judge-model";
 import type { AppStage } from "./growth-strategy";
 import type { GrowthCapability } from "./growth-tools-config";
 
@@ -34,6 +35,20 @@ export type GrowthActionRecord = {
   creativeId: string;
   strategy: { stage: AppStage; channel: string; competitorSignal?: string };
   arm: Arm;
+  /** Passthrough from `Creative.groundedInPatternId` (growth-creative.ts,
+   * Part 4) — set only when this action's creative was genuinely grounded
+   * in a real, validated `TransferablePattern`. Absent on every record
+   * written before this field existed; every reader treats `undefined`
+   * the same as "not grounded in anything," same backward-compatible
+   * discipline as `AllocatorState.reconciledCreativeIds`. */
+  groundedInPatternId?: string;
+  /** Which real app this action belongs to — absent on every record today
+   * (day2 powers exactly one app; see `apps-registry.ts`'s own in-flight
+   * `AppEntry.id`, the convention this should align with once real
+   * multi-app operation exists). `growth-judge-model.ts`'s
+   * `LabeledOutcome.appId` defaults to `UNKNOWN_APP_ID` when this is
+   * absent, never silently dropped. */
+  appId?: string;
   /** `null` for organic/free actions needing no external tool at all —
    * matches `growth-execution.ts`'s own `requiredCapability?`/`toolBinding?`
    * optionality; not every real action used a bound MCP tool. */
@@ -44,6 +59,15 @@ export type GrowthActionRecord = {
   authenticityCheck: AuthenticityVerdict;
   executionResult: ChannelExecutionResult["status"];
   kpiSnapshot?: Record<string, number>;
+  /** Advisory only, from `growth-judge-model.ts`'s `predictForCandidate`
+   * (Part 4) — computed by whoever assembles this record, from the real
+   * `claimsCheck`/`authenticityCheck` above plus `arm`/`strategy.stage`.
+   * Never gates or alters anything here or in `growth-execution.ts`; purely
+   * a transparency note. `basis: "no_model_fallback"` on every record
+   * today (zero real executions exist to train on) — `renderActionLine`
+   * deliberately suppresses the note in that case rather than printing
+   * "no prediction" on every single line forever. */
+  judgePrediction?: JudgePrediction;
 };
 
 /** Append-only JSONL, same idiom as `autonomy.ts`'s `recordAutonomyAudit` —
@@ -85,13 +109,24 @@ function dayKey(iso: string): string {
   return iso.slice(0, 10);
 }
 
+/** `undefined`/`no_model_fallback` renders as nothing — showing "no
+ * prediction yet" on every single line, forever, until real execution
+ * exists would be noise, not transparency. Only a real, trained
+ * prediction is worth a line. */
+function renderJudgeNote(prediction: JudgePrediction | undefined): string {
+  if (!prediction || prediction.basis !== "learned_model") return "";
+  const pct = Math.round(prediction.predictedSuccessProbability * 100);
+  return ` — judge model: ${pct}% predicted (${prediction.confidence} confidence, n=${prediction.trainedOnExampleCount})`;
+}
+
 function renderActionLine(record: GrowthActionRecord): string {
   const toolNote = record.toolUsed
     ? `via ${record.toolUsed.mcpServerName} (${record.toolUsed.reason})`
     : "organic, no external tool";
   const formatLabel = `${record.arm.assetType}${record.arm.videoFormat ? ` (${record.arm.videoFormat})` : ""} / ${record.arm.formatTag}`;
   const genericFlag = record.authenticityCheck.readsAsGeneric ? " — ⚠ flagged as reading generic" : "";
-  return `  - [${record.strategy.channel}] ${formatLabel} — ${toolNote}, $${record.spend.requested.toFixed(2)} requested (${record.executionResult})${genericFlag}`;
+  const judgeNote = renderJudgeNote(record.judgePrediction);
+  return `  - [${record.strategy.channel}] ${formatLabel} — ${toolNote}, $${record.spend.requested.toFixed(2)} requested (${record.executionResult})${genericFlag}${judgeNote}`;
 }
 
 /** Plain-language, day-grouped, extends `owner-feed.ts`'s own pattern —

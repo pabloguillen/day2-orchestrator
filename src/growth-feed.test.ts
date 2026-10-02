@@ -155,4 +155,33 @@ describe("renderGrowthFeed", () => {
     const feed = renderGrowthFeed([makeRecord()], emptyAllocatorState);
     expect(feed.trimEnd().endsWith("No formats have been tried yet.")).toBe(true);
   });
+
+  test("shows no judge-model note at all when the record has none — true for every record predating this field", () => {
+    const feed = renderGrowthFeed([makeRecord()], emptyAllocatorState);
+    expect(feed).not.toContain("judge model");
+  });
+
+  test("shows no judge-model note for a no_model_fallback prediction — suppressing noise, not a real signal", () => {
+    const feed = renderGrowthFeed(
+      [
+        makeRecord({
+          judgePrediction: { predictedSuccessProbability: 0.5, confidence: "none", basis: "no_model_fallback", trainedOnExampleCount: 0 },
+        }),
+      ],
+      emptyAllocatorState,
+    );
+    expect(feed).not.toContain("judge model");
+  });
+
+  test("shows the real prediction when the judge model has actually been trained", () => {
+    const feed = renderGrowthFeed(
+      [
+        makeRecord({
+          judgePrediction: { predictedSuccessProbability: 0.73, confidence: "medium", basis: "learned_model", trainedOnExampleCount: 300 },
+        }),
+      ],
+      emptyAllocatorState,
+    );
+    expect(feed).toContain("judge model: 73% predicted (medium confidence, n=300)");
+  });
 });

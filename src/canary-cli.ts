@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { isFailureStatus, runCanaryRelease } from "./release";
+import { isFailureStatus, recordReleaseResult, runCanaryRelease } from "./release";
 
 /**
  * Explicit CLI entrypoint for the canary release path — deliberately
@@ -27,6 +27,7 @@ function parseArgs() {
     skipCalibration: args.includes("--skip-calibration"),
     allowCalibrationOverride: args.includes("--allow-calibration-override"),
     calibrationAuditFile: get("--calibration-audit-file"),
+    releaseResultsFile: get("--release-results-file"),
   };
 }
 
@@ -38,7 +39,7 @@ async function main() {
         "--sentry-org <org> --sentry-project <project> --worker-name <cloudflare-worker-name> " +
         "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--dry-run] " +
         "[--skip-swarm-check] [--skip-calibration] [--allow-calibration-override] " +
-        "[--calibration-audit-file <path>]",
+        "[--calibration-audit-file <path>] [--release-results-file <path>]",
     );
     process.exit(1);
   }
@@ -62,6 +63,8 @@ async function main() {
     allowCalibrationOverride: opts.allowCalibrationOverride,
     calibrationAuditFile: opts.calibrationAuditFile,
   });
+
+  recordReleaseResult(opts.releaseResultsFile ?? "day2-release-results.jsonl", opts.sha, result);
 
   console.log(`[day2-release] Result: ${JSON.stringify(result, null, 2)}`);
   if (isFailureStatus(result.status)) {

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { $ } from "bun";
 import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
-import { isFailureStatus, maybeAutoRelease } from "./release";
+import { isFailureStatus, maybeAutoRelease, recordReleaseResult } from "./release";
 import type { AutonomyConfig, ChangeForAutonomy } from "./types";
 
 /**
@@ -43,6 +43,7 @@ export function parseArgs() {
     auditFile: get("--audit-file"),
     dryRun: args.includes("--dry-run"),
     summary: get("--summary"),
+    releaseResultsFile: get("--release-results-file"),
   };
 }
 
@@ -82,7 +83,7 @@ async function main() {
         "--sentry-org <org> --sentry-project <project> --worker-name <cloudflare-worker-name> " +
         "[--source-id <id>] [--files-changed a.ts,b.ts] [--bugfix] [--verifier-approved] [--ci-passed] " +
         "[--canary-percent 5] [--monitor-minutes 15] [--error-threshold 0] [--audit-file path] [--dry-run] " +
-        "[--summary \"human-readable title\"]\n\n" +
+        "[--summary \"human-readable title\"] [--release-results-file path]\n\n" +
         "Decision-only by default: with no .day2-autonomy.json in --repo, this always defers to a " +
         "human (L2) — see COORDINATION.md W5 for why nothing triggers this automatically yet.",
     );
@@ -131,6 +132,7 @@ async function main() {
       `(level ${decision.level}, area "${decision.area}")\n[day2-auto-release] ${decision.reason}`,
   );
   if (result) {
+    recordReleaseResult(opts.releaseResultsFile ?? "day2-release-results.jsonl", opts.sha, result);
     console.log(`[day2-auto-release] Release result: ${JSON.stringify(result, null, 2)}`);
     if (isFailureStatus(result.status)) {
       process.exitCode = 1;

@@ -190,7 +190,39 @@ export type AcquisitionEvent = { creativeId: string; armKey: string; deviceId: s
  * it, not hardcoded here. */
 export type ActivationEvent = { deviceId: string; occurredAt: string };
 
-const DEFAULT_ACTIVATION_WINDOW_DAYS = 14;
+export const DEFAULT_ACTIVATION_WINDOW_DAYS = 14;
+
+/**
+ * Pure join, extracted out of `reconcileOutcomes`'s loop body: does a real
+ * `acquisition_landing` exist yet for this creative, and if so, did a real
+ * activation signal follow within the window? Returns `undefined` when
+ * there's no real signal at all yet — "retry on the next reconciliation
+ * run," same meaning the inline `continue` had before this was pulled out.
+ *
+ * Exported because `growth-judge-model.ts` needs this exact same join for
+ * a genuinely different purpose: it needs the per-creative label itself to
+ * persist as a training example, not just the folded `ArmStats` aggregate
+ * `reconcileOutcomes` produces below. Factored out once, here, rather than
+ * re-derived or allowed to drift in a second file.
+ */
+export function resolveActivationOutcome(
+  creativeId: string,
+  acquisitionEvents: AcquisitionEvent[],
+  activationEvents: ActivationEvent[],
+  windowDays: number = DEFAULT_ACTIVATION_WINDOW_DAYS,
+): { landing: AcquisitionEvent; success: boolean } | undefined {
+  const landing = acquisitionEvents.find((e) => e.creativeId === creativeId);
+  if (!landing) return undefined;
+
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  const landedAtMs = new Date(landing.landedAt).getTime();
+  const success = activationEvents.some((a) => {
+    if (a.deviceId !== landing.deviceId) return false;
+    const delta = new Date(a.occurredAt).getTime() - landedAtMs;
+    return delta >= 0 && delta <= windowMs;
+  });
+  return { landing, success };
+}
 
 /**
  * Pure. Folds real-world outcomes for `executed` `GrowthActionRecord`s into
@@ -220,23 +252,15 @@ export function reconcileOutcomes(
   const alreadyReconciled = new Set(state.reconciledCreativeIds ?? []);
   let next = state;
   const newlyReconciled: string[] = [];
-  const windowMs = windowDays * 24 * 60 * 60 * 1000;
 
   for (const record of records) {
     if (alreadyReconciled.has(record.creativeId)) continue;
     if (record.executionResult !== "executed") continue;
 
-    const landing = acquisitionEvents.find((e) => e.creativeId === record.creativeId);
-    if (!landing) continue; // no real signal yet — retry on the next reconciliation run
+    const resolved = resolveActivationOutcome(record.creativeId, acquisitionEvents, activationEvents, windowDays);
+    if (!resolved) continue; // no real signal yet — retry on the next reconciliation run
 
-    const landedAtMs = new Date(landing.landedAt).getTime();
-    const success = activationEvents.some((a) => {
-      if (a.deviceId !== landing.deviceId) return false;
-      const delta = new Date(a.occurredAt).getTime() - landedAtMs;
-      return delta >= 0 && delta <= windowMs;
-    });
-
-    next = recordOutcome(next, record.arm, success, record.spendRequested);
+    next = recordOutcome(next, record.arm, resolved.success, record.spendRequested);
     newlyReconciled.push(record.creativeId);
   }
 

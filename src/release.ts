@@ -1,5 +1,5 @@
 import { $ } from "bun";
-import { rmSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy, recordAutonomyAudit } from "./autonomy";
 import { calibrateSwarmFailures, recordCalibrationAudit, type CalibrationVerdict } from "./calibration";
 import { checkoutSha, cloneIsolatedWorkspace } from "./git";
@@ -389,6 +389,29 @@ export async function runCanaryRelease(opts: CanaryReleaseOptions): Promise<Cana
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+}
+
+export type RecordedReleaseResult = { timestamp: string; sha: string; result: CanaryReleaseResult };
+
+/**
+ * Additive persistence for a real, previously-flagged gap (day2 console plan
+ * §3.2): `CanaryReleaseResult` was never written anywhere — only ever
+ * `console.log`ged by `canary-cli.ts`/`auto-release-cli.ts`. Same append-only
+ * JSONL idiom as `recordAutonomyAudit`/`recordGrowthAction` — every attempt
+ * is recorded regardless of outcome, so the Releases page has a real history
+ * to show across a page reload instead of re-deriving it from the autonomy
+ * audit (which only ever recorded the *decision*, not the release outcome).
+ */
+export function recordReleaseResult(auditFile: string, sha: string, result: CanaryReleaseResult): void {
+  const entry: RecordedReleaseResult = { timestamp: new Date().toISOString(), sha, result };
+  appendFileSync(auditFile, `${JSON.stringify(entry)}\n`);
+}
+
+export function loadReleaseResults(auditFile: string, since?: Date): RecordedReleaseResult[] {
+  if (!existsSync(auditFile)) return [];
+  const lines = readFileSync(auditFile, "utf-8").trim().split("\n").filter(Boolean);
+  const entries = lines.map((l) => JSON.parse(l) as RecordedReleaseResult);
+  return since ? entries.filter((e) => new Date(e.timestamp) >= since) : entries;
 }
 
 /**

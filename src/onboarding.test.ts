@@ -1,5 +1,70 @@
 import { describe, expect, test } from "bun:test";
-import { parseAppProfileFields, renderAppProfilePlainLanguage, type AppProfile } from "./onboarding";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  loadAppProfile,
+  parseAppProfileFields,
+  renderAppProfilePlainLanguage,
+  saveAppProfile,
+  type AppProfile,
+} from "./onboarding";
+
+function withTmpDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "day2-app-profile-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const sampleProfile = (): AppProfile => ({
+  purpose: "Tracks everyday expenses so users know where their money goes.",
+  targetUsers: "Individuals who want a lightweight expense log.",
+  featureMap: ["Add an expense", "View spend summary"],
+  styleGuide: { colors: ["#111827"], framework: "Tailwind" },
+  toneOfVoice: "Casual and friendly.",
+  businessModel: null,
+  caveats: [],
+  competitors: null,
+  currentState: null,
+  currentStateCaveat: "No Sentry project configured for this app yet.",
+  scannedAt: "2026-09-30T00:00:00.000Z",
+});
+
+describe("loadAppProfile / saveAppProfile", () => {
+  test("returns null when the file has never been written — a normal state, not an error", () => {
+    withTmpDir((dir) => {
+      expect(loadAppProfile(join(dir, ".day2-app-profile.json"))).toBeNull();
+    });
+  });
+
+  test("round-trips a real profile", () => {
+    withTmpDir((dir) => {
+      const path = join(dir, ".day2-app-profile.json");
+      const profile = sampleProfile();
+      saveAppProfile(path, profile);
+      expect(loadAppProfile(path)).toEqual(profile);
+    });
+  });
+
+  test("throws on invalid JSON rather than silently overwriting", () => {
+    withTmpDir((dir) => {
+      const path = join(dir, ".day2-app-profile.json");
+      writeFileSync(path, "not json");
+      expect(() => loadAppProfile(path)).toThrow();
+    });
+  });
+
+  test("throws on JSON that doesn't look like a profile", () => {
+    withTmpDir((dir) => {
+      const path = join(dir, ".day2-app-profile.json");
+      writeFileSync(path, JSON.stringify({ foo: "bar" }));
+      expect(() => loadAppProfile(path)).toThrow();
+    });
+  });
+});
 
 const validJsonBlock = () => `Some exploration notes here.
 

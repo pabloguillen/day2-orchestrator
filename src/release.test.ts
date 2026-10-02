@@ -1,8 +1,66 @@
 import { describe, expect, test, afterEach, mock } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { evaluateGuardrail, fetchCanaryErrorCount, isFailureStatus, maybeAutoRelease } from "./release";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  evaluateGuardrail,
+  fetchCanaryErrorCount,
+  isFailureStatus,
+  loadReleaseResults,
+  maybeAutoRelease,
+  recordReleaseResult,
+} from "./release";
 import { DEFAULT_AUTONOMY_CONFIG } from "./autonomy";
 import type { ChangeForAutonomy } from "./types";
+
+function withTmpDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "day2-release-results-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("recordReleaseResult / loadReleaseResults", () => {
+  test("returns an empty list when no file exists yet", () => {
+    withTmpDir((dir) => {
+      expect(loadReleaseResults(join(dir, "day2-release-results.jsonl"))).toEqual([]);
+    });
+  });
+
+  test("records and loads a release result, with a real timestamp", () => {
+    withTmpDir((dir) => {
+      const file = join(dir, "day2-release-results.jsonl");
+      recordReleaseResult(file, "abc123", { status: "promoted", errorCount: 0, canaryVersionId: "v1" });
+      const results = loadReleaseResults(file);
+      expect(results).toHaveLength(1);
+      expect(results[0]!.sha).toBe("abc123");
+      expect(results[0]!.result).toEqual({ status: "promoted", errorCount: 0, canaryVersionId: "v1" });
+      expect(new Date(results[0]!.timestamp).toString()).not.toBe("Invalid Date");
+    });
+  });
+
+  test("appends rather than overwrites, preserving every prior attempt", () => {
+    withTmpDir((dir) => {
+      const file = join(dir, "day2-release-results.jsonl");
+      recordReleaseResult(file, "sha1", { status: "rolled_back", reason: "errors", errorCount: 3, canaryVersionId: "v1", stableVersionId: "v0" });
+      recordReleaseResult(file, "sha2", { status: "promoted", errorCount: 0, canaryVersionId: "v2" });
+      const results = loadReleaseResults(file);
+      expect(results).toHaveLength(2);
+      expect(results.map((r) => r.sha)).toEqual(["sha1", "sha2"]);
+    });
+  });
+
+  test("since filters out entries recorded before the cutoff", () => {
+    withTmpDir((dir) => {
+      const file = join(dir, "day2-release-results.jsonl");
+      recordReleaseResult(file, "sha1", { status: "promoted", errorCount: 0, canaryVersionId: "v1" });
+      const cutoff = new Date(Date.now() + 60_000);
+      expect(loadReleaseResults(file, cutoff)).toEqual([]);
+    });
+  });
+});
 
 describe("isFailureStatus", () => {
   // Real bug this guards against (docs/step3-self-evolving-plan.md's

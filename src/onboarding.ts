@@ -1,4 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 /**
  * One-click onboarding (COORDINATION.md W18, Step 1 roadmap) — "Confirm what
@@ -278,6 +279,35 @@ export async function scanAppProfile(
       scannedAt: new Date().toISOString(),
     },
   };
+}
+
+export const APP_PROFILE_FILENAME = ".day2-app-profile.json";
+
+/**
+ * Additive persistence for a real, previously-flagged gap (day2 console plan
+ * §3.1): `scanAppProfile`'s result was never persisted anywhere — only ever
+ * held in memory by whatever called it. `null` means "never scanned yet," a
+ * normal state, not an error. Written only at the end of the owner-confirmed
+ * "Go live" onboarding step, never auto-persisted straight out of a scan, so
+ * a half-reviewed scan can't silently become the record of truth.
+ */
+export function loadAppProfile(path: string): AppProfile | null {
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, "utf-8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${path} exists but isn't valid JSON — fix or remove it by hand before using this tool.`);
+  }
+  if (!parsed || typeof parsed !== "object" || typeof (parsed as { purpose?: unknown }).purpose !== "string") {
+    throw new Error(`${path} exists but doesn't look like a valid app profile — refusing to guess or overwrite it.`);
+  }
+  return parsed as AppProfile;
+}
+
+export function saveAppProfile(path: string, profile: AppProfile): void {
+  writeFileSync(path, `${JSON.stringify(profile, null, 2)}\n`);
 }
 
 /** Renders the profile the way the source doc describes it reaching the

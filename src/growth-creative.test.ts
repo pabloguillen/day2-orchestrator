@@ -146,6 +146,42 @@ describe("parseCreativeGenerationResult", () => {
       expect(result.creatives[0]!.videoAssetRef).toBeUndefined();
     }
   });
+
+  test("keeps groundedInPatternId when it matches a real, provided pattern id", () => {
+    const text = `${GEN_MARKER}\n${JSON.stringify({
+      status: "generated",
+      creatives: [{ headline: "A", body: "B", claimsCheckedAgainst: [], groundedInPatternId: "pattern-1" }],
+    })}`;
+    const result = parseCreativeGenerationResult(text, arm, "new-users", 0.02, new Set(["pattern-1", "pattern-2"]));
+    expect(result.status).toBe("generated");
+    if (result.status === "generated") {
+      expect(result.creatives[0]!.groundedInPatternId).toBe("pattern-1");
+    }
+  });
+
+  test("drops a fabricated/stale groundedInPatternId that doesn't match anything the agent was actually shown", () => {
+    const text = `${GEN_MARKER}\n${JSON.stringify({
+      status: "generated",
+      creatives: [{ headline: "A", body: "B", claimsCheckedAgainst: [], groundedInPatternId: "made-up-id" }],
+    })}`;
+    const result = parseCreativeGenerationResult(text, arm, "new-users", 0.02, new Set(["pattern-1"]));
+    expect(result.status).toBe("generated");
+    if (result.status === "generated") {
+      expect(result.creatives[0]!.groundedInPatternId).toBeUndefined();
+    }
+  });
+
+  test("drops groundedInPatternId by default (no valid ids passed) — fails closed, never trusts an unvalidated claim", () => {
+    const text = `${GEN_MARKER}\n${JSON.stringify({
+      status: "generated",
+      creatives: [{ headline: "A", body: "B", claimsCheckedAgainst: [], groundedInPatternId: "pattern-1" }],
+    })}`;
+    const result = parseCreativeGenerationResult(text, arm, "new-users", 0.02);
+    expect(result.status).toBe("generated");
+    if (result.status === "generated") {
+      expect(result.creatives[0]!.groundedInPatternId).toBeUndefined();
+    }
+  });
 });
 
 describe("parseClaimCheckVerdict", () => {
