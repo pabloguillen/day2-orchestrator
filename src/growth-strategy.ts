@@ -40,6 +40,8 @@ import type { AppProfile } from "./onboarding";
 import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
 import type { StageComparableInsight } from "./growth-patterns";
 import type { BudgetConfig, KpiGoal } from "./spend-governance";
+import { computeDauWauMau, computeRetention, DEFAULT_EXPENSE_BUDDY_METRIC_CONFIG } from "./metrics";
+import type { AppMetricConfig, EventLike } from "./metrics";
 
 export type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
 
@@ -349,4 +351,168 @@ export function renderGrowthStrategySummary(strategy: GrowthStrategy): string {
   }
   lines.push(`Derived at: ${strategy.derivedAt}`);
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Closed loop M3 (docs/closed-loop-spec.md §9) — additive only.
+// `deriveAppStage`/`deriveGrowthStrategy` above are untouched; everything
+// below is new.
+// ---------------------------------------------------------------------------
+
+/**
+ * Spec §9: "Extend growth-strategy.ts::deriveAppStage to read from the
+ * metric layer." `deriveAppStage` itself stays a pure function of
+ * `StageSignals` — this is a new, additive function computing those same
+ * `StageSignals` from M2's real metric layer (`orchestrator/src/metrics/`)
+ * instead of the old `/api/day2-stats` aggregate (W39). Callers swap the
+ * *source* of the signals; `deriveAppStage`'s own tested logic is
+ * unaffected either way.
+ */
+export function deriveStageSignalsFromMetrics(
+  events: EventLike[],
+  asOfIso: string,
+  config: AppMetricConfig = DEFAULT_EXPENSE_BUDDY_METRIC_CONFIG,
+): StageSignals {
+  const { mau } = computeDauWauMau(events, config, asOfIso, "app");
+  const activeUsers = mau[0]?.value ?? 0;
+  const retention = computeRetention(events, { ...config, retentionWindowsDays: [30] }, asOfIso, "app");
+  const d30 = retention[30]?.[0];
+  return { activeUsers, retentionSignal: d30?.value ?? null };
+}
+
+export type StageGoalConfig = { targetKpis: string[]; guardrailKpis: string[] };
+
+/**
+ * Spec §9's target-KPI/guardrail table. Disclosed gap: `scale`'s own
+ * target KPIs per the spec's literal table are "Net revenue retention,
+ * margin" — neither is defined anywhere in spec §4.3's KPI catalog (or
+ * built in M2). Listed here as-is, verbatim from the spec, rather than
+ * silently substituting a built metric that means something different —
+ * a future session building these two KPIs for real should update M2's
+ * `monetization-kpis.ts`, not redefine this table to route around the gap.
+ */
+export const STAGE_GOALS: Record<AppStage, StageGoalConfig> = {
+  launch: { targetKpis: ["activation_rate", "d7_retention"], guardrailKpis: ["crash_free_sessions", "error_rate"] },
+  traction: {
+    targetKpis: ["d30_retention", "organic_share"],
+    guardrailKpis: ["crash_free_sessions", "error_rate", "store_rating", "refund_rate"],
+  },
+  growth: {
+    targetKpis: ["ltv_to_cac", "cac_payback_months"],
+    guardrailKpis: ["d30_retention", "crash_free_sessions", "error_rate", "store_rating"],
+  },
+  scale: {
+    targetKpis: ["net_revenue_retention", "margin"], // not yet built as real KPIs — see doc comment above
+    guardrailKpis: ["d30_retention", "crash_free_sessions", "error_rate", "store_rating", "tickets_per_active_user"],
+  },
+};
+
+/** `targetKpiDeltas`/`guardrailKpiDeltas` are always "positive = real
+ * improvement, negative = real regression" for every metric — the caller
+ * normalizes each metric's own polarity (e.g. negates a raw `error_rate`
+ * delta, since a *rising* error rate is the regression) before calling
+ * this. Matches this codebase's own "caller resolves, function stays a
+ * pure/thin consumer" pattern (`deriveGrowthStrategy`'s own competitor/
+ * stage-comparable wiring already does this). */
+export type ProposalImpactEstimate = {
+  stage: AppStage;
+  targetKpiDeltas: Partial<Record<string, number>>;
+  guardrailKpiDeltas: Partial<Record<string, number>>;
+};
+
+export type ProposalScoreResult = {
+  accepted: boolean;
+  reason: string;
+  improvesTargetKpi: boolean;
+  violatedGuardrails: string[];
+};
+
+/**
+ * Spec §9: "Every proposal is scored as: expected change in the stage's
+ * target KPI, rejected if any guardrail is predicted or measured to worsen
+ * beyond tolerance (default 5% relative)." Pure. A guardrail with no
+ * supplied delta is treated as unaffected, not as a violation — proposals
+ * scoped narrowly enough to not touch most guardrails shouldn't be
+ * penalized for the ones they never claimed to affect.
+ */
+export function scoreProposalAgainstStageGoals(
+  estimate: ProposalImpactEstimate,
+  toleranceFraction = 0.05,
+): ProposalScoreResult {
+  const goals = STAGE_GOALS[estimate.stage];
+  const improvesTargetKpi = goals.targetKpis.some((kpi) => (estimate.targetKpiDeltas[kpi] ?? 0) > 0);
+  const violatedGuardrails = goals.guardrailKpis.filter((kpi) => {
+    const delta = estimate.guardrailKpiDeltas[kpi];
+    return delta !== undefined && delta < -toleranceFraction;
+  });
+
+  if (violatedGuardrails.length > 0) {
+    return {
+      accepted: false,
+      reason: `Rejected: would worsen ${violatedGuardrails.join(", ")} beyond the ${(toleranceFraction * 100).toFixed(0)}% tolerance.`,
+      improvesTargetKpi,
+      violatedGuardrails,
+    };
+  }
+  if (!improvesTargetKpi) {
+    return {
+      accepted: false,
+      reason: `Rejected: no predicted improvement to any of ${estimate.stage}'s target KPIs (${goals.targetKpis.join(", ")}).`,
+      improvesTargetKpi,
+      violatedGuardrails: [],
+    };
+  }
+  return {
+    accepted: true,
+    reason: `Accepted: improves a ${estimate.stage}-stage target KPI with no guardrail regression beyond tolerance.`,
+    improvesTargetKpi,
+    violatedGuardrails: [],
+  };
+}
+
+export type CohortSpendUnlockDecision = { unlocked: boolean; reason: string };
+
+/**
+ * Spec §9: "Per-cohort spend unlock in spend-governance.ts: paid spend on
+ * an arm scales only when that arm's cohort meets the retention threshold
+ * for the app's stage. One good cohort can scale while the rest of the app
+ * is still in Traction." Deliberately NOT built inside `spend-governance.ts`
+ * itself — this is a gate a caller checks *before* ever building a
+ * `SpendRequest` for a given arm, not a change to `evaluateSpend`'s own
+ * fuzz-tested math (COORDINATION.md W38's `sum(allowed) <= monthlyBudgetUsd`
+ * property suite stays completely untouched). Lives here since it's a
+ * stage/cohort decision, the same domain `deriveGrowthStrategy` already
+ * owns, not a spend-ledger decision.
+ *
+ * Retention thresholds per stage extend `deriveGrowthStrategy`'s own
+ * existing, real "0.2 retention threshold" precedent for traction's
+ * `paid_ads` slice (COORDINATION.md W39) rather than inventing new,
+ * ungrounded numbers — growth/scale use a modestly higher bar, disclosed
+ * as a reasonable extension, not independently derived from real data
+ * (none exists yet at growth/scale for this app).
+ */
+export function evaluateCohortSpendUnlock(stage: AppStage, cohortD7RetentionRate: number | null): CohortSpendUnlockDecision {
+  const RETENTION_THRESHOLD_BY_STAGE: Record<AppStage, number | null> = {
+    launch: null, // launch locks paid spend regardless of retention — safety rail 1, never overridden by this gate
+    traction: 0.2,
+    growth: 0.25,
+    scale: 0.3,
+  };
+  const threshold = RETENTION_THRESHOLD_BY_STAGE[stage];
+  if (threshold === null) {
+    return { unlocked: false, reason: `Stage "${stage}" locks paid spend regardless of cohort retention (safety rail 1).` };
+  }
+  if (cohortD7RetentionRate === null) {
+    return { unlocked: false, reason: "No real retention data for this cohort yet — fails closed until observable." };
+  }
+  if (cohortD7RetentionRate >= threshold) {
+    return {
+      unlocked: true,
+      reason: `Cohort D7 retention ${(cohortD7RetentionRate * 100).toFixed(1)}% clears the ${stage} stage's ${(threshold * 100).toFixed(0)}% threshold.`,
+    };
+  }
+  return {
+    unlocked: false,
+    reason: `Cohort D7 retention ${(cohortD7RetentionRate * 100).toFixed(1)}% is below the ${stage} stage's ${(threshold * 100).toFixed(0)}% threshold.`,
+  };
 }

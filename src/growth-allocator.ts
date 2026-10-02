@@ -60,7 +60,16 @@ export type Arm = {
   formatTag: string;
 };
 
-export type ArmStats = { arm: Arm; attempts: number; successes: number; spendUsd: number };
+/** `totalWeightedReward` — additive, optional (closed-loop M3,
+ * docs/closed-loop-spec.md §7): accumulates a real, continuous, staged
+ * reward (`growth-reward.ts`'s `computeStagedReward`) per arm, for the new
+ * `recordWeightedOutcome`/`selectArmWeighted` pair below. Never written by
+ * `recordOutcome`/read by `selectArm` — those two keep their exact,
+ * already-shipped, already-tested integer-only behavior untouched. A state
+ * file can accumulate stats via either pathway (or both, on different
+ * arms) without conflict, since `successes` and `totalWeightedReward` are
+ * independent fields updated by independent functions. */
+export type ArmStats = { arm: Arm; attempts: number; successes: number; spendUsd: number; totalWeightedReward?: number };
 /** `reconciledCreativeIds` — additive, optional extension for Component 6
  * (`growth-execution.ts`, COORDINATION.md W43): tracks which real,
  * `executed` `GrowthActionRecord`s have already had their real-world
@@ -202,6 +211,146 @@ export function recordOutcome(
   const arms = [...state.arms];
   arms[index] = updated;
   return { arms, updatedAt };
+}
+
+// ---------------------------------------------------------------------------
+// Closed loop M3 (docs/closed-loop-spec.md §7) — a real, continuous, staged
+// reward instead of a single boolean. Additive: everything below is new,
+// nothing above this point is touched. `selectArm`/`recordOutcome` and
+// their existing tests keep their exact behavior.
+// ---------------------------------------------------------------------------
+
+/** Standard normal variate via Box-Muller — used only by the continuous
+ * Gamma sampler below. */
+function sampleStandardNormal(rng: () => number): number {
+  const u1 = Math.max(rng(), Number.EPSILON);
+  const u2 = rng();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
+ * Marsaglia-Tsang: a real Gamma(shape, 1) sampler for any `shape > 0` — not
+ * a replacement for `sampleGamma` above, which is exact but restricted to
+ * integer shape (a sum of Exponentials). Needed here because a staged
+ * reward (spec §7) is a real number in [0, 1], not a hard 0/1: its
+ * pseudo-counts are genuinely fractional, and rounding/rescaling them into
+ * integers before sampling would silently fabricate far more statistical
+ * confidence than the real evidence supports (a rescale-then-reuse-
+ * sampleGamma shortcut was considered and rejected for exactly this
+ * reason — scaling both Beta shape parameters by a constant k doesn't
+ * preserve the distribution, it concentrates it as if there were k times
+ * more real observations). Kept fully separate from `sampleGamma` so
+ * `selectArm`/`recordOutcome`'s exact, already-shipped behavior is
+ * provably unaffected by this addition.
+ */
+function sampleGammaContinuous(shape: number, rng: () => number): number {
+  if (shape < 1) {
+    // Boosting trick: Gamma(a) = Gamma(a+1) * U^(1/a).
+    const u = Math.max(rng(), Number.EPSILON);
+    return sampleGammaContinuous(shape + 1, rng) * Math.pow(u, 1 / shape);
+  }
+  const d = shape - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+  for (let iter = 0; iter < 1000; iter++) {
+    let x: number;
+    let v: number;
+    do {
+      x = sampleStandardNormal(rng);
+      v = 1 + c * x;
+    } while (v <= 0);
+    v = v * v * v;
+    const u = Math.max(rng(), Number.EPSILON);
+    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+  }
+  // Rejection sampling converges almost immediately in practice for any
+  // real rng this project uses; this is an honest fail-safe, never
+  // expected to trigger — returning the mode rather than looping forever.
+  return d;
+}
+
+function sampleBetaContinuous(alpha: number, beta: number, rng: () => number): number {
+  const x = sampleGammaContinuous(alpha, rng);
+  const y = sampleGammaContinuous(beta, rng);
+  if (x + y === 0) return 0.5;
+  return x / (x + y);
+}
+
+/**
+ * Pure. Fractional Bayesian update for a real, continuous `rewardFraction`
+ * in [0, 1] — the currently-matured value of `growth-reward.ts`'s staged
+ * reward (spec §7.1). Standard "soft-label" Beta-Bernoulli update: a
+ * reward of `r` contributes `r` to the pseudo-success count and `1 - r` to
+ * the pseudo-failure count (recovering the exact integer case when
+ * `r` is always 0 or 1). Never writes `successes` — that field stays
+ * reserved for `recordOutcome`'s own binary callers; the two pathways
+ * accumulate independently so an arm observed via both never double-counts.
+ */
+export function recordWeightedOutcome(
+  state: AllocatorState,
+  arm: Arm,
+  rewardFraction: number,
+  spendUsd: number,
+): AllocatorState {
+  if (rewardFraction < 0 || rewardFraction > 1 || Number.isNaN(rewardFraction)) {
+    throw new Error(`recordWeightedOutcome: rewardFraction must be in [0,1], got ${rewardFraction}`);
+  }
+  const key = armKey(arm);
+  const index = state.arms.findIndex((s) => armKey(s.arm) === key);
+  const updatedAt = new Date().toISOString();
+
+  if (index === -1) {
+    return {
+      arms: [
+        ...state.arms,
+        { arm, attempts: 1, successes: 0, spendUsd: round2(spendUsd), totalWeightedReward: rewardFraction },
+      ],
+      updatedAt,
+      ...(state.reconciledCreativeIds ? { reconciledCreativeIds: state.reconciledCreativeIds } : {}),
+    };
+  }
+
+  const existing = state.arms[index]!;
+  const updated: ArmStats = {
+    arm: existing.arm,
+    attempts: existing.attempts + 1,
+    successes: existing.successes,
+    spendUsd: round2(existing.spendUsd + spendUsd),
+    totalWeightedReward: (existing.totalWeightedReward ?? 0) + rewardFraction,
+  };
+  const arms = [...state.arms];
+  arms[index] = updated;
+  return { arms, updatedAt, ...(state.reconciledCreativeIds ? { reconciledCreativeIds: state.reconciledCreativeIds } : {}) };
+}
+
+/**
+ * Thompson sampling over the real, continuous `totalWeightedReward`
+ * pseudo-counts via `sampleBetaContinuous` — "learns from value, not
+ * clicks" (spec §7's own framing). An arm never touched by
+ * `recordWeightedOutcome` (only by the binary `recordOutcome`, or not at
+ * all) samples from `Beta(1, attempts + 1)` — treated as zero accumulated
+ * reward, same honest "no weighted evidence yet" default `selectArm`
+ * itself applies to untried arms via `successes ?? 0`.
+ */
+export function selectArmWeighted(state: AllocatorState, candidateArms: Arm[], rng: () => number): Arm {
+  if (candidateArms.length === 0) {
+    throw new Error("selectArmWeighted: no candidate arms to choose from — check applyExplorationCeiling's result before calling this.");
+  }
+  let best = candidateArms[0]!;
+  let bestSample = -Infinity;
+  for (const arm of candidateArms) {
+    const stats = findStats(state, arm);
+    const totalReward = stats?.totalWeightedReward ?? 0;
+    const attempts = stats?.attempts ?? 0;
+    const alpha = 1 + totalReward;
+    const beta = 1 + Math.max(0, attempts - totalReward);
+    const sample = sampleBetaContinuous(alpha, beta, rng);
+    if (sample > bestSample) {
+      bestSample = sample;
+      best = arm;
+    }
+  }
+  return best;
 }
 
 type FormatSpec = {
