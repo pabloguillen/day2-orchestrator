@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseFeatureProposal } from "./evolution";
+import { isAlreadyRejected, parseFeatureProposal, type RejectedProposal } from "./evolution";
 
 const validProposalText = `I fetched all 3 profiles and found a pattern.
 
@@ -165,5 +165,29 @@ PROPOSAL_JSON: null`;
 }
 \`\`\``;
     expect(parseFeatureProposal(text, false).status).toBe("parse_failed");
+  });
+});
+
+describe("isAlreadyRejected", () => {
+  const rejections: RejectedProposal[] = [
+    { title: "Quick re-add last expense", reason: "too niche for now", rejectedAt: "2026-10-01T00:00:00.000Z" },
+  ];
+
+  test("an exact title match is found", () => {
+    const match = isAlreadyRejected("Quick re-add last expense", rejections);
+    expect(match).toBeDefined();
+    expect(match!.reason).toBe("too niche for now");
+  });
+
+  test("matching is case-insensitive and trims whitespace", () => {
+    expect(isAlreadyRejected("  quick re-add LAST expense  ", rejections)).toBeDefined();
+  });
+
+  test("a different title is not a match", () => {
+    expect(isAlreadyRejected("Bulk export to CSV", rejections)).toBeUndefined();
+  });
+
+  test("an empty rejection list never matches anything", () => {
+    expect(isAlreadyRejected("Quick re-add last expense", [])).toBeUndefined();
   });
 });
