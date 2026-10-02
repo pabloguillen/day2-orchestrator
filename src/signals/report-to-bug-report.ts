@@ -9,6 +9,20 @@ import type { Report } from "./types";
  * deliberately excluded here, not converted with a caveat — they belong in
  * an owner-facing inbox for a human to look at, not fed to `bun run fix`.
  */
+/** A Sentry permalink is the one cross-source identity every path that can
+ * see a Sentry issue agrees on (`sources/sentry.ts`'s own `correlationKey`,
+ * `impact.ts`'s `matchesOriginal`). If this cluster corroborates a Sentry
+ * issue, reuse its permalink so `pipeline.ts` recognizes it as the same
+ * real-world issue the classic Sentry path may have already reported under
+ * a different `sourceId` — not a new, separately-processed signal. */
+function correlationKeyFor(report: Report): string | undefined {
+  for (const signal of report.signals) {
+    const permalink = signal.evidence.permalink;
+    if (typeof permalink === "string" && permalink.length > 0) return permalink;
+  }
+  return undefined;
+}
+
 export function reportToBugReport(report: Report): BugReport {
   const sourceList = [...new Set(report.signals.map((s) => s.source))].join(", ");
   const evidenceLines = report.signals
@@ -29,6 +43,7 @@ export function reportToBugReport(report: Report): BugReport {
     context: `Clustered by day2's health-signal scout (orchestrator/src/signals/) for app "${report.appId}" from ${report.signals.length} real signal(s) — not a static analysis guess or a hand-written report.`,
     sourceId: report.id,
     source: "health-scout" as const,
+    correlationKey: correlationKeyFor(report),
   };
 }
 

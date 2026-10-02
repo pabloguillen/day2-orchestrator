@@ -12,6 +12,15 @@ export type BugReport = {
   /** Stable ID from the source system, used to avoid double-processing. */
   sourceId: string;
   source: "sentry" | "manual" | "swarm" | "health-scout";
+  /** Identity of the real-world issue this report is about, independent of
+   * which path detected it. Only set when a source can honestly supply a
+   * strong cross-source identity (e.g. a Sentry permalink) — the same
+   * Sentry issue can reach the pipeline either directly via `sources/
+   * sentry.ts` (sourceId = the Sentry issue id) or indirectly via a
+   * health-scout cluster that corroborates it (sourceId = the cluster's
+   * report id); without this, `pipeline.ts` would process both as
+   * unrelated and open two competing fix PRs for the same bug. */
+  correlationKey?: string;
 };
 
 export type PipelineResult =

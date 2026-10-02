@@ -10,9 +10,22 @@ function loadProcessed(stateFile: string): Set<string> {
   return new Set(JSON.parse(readFileSync(stateFile, "utf-8")) as string[]);
 }
 
-function markProcessed(stateFile: string, sourceId: string) {
+/** Every identity string a report is known by: its `sourceId` always, plus
+ * its `correlationKey` when the source could supply one. Checking/recording
+ * both is what lets two different sources (e.g. the classic Sentry path and
+ * a health-scout cluster corroborating that same Sentry issue) land on the
+ * same "already processed" outcome instead of each opening its own fix PR. */
+function identityKeysFor(report: BugReport): string[] {
+  return report.correlationKey ? [report.sourceId, report.correlationKey] : [report.sourceId];
+}
+
+export function isAlreadyProcessed(processed: Set<string>, report: BugReport): boolean {
+  return identityKeysFor(report).some((key) => processed.has(key));
+}
+
+function markProcessed(stateFile: string, report: BugReport) {
   const processed = loadProcessed(stateFile);
-  processed.add(sourceId);
+  for (const key of identityKeysFor(report)) processed.add(key);
   writeFileSync(stateFile, JSON.stringify([...processed], null, 2));
 }
 
@@ -31,7 +44,7 @@ export async function runPipeline(
   report: BugReport,
   stateFile: string,
 ): Promise<PipelineResult> {
-  if (loadProcessed(stateFile).has(report.sourceId)) {
+  if (isAlreadyProcessed(loadProcessed(stateFile), report)) {
     return { status: "already_processed", sourceId: report.sourceId };
   }
 
@@ -79,7 +92,7 @@ export async function runPipeline(
     const url = await openFixPr(cwd, branch, report, fix.finalText);
     console.log(`[day2] Opened PR: ${url}`);
 
-    markProcessed(stateFile, report.sourceId);
+    markProcessed(stateFile, report);
     return { status: "pr_opened", url, branch };
   } finally {
     rmSync(cwd, { recursive: true, force: true });

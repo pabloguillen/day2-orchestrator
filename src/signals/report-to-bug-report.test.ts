@@ -73,4 +73,20 @@ describe("reportsToBugReports", () => {
   test("empty input produces no bug reports", () => {
     expect(reportsToBugReports([])).toEqual([]);
   });
+
+  test("a report that corroborates a Sentry issue carries that issue's permalink as its correlationKey", () => {
+    const bugReports = reportsToBugReports([
+      report({
+        signals: [signal({ source: "sentry", evidence: { permalink: "https://sentry.io/issues/42/" } })],
+      }),
+    ]);
+    expect(bugReports[0]!.correlationKey).toBe("https://sentry.io/issues/42/");
+  });
+
+  test("a report with no Sentry-corroborating signal has no correlationKey", () => {
+    const bugReports = reportsToBugReports([
+      report({ signals: [signal({ source: "interaction-friction", evidence: { rageClicks: 5 } })] }),
+    ]);
+    expect(bugReports[0]!.correlationKey).toBeUndefined();
+  });
 });
