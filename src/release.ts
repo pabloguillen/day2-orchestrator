@@ -4,6 +4,7 @@ import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy, recordAutonomyAudit } from "
 import { calibrateSwarmFailures, recordCalibrationAudit, type CalibrationVerdict } from "./calibration";
 import { checkoutSha, cloneIsolatedWorkspace } from "./git";
 import { runSwarm, type PersonaResult } from "./swarm";
+import { recordAutonomyOutcome } from "./trust";
 import type { AutonomyConfig, AutonomyDecision, ChangeForAutonomy } from "./types";
 
 /**
@@ -411,6 +412,7 @@ export async function maybeAutoRelease(
   config: AutonomyConfig = DEFAULT_AUTONOMY_CONFIG,
   auditFile = "day2-autonomy-audit.jsonl",
   summary?: string,
+  outcomeFile = "day2-autonomy-outcomes.jsonl",
 ): Promise<{ decision: AutonomyDecision; result?: CanaryReleaseResult }> {
   const decision = evaluateAutonomy(change, config);
   recordAutonomyAudit(auditFile, change, decision, summary);
@@ -420,5 +422,22 @@ export async function maybeAutoRelease(
   }
   console.log(`[day2-release] Autonomy check passed (${decision.reason}) — starting canary release.`);
   const result = await runCanaryRelease(releaseOpts);
+  // Without this, the audit trail only ever records the *decision* to
+  // auto-ship, never whether it held up — and a track record (trust.ts)
+  // can't be computed from a decision alone. Keyed by sourceId, same id
+  // the decision entry above already carries, so the two join cleanly.
+  // A dry run never reached real traffic, so it isn't a real outcome to
+  // record. Every other status uses `isFailureStatus` as its "did this
+  // hold up" bit — a pre-flight smoke/swarm-check catch is the safety net
+  // correctly rejecting an unsafe auto-ship, which is exactly the kind of
+  // thing that should cost this area trust, same as a real rollback.
+  if (result.status !== "dry_run_stopped_before_traffic_shift") {
+    recordAutonomyOutcome(outcomeFile, {
+      timestamp: new Date().toISOString(),
+      sourceId: change.sourceId,
+      status: isFailureStatus(result.status) ? "rolled_back" : "promoted",
+      reason: "reason" in result ? result.reason : `canary error count ${result.errorCount}`,
+    });
+  }
   return { decision, result };
 }
