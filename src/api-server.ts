@@ -199,6 +199,37 @@ route("GET", "/api/github/repos", async () => {
   }
 });
 
+/**
+ * Defense in depth against zip-slip, independent of the system `unzip`
+ * binary's own behavior. Verified on this machine's Info-ZIP build that a
+ * `../../escaped.txt` entry is already stripped/rejected before
+ * extraction — but that protection is implicit, varies across unzip
+ * implementations (notably on Linux), and this app has no control over
+ * which one ends up on whatever machine eventually runs it. Lists entries
+ * via `unzip -Z1` (zipinfo, one name per line) and rejects the whole
+ * upload — before a single byte is extracted — if any entry's resolved
+ * path would land outside `destDir`, or is an absolute path.
+ */
+export async function assertZipEntriesAreContained(zipPath: string, destDir: string): Promise<void> {
+  let listing: string;
+  try {
+    listing = await $`unzip -Z1 ${zipPath}`.quiet().text();
+  } catch (err) {
+    throw new HttpError(400, `Couldn't read the uploaded .zip's contents: ${(err as Error).message}`);
+  }
+  const entries = listing.split("\n").filter(Boolean);
+  const destRoot = destDir.endsWith("/") ? destDir : `${destDir}/`;
+  for (const entry of entries) {
+    if (entry.startsWith("/")) {
+      throw new HttpError(400, `Rejected upload: zip entry "${entry}" is an absolute path.`);
+    }
+    const resolved = resolve(destDir, entry);
+    if (resolved !== destDir.replace(/\/$/, "") && !resolved.startsWith(destRoot)) {
+      throw new HttpError(400, `Rejected upload: zip entry "${entry}" would extract outside the app's directory.`);
+    }
+  }
+}
+
 // ---- Connect, option C: zip upload ----
 
 route("POST", "/api/apps/upload", async (req) => {
@@ -214,6 +245,7 @@ route("POST", "/api/apps/upload", async (req) => {
   const zipPath = resolve(destDir, "upload.zip");
   try {
     await Bun.write(zipPath, file);
+    await assertZipEntriesAreContained(zipPath, destDir);
     await $`unzip -o ${zipPath} -d ${destDir}`.quiet();
     rmSync(zipPath, { force: true });
 
@@ -459,35 +491,44 @@ function withCors(res: Response): Response {
   return res;
 }
 
-const server = Bun.serve({
-  port: PORT,
-  hostname: "localhost",
-  async fetch(req) {
-    if (req.method === "OPTIONS") {
-      return withCors(new Response(null, { status: 204 }));
-    }
+/**
+ * The actual router, as a plain `Request -> Response` function — exported so
+ * tests can call it directly (no port binding, no real network, no
+ * conflict with a real running instance on the default port). Mirrors the
+ * `import.meta.main` guard every CLI entrypoint in this codebase already
+ * uses (see auto-release-cli.ts's own comment on why) — this file just
+ * never had one, which is the real reason it had zero test coverage until
+ * now: importing it for its logic used to start a real server as a side
+ * effect.
+ */
+export async function handleRequest(req: Request): Promise<Response> {
+  if (req.method === "OPTIONS") {
+    return withCors(new Response(null, { status: 204 }));
+  }
 
-    const url = new URL(req.url);
-    for (const r of routes) {
-      if (r.method !== req.method) continue;
-      const match = r.pattern.exec(url);
-      if (!match) continue;
-      const params: Record<string, string> = {};
-      for (const [k, v] of Object.entries(match.pathname.groups)) {
-        if (v !== undefined) params[k] = v;
-      }
-      try {
-        return withCors(await r.handler(req, params));
-      } catch (err) {
-        if (err instanceof HttpError) {
-          return withCors(json({ error: err.message }, { status: err.status }));
-        }
-        console.error(err);
-        return withCors(json({ error: (err as Error).message ?? "Internal error" }, { status: 500 }));
-      }
+  const url = new URL(req.url);
+  for (const r of routes) {
+    if (r.method !== req.method) continue;
+    const match = r.pattern.exec(url);
+    if (!match) continue;
+    const params: Record<string, string> = {};
+    for (const [k, v] of Object.entries(match.pathname.groups)) {
+      if (v !== undefined) params[k] = v;
     }
-    return withCors(json({ error: `No route for ${req.method} ${url.pathname}` }, { status: 404 }));
-  },
-});
+    try {
+      return withCors(await r.handler(req, params));
+    } catch (err) {
+      if (err instanceof HttpError) {
+        return withCors(json({ error: err.message }, { status: err.status }));
+      }
+      console.error(err);
+      return withCors(json({ error: (err as Error).message ?? "Internal error" }, { status: 500 }));
+    }
+  }
+  return withCors(json({ error: `No route for ${req.method} ${url.pathname}` }, { status: 404 }));
+}
 
-console.log(`[day2-console-api] Listening on http://localhost:${server.port}`);
+if (import.meta.main) {
+  const server = Bun.serve({ port: PORT, hostname: "localhost", fetch: handleRequest });
+  console.log(`[day2-console-api] Listening on http://localhost:${server.port}`);
+}
