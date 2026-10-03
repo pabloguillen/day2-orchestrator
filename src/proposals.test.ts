@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listProposals, recordProposal, renderProposalCard } from "./proposals";
+import { listProposals, listRejections, recordProposal, recordRejection, renderProposalCard } from "./proposals";
 import type { FeatureProposal } from "./evolution";
 
 const sampleProposal: FeatureProposal = {
@@ -47,6 +47,34 @@ describe("recordProposal / listProposals", () => {
     expect(recorded).toHaveLength(2);
     expect(recorded[0]!.title).toBe("Quick re-add last expense");
     expect(recorded[1]!.title).toBe("Second proposal");
+  });
+});
+
+describe("recordRejection / listRejections", () => {
+  test("listRejections returns an empty array when the file doesn't exist yet", () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "day2-rejections-"));
+    expect(listRejections(join(tmpDir, "nonexistent.jsonl"))).toEqual([]);
+  });
+
+  test("records a rejection and reads it back with a real timestamp", () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "day2-rejections-"));
+    const file = join(tmpDir, "rejections.jsonl");
+    recordRejection(file, "Quick re-add last expense", "too niche for now, revisit after more users");
+    expect(existsSync(file)).toBe(true);
+
+    const rejections = listRejections(file);
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]!.title).toBe("Quick re-add last expense");
+    expect(rejections[0]!.reason).toBe("too niche for now, revisit after more users");
+    expect(new Date(rejections[0]!.rejectedAt).toString()).not.toBe("Invalid Date");
+  });
+
+  test("multiple rejections append, never overwrite", () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "day2-rejections-"));
+    const file = join(tmpDir, "rejections.jsonl");
+    recordRejection(file, "First idea", "no");
+    recordRejection(file, "Second idea", "also no");
+    expect(listRejections(file)).toHaveLength(2);
   });
 });
 

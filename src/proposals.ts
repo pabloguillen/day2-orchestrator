@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import type { FeatureProposal } from "./evolution";
+import type { FeatureProposal, RejectedProposal } from "./evolution";
 
 /**
  * The review surface for evolution-engine proposals (COORDINATION.md W32,
@@ -28,6 +28,25 @@ export function listProposals(proposalsFile: string): RecordedProposal[] {
   if (!existsSync(proposalsFile)) return [];
   const lines = readFileSync(proposalsFile, "utf-8").split("\n").filter((l) => l.trim());
   return lines.map((line) => JSON.parse(line) as RecordedProposal);
+}
+
+/** Separate file from the proposals log on purpose, same reasoning as
+ * `trust.ts`'s outcome log: `listProposals` parses every line as a
+ * `RecordedProposal` and would break on a differently-shaped record mixed
+ * in. Without this, nothing ever persisted a human's "no" — `evolution.ts`
+ * had no way to know a proposal had already been reviewed and declined, so
+ * the same idea could resurface every run the underlying pattern was still
+ * present in the data. */
+export function recordRejection(rejectionsFile: string, title: string, reason: string): void {
+  const entry: RejectedProposal = { title, reason, rejectedAt: new Date().toISOString() };
+  appendFileSync(rejectionsFile, JSON.stringify(entry) + "\n");
+}
+
+/** Read-only. An absent file means nothing has ever been rejected yet. */
+export function listRejections(rejectionsFile: string): RejectedProposal[] {
+  if (!existsSync(rejectionsFile)) return [];
+  const lines = readFileSync(rejectionsFile, "utf-8").split("\n").filter((l) => l.trim());
+  return lines.map((line) => JSON.parse(line) as RejectedProposal);
 }
 
 /** Plain-language rendering matching the source doc's own card framing —

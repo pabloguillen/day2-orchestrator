@@ -6,6 +6,7 @@
 
 import { hasSufficientData } from "./metrics";
 import type { EventLike } from "./metrics";
+import { evaluateProportionExperiment } from "./experiments";
 
 // ---------------------------------------------------------------------------
 // §6.1 — learning
@@ -224,39 +225,6 @@ export type HoldoutComparisonResult = {
   reason: string;
 };
 
-/** Minimal standalone Beta(a,b) sampler for this file's own two-sample
- * comparison — not importing `growth-allocator.ts`'s private samplers
- * (unexported by design there), a small, disclosed, self-contained
- * duplicate of the same well-established Marsaglia-Tsang technique. */
-function sampleGammaContinuous(shape: number, rng: () => number): number {
-  if (shape < 1) {
-    const u = Math.max(rng(), Number.EPSILON);
-    return sampleGammaContinuous(shape + 1, rng) * Math.pow(u, 1 / shape);
-  }
-  const d = shape - 1 / 3;
-  const c = 1 / Math.sqrt(9 * d);
-  for (let iter = 0; iter < 1000; iter++) {
-    let x: number;
-    let v: number;
-    do {
-      const u1 = Math.max(rng(), Number.EPSILON);
-      const u2 = rng();
-      x = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-      v = 1 + c * x;
-    } while (v <= 0);
-    v = v * v * v;
-    const u = Math.max(rng(), Number.EPSILON);
-    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
-    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
-  }
-  return d;
-}
-function sampleBeta(a: number, b: number, rng: () => number): number {
-  const x = sampleGammaContinuous(a, rng);
-  const y = sampleGammaContinuous(b, rng);
-  return x + y === 0 ? 0.5 : x / (x + y);
-}
-
 const HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD = 0.9; // spec §6.2: ">= 90% posterior probability"
 const HOLDOUT_MIN_N = 30;
 const MONTE_CARLO_DRAWS = 5000;
@@ -275,32 +243,18 @@ export function evaluateHoldoutPromotion(
   holdoutRetained: boolean[],
   rng: () => number,
 ): HoldoutComparisonResult {
-  const learnedN = learnedRetained.length;
-  const holdoutN = holdoutRetained.length;
-  const learnedRetainedN = learnedRetained.filter(Boolean).length;
-  const holdoutRetainedN = holdoutRetained.filter(Boolean).length;
+  // Treatment = learned, control = holdout — the shared Bayesian comparison
+  // in experiments.ts is the single statistical framework every proportion
+  // decision in this project now goes through (see that file's own header
+  // note on why this and `evaluateExperiment`'s frequentist t-test coexist).
+  const comparison = evaluateProportionExperiment(holdoutRetained, learnedRetained, rng, {
+    posteriorThreshold: HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD,
+    minNPerArm: HOLDOUT_MIN_N,
+    monteCarloDraws: MONTE_CARLO_DRAWS,
+  });
 
-  if (learnedN < HOLDOUT_MIN_N || holdoutN < HOLDOUT_MIN_N) {
-    return {
-      armOrPoolKey,
-      learnedN,
-      learnedRetainedN,
-      holdoutN,
-      holdoutRetainedN,
-      posteriorProbabilityLearnedBetter: 0,
-      promote: false,
-      reason: `Insufficient data (learned n=${learnedN}, holdout n=${holdoutN}, both need >= ${HOLDOUT_MIN_N}).`,
-    };
-  }
-
-  let learnedWins = 0;
-  for (let i = 0; i < MONTE_CARLO_DRAWS; i++) {
-    const learnedSample = sampleBeta(1 + learnedRetainedN, 1 + (learnedN - learnedRetainedN), rng);
-    const holdoutSample = sampleBeta(1 + holdoutRetainedN, 1 + (holdoutN - holdoutRetainedN), rng);
-    if (learnedSample > holdoutSample) learnedWins++;
-  }
-  const posteriorProbabilityLearnedBetter = learnedWins / MONTE_CARLO_DRAWS;
-  const promote = posteriorProbabilityLearnedBetter >= HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD;
+  const { treatmentN: learnedN, treatmentSuccessN: learnedRetainedN, controlN: holdoutN, controlSuccessN: holdoutRetainedN } = comparison;
+  const posteriorProbabilityLearnedBetter = comparison.posteriorProbabilityTreatmentBetter;
 
   return {
     armOrPoolKey,
@@ -309,9 +263,11 @@ export function evaluateHoldoutPromotion(
     holdoutN,
     holdoutRetainedN,
     posteriorProbabilityLearnedBetter,
-    promote,
-    reason: promote
-      ? `Learned path beats the holdout with ${(posteriorProbabilityLearnedBetter * 100).toFixed(1)}% posterior probability — clears the ${(HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD * 100).toFixed(0)}% bar.`
-      : `Learned path's posterior probability of beating the holdout (${(posteriorProbabilityLearnedBetter * 100).toFixed(1)}%) doesn't clear the ${(HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD * 100).toFixed(0)}% bar yet.`,
+    promote: comparison.significant,
+    reason: !comparison.sufficientPower
+      ? `Insufficient data (learned n=${learnedN}, holdout n=${holdoutN}, both need >= ${HOLDOUT_MIN_N}).`
+      : comparison.significant
+        ? `Learned path beats the holdout with ${(posteriorProbabilityLearnedBetter * 100).toFixed(1)}% posterior probability — clears the ${(HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD * 100).toFixed(0)}% bar.`
+        : `Learned path's posterior probability of beating the holdout (${(posteriorProbabilityLearnedBetter * 100).toFixed(1)}%) doesn't clear the ${(HOLDOUT_PROMOTION_POSTERIOR_THRESHOLD * 100).toFixed(0)}% bar yet.`,
   };
 }
