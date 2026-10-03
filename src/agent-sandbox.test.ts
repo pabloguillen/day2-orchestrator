@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
 import { DENIED_ENV_VARS, DENIED_READ_PATHS, sandboxConfig } from "./agent-sandbox";
 
 describe("sandboxConfig", () => {
@@ -14,6 +15,17 @@ describe("sandboxConfig", () => {
   test("denies read access to every credential-store path", () => {
     const config = sandboxConfig();
     expect(config.filesystem.denyRead).toEqual(DENIED_READ_PATHS);
+  });
+
+  test("denies the deploy credentials release.ts's wrangler calls rely on, not just Sentry/Anthropic", () => {
+    // Regression: the sandbox was built to stop a hostile bug report from
+    // exfiltrating this process's secrets, but the original pass only
+    // covered the two sources it was built against (Sentry, Anthropic) —
+    // missing CLOUDFLARE_API_TOKEN/~/.wrangler, which release.ts's `wrangler`
+    // calls need in this exact same environment and are just as reachable.
+    const config = sandboxConfig();
+    expect(config.credentials.envVars.map((v) => v.name)).toContain("CLOUDFLARE_API_TOKEN");
+    expect(config.filesystem.denyRead).toContain(`${homedir()}/.wrangler`);
   });
 
   test("fails loud rather than silently unsandboxed on an unsupported host", () => {

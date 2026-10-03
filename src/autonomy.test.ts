@@ -44,7 +44,7 @@ describe("evaluateAutonomy", () => {
     expect(decision.reason).toMatch(/sensitive path/);
   });
 
-  test("mixed change (ui + billing files) uses the most restrictive level", () => {
+  test("mixed change (ui + billing files) uses the most restrictive level, and attributes it to the area that actually caused it", () => {
     const config: AutonomyConfig = {
       defaultLevel: "L2",
       areas: [
@@ -61,6 +61,31 @@ describe("evaluateAutonomy", () => {
     );
     expect(decision.level).toBe("L1");
     expect(decision.autoShip).toBe(false);
+    // Regression: `area` must name "billing-flow" (L1, the restrictive one
+    // that actually drove this decision), not "ui" (L4) just because "ui"
+    // happens to be listed first in config.areas.
+    expect(decision.area).toBe("billing-flow");
+  });
+
+  test("area attribution doesn't depend on config.areas ordering", () => {
+    // Same scenario as above with the areas listed in the opposite order —
+    // the restrictive area now comes first. If attribution were order-
+    // dependent (e.g. Array.find() picking whichever area is listed first),
+    // this would coincidentally still pass; the test above is what actually
+    // catches an order-dependent bug.
+    const config: AutonomyConfig = {
+      defaultLevel: "L2",
+      areas: [
+        { area: "billing-flow", pathGlobs: ["src/flows/checkout.tsx"], level: "L1" },
+        { area: "ui", pathGlobs: ["src/routes/*"], level: "L4" },
+      ],
+    };
+    const decision = evaluateAutonomy(
+      { ...cleanBugfix, filesChanged: ["src/routes/index.tsx", "src/flows/checkout.tsx"] },
+      config,
+    );
+    expect(decision.level).toBe("L1");
+    expect(decision.area).toBe("billing-flow");
   });
 
   test("new feature (not a bugfix) never auto-ships even at L3+", () => {
