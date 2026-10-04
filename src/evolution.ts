@@ -54,7 +54,32 @@ export type FeatureProposal = {
 export type ProposalResult =
   | { status: "proposed"; proposal: FeatureProposal }
   | { status: "no_proposal" }
-  | { status: "parse_failed"; reason: string };
+  | { status: "parse_failed"; reason: string }
+  | { status: "already_rejected"; proposal: FeatureProposal; previousRejection: RejectedProposal };
+
+/** A human's past decision not to build a proposal — the memory
+ * `proposeFeature` needs so the same idea doesn't get proposed again every
+ * time the same usage pattern is still present in the data. Recorded via
+ * `proposals.ts::recordRejection`; defined here (not there) since
+ * `proposals.ts` already depends on this file for `FeatureProposal` and a
+ * dependency the other way would be circular. */
+export type RejectedProposal = {
+  title: string;
+  reason: string;
+  rejectedAt: string;
+};
+
+/** Case-insensitive, trimmed exact match — simple and disclosed rather than
+ * a fuzzy-similarity heuristic, matching this project's general preference
+ * for a plain rule a human can reason about over one that could misfire in
+ * either direction with no real data yet to tune it against. */
+export function isAlreadyRejected(
+  title: string,
+  rejectedProposals: RejectedProposal[],
+): RejectedProposal | undefined {
+  const normalized = title.trim().toLowerCase();
+  return rejectedProposals.find((r) => r.title.trim().toLowerCase() === normalized);
+}
 
 function buildCompetitorContextBlock(competitorInsights: CompetitorInsight[]): string {
   if (competitorInsights.length === 0) return "";
@@ -72,10 +97,24 @@ just because a competitor has it, with no matching real usage pattern behind it.
 "competitorContext" entirely if none of these are actually relevant.\n`;
 }
 
+function buildRejectedProposalsBlock(rejectedProposals: RejectedProposal[]): string {
+  if (rejectedProposals.length === 0) return "";
+  const entries = rejectedProposals
+    .map((r) => `- "${r.title}" — a human already rejected this: ${r.reason}`)
+    .join("\n");
+  return `
+A human has already reviewed and rejected these specific proposals before. Do NOT propose any of
+these again, even if the data still shows the same underlying pattern — a rejection stands until a
+human reverses it, it doesn't expire just because the evidence recurs:
+${entries}
+`;
+}
+
 function buildProposalPrompt(
   appBaseUrl: string,
   deviceIds: string[],
   competitorInsights: CompetitorInsight[] = [],
+  rejectedProposals: RejectedProposal[] = [],
 ): string {
   return `You are the evolution engine's proposal generator for a small production app (a personal
 expense tracker). Your job is to notice a real, repeated, currently-unserved usage pattern and
@@ -89,7 +128,7 @@ of these, they already exist:
   just a total.
 - Users who manually view their weekly report 3 Fridays in a row get it shown automatically
   ("habits" signal, the app's own "Chloe" pattern).
-
+${buildRejectedProposalsBlock(rejectedProposals)}
 Fetch the real per-user profile for each of these device IDs (a GET request, no auth needed):
 ${deviceIds.map((id) => `${appBaseUrl}/api/day2-profile?deviceId=${id}`).join("\n")}
 
@@ -192,13 +231,14 @@ async function runProposalAgent(
   appBaseUrl: string,
   deviceIds: string[],
   competitorInsights: CompetitorInsight[],
+  rejectedProposals: RejectedProposal[],
 ): Promise<{ finalText: string; isError: boolean }> {
   let finalText = "";
   let isError = false;
 
   try {
     for await (const message of query({
-      prompt: buildProposalPrompt(appBaseUrl, deviceIds, competitorInsights),
+      prompt: buildProposalPrompt(appBaseUrl, deviceIds, competitorInsights, rejectedProposals),
       options: {
         model: MODEL,
         permissionMode: "bypassPermissions",
@@ -231,7 +271,20 @@ export async function proposeFeature(
   appBaseUrl: string,
   deviceIds: string[],
   competitorInsights: CompetitorInsight[] = [],
+  rejectedProposals: RejectedProposal[] = [],
 ): Promise<ProposalResult> {
-  const { finalText, isError } = await runProposalAgent(appBaseUrl, deviceIds, competitorInsights);
-  return parseFeatureProposal(finalText, isError);
+  const { finalText, isError } = await runProposalAgent(appBaseUrl, deviceIds, competitorInsights, rejectedProposals);
+  const result = parseFeatureProposal(finalText, isError);
+  // Deterministic backstop, not just a prompt instruction: the agent is
+  // told not to re-propose a rejected idea, but a prompt is a request, not
+  // a guarantee. If it still produces one — same title, data pattern still
+  // present — catch it here rather than silently re-surfacing something a
+  // human already said no to.
+  if (result.status === "proposed") {
+    const previousRejection = isAlreadyRejected(result.proposal.title, rejectedProposals);
+    if (previousRejection) {
+      return { status: "already_rejected", proposal: result.proposal, previousRejection };
+    }
+  }
+  return result;
 }

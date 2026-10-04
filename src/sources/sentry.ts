@@ -45,5 +45,6 @@ export async function fetchLatestUnresolvedIssue(
     context: `${issue.metadata?.type ?? ""}: ${issue.metadata?.value ?? ""}\nSentry link: ${issue.permalink}`,
     sourceId: issue.id,
     source: "sentry",
+    correlationKey: issue.permalink,
   };
 }

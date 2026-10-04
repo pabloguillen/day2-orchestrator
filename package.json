@@ -9,6 +9,7 @@
     "feed": "bun run src/owner-feed.ts",
     "swarm-fix": "bun run src/swarm-fix-cli.ts",
     "health-scout": "bun run src/health-scout-cli.ts",
+    "trust": "bun run src/trust-cli.ts",
     "test": "bun test"
   },
   "dependencies": {

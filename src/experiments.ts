@@ -163,6 +163,128 @@ export type ExperimentEvaluation = {
   note: string;
 };
 
+// --- Bayesian posterior comparison (for proportion-shaped outcomes) ----
+//
+// `evaluateExperiment` above is the right tool for a continuous/count
+// outcome (swarm persona action counts, revenue). A binary retained/
+// not-retained outcome — the shape `entry-paths.ts`'s holdout-promotion
+// decision actually has — calls for a different, Bayesian tool instead:
+// closed-loop-spec.md §6.2 asks for "beats the holdout ... with >= 90%
+// posterior probability," which is a Beta-binomial posterior comparison,
+// not a p-value. Both tools live here so there's one place that answers
+// "which statistical framework governs this decision" for every
+// evolution/adaptation decision in this project, instead of each caller
+// growing its own private copy of the same sampling math.
+
+/** Minimal Beta(a,b) sampler via the standard Marsaglia-Tsang gamma
+ * technique — shared so every Bayesian proportion comparison in this
+ * project draws from the same tested implementation. */
+function sampleGammaContinuous(shape: number, rng: () => number): number {
+  if (shape < 1) {
+    const u = Math.max(rng(), Number.EPSILON);
+    return sampleGammaContinuous(shape + 1, rng) * Math.pow(u, 1 / shape);
+  }
+  const d = shape - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+  for (let iter = 0; iter < 1000; iter++) {
+    let x: number;
+    let v: number;
+    do {
+      const u1 = Math.max(rng(), Number.EPSILON);
+      const u2 = rng();
+      x = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      v = 1 + c * x;
+    } while (v <= 0);
+    v = v * v * v;
+    const u = Math.max(rng(), Number.EPSILON);
+    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+  }
+  return d;
+}
+function sampleBeta(a: number, b: number, rng: () => number): number {
+  const x = sampleGammaContinuous(a, rng);
+  const y = sampleGammaContinuous(b, rng);
+  return x + y === 0 ? 0.5 : x / (x + y);
+}
+
+const PROPORTION_MIN_N_PER_ARM = 30;
+const PROPORTION_MONTE_CARLO_DRAWS = 5000;
+
+export type ProportionPosteriorComparison = {
+  controlN: number;
+  controlSuccessN: number;
+  treatmentN: number;
+  treatmentSuccessN: number;
+  /** Real Monte Carlo estimate of P(treatment's true success rate >
+   * control's), via Beta-posterior sampling — the same family of math
+   * `growth-allocator.ts`'s Thompson sampling uses for arm selection,
+   * applied here to a two-sample comparison instead. */
+  posteriorProbabilityTreatmentBetter: number;
+  sufficientPower: boolean;
+  significant: boolean;
+  note: string;
+};
+
+/**
+ * Bayesian counterpart to `evaluateExperiment`, for binary/proportion
+ * outcomes. `rng` is injected (never `Math.random()`), matching this
+ * project's "no ambient randomness" discipline (`growth-allocator.ts`'s
+ * own `selectArm`/`selectArmWeighted`, `entry-paths.ts`'s own assignment
+ * functions).
+ */
+export function evaluateProportionExperiment(
+  controlOutcomes: boolean[],
+  treatmentOutcomes: boolean[],
+  rng: () => number,
+  opts: { posteriorThreshold?: number; minNPerArm?: number; monteCarloDraws?: number } = {},
+): ProportionPosteriorComparison {
+  const posteriorThreshold = opts.posteriorThreshold ?? 0.9;
+  const minNPerArm = opts.minNPerArm ?? PROPORTION_MIN_N_PER_ARM;
+  const monteCarloDraws = opts.monteCarloDraws ?? PROPORTION_MONTE_CARLO_DRAWS;
+
+  const controlN = controlOutcomes.length;
+  const treatmentN = treatmentOutcomes.length;
+  const controlSuccessN = controlOutcomes.filter(Boolean).length;
+  const treatmentSuccessN = treatmentOutcomes.filter(Boolean).length;
+  const sufficientPower = controlN >= minNPerArm && treatmentN >= minNPerArm;
+
+  if (!sufficientPower) {
+    return {
+      controlN,
+      controlSuccessN,
+      treatmentN,
+      treatmentSuccessN,
+      posteriorProbabilityTreatmentBetter: 0,
+      sufficientPower: false,
+      significant: false,
+      note: `Insufficient data (control n=${controlN}, treatment n=${treatmentN}, both need >= ${minNPerArm}).`,
+    };
+  }
+
+  let treatmentWins = 0;
+  for (let i = 0; i < monteCarloDraws; i++) {
+    const treatmentSample = sampleBeta(1 + treatmentSuccessN, 1 + (treatmentN - treatmentSuccessN), rng);
+    const controlSample = sampleBeta(1 + controlSuccessN, 1 + (controlN - controlSuccessN), rng);
+    if (treatmentSample > controlSample) treatmentWins++;
+  }
+  const posteriorProbabilityTreatmentBetter = treatmentWins / monteCarloDraws;
+  const significant = posteriorProbabilityTreatmentBetter >= posteriorThreshold;
+
+  return {
+    controlN,
+    controlSuccessN,
+    treatmentN,
+    treatmentSuccessN,
+    posteriorProbabilityTreatmentBetter,
+    sufficientPower: true,
+    significant,
+    note: significant
+      ? `Treatment beats control with ${(posteriorProbabilityTreatmentBetter * 100).toFixed(1)}% posterior probability — clears the ${(posteriorThreshold * 100).toFixed(0)}% bar.`
+      : `Treatment's posterior probability of beating control (${(posteriorProbabilityTreatmentBetter * 100).toFixed(1)}%) doesn't clear the ${(posteriorThreshold * 100).toFixed(0)}% bar yet.`,
+  };
+}
+
 /**
  * Reports a real, computed p-value on whatever data it's given — but
  * `significant` is only ever `true` when the per-arm sample size also
