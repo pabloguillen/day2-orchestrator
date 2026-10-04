@@ -10,20 +10,16 @@ import type { AutonomyConfig, AutonomyDecision, AutonomyLevel, ChangeForAutonomy
  * touching real release mechanics.
  */
 
-/** L4/L5 are ordered above L3 here (for `levelIndex`/`minLevel`) but nothing
- * in this file branches on them specifically — see the "Current
- * implementation reality" note on `AutonomyLevel` in types.ts. Setting an
- * area to L4 or L5 ships exactly like L3 today; this is a deliberate,
- * documented decision (2026-10-03), not a bug to fix by adding more branches
- * here without a real L4/L5 behavior to attach them to first. */
+/** L4/L5 are ordered above L3 here (for `levelIndex`) but nothing in this
+ * file branches on them specifically — see the "Current implementation
+ * reality" note on `AutonomyLevel` in types.ts. Setting an area to L4 or L5
+ * ships exactly like L3 today; this is a deliberate, documented decision
+ * (2026-10-03), not a bug to fix by adding more branches here without a real
+ * L4/L5 behavior to attach them to first. */
 const LEVEL_ORDER: AutonomyLevel[] = ["L0", "L1", "L2", "L3", "L4", "L5"];
 
 function levelIndex(level: AutonomyLevel): number {
   return LEVEL_ORDER.indexOf(level);
-}
-
-function minLevel(a: AutonomyLevel, b: AutonomyLevel): AutonomyLevel {
-  return levelIndex(a) <= levelIndex(b) ? a : b;
 }
 
 /** Hard default: an area not explicitly configured stays at L2 ("Prepare")
@@ -62,15 +58,22 @@ function matchesGlob(filePath: string, glob: string): boolean {
   return new RegExp(`^${pattern}$`).test(filePath);
 }
 
-function resolveFileLevel(filePath: string, config: AutonomyConfig): AutonomyLevel {
-  const matchedLevels = config.areas
-    .filter((area) => area.pathGlobs.some((glob) => matchesGlob(filePath, glob)))
-    .map((area) => area.level);
+/** Pairs a file's resolved level with the configured area that produced it
+ * (if any), so callers never have to re-derive "which area actually governed
+ * this decision" via a separate, independently-matched lookup — that split
+ * is exactly what let `matchedArea` drift out of sync with `effectiveLevel`
+ * (an area not tied to the lowest level could still get reported as the one
+ * that blocked a change). */
+function resolveFileAreaLevel(filePath: string, config: AutonomyConfig): { level: AutonomyLevel; area: string | undefined } {
+  const matched = config.areas.filter((area) => area.pathGlobs.some((glob) => matchesGlob(filePath, glob)));
   // A file matched by no configured area falls back to the default. A file
   // matched by one or more areas uses the most restrictive of *those* —
   // the global default doesn't drag an explicitly-configured area back down.
-  if (matchedLevels.length === 0) return config.defaultLevel;
-  return matchedLevels.reduce((acc, l) => minLevel(acc, l));
+  if (matched.length === 0) return { level: config.defaultLevel, area: undefined };
+  return matched.reduce(
+    (acc, a) => (levelIndex(a.level) <= levelIndex(acc.level) ? { level: a.level, area: a.area } : acc),
+    { level: matched[0]!.level, area: matched[0]!.area },
+  );
 }
 
 /**
@@ -95,17 +98,16 @@ export function evaluateAutonomy(
     };
   }
 
-  const effectiveLevel =
-    change.filesChanged.length === 0
-      ? config.defaultLevel
-      : change.filesChanged
-          .map((f) => resolveFileLevel(f, config))
-          .reduce((acc, l) => minLevel(acc, l));
-
-  const matchedArea =
-    config.areas.find((area) =>
-      change.filesChanged.some((f) => area.pathGlobs.some((glob) => matchesGlob(f, glob))),
-    )?.area ?? "default";
+  // Single pass per changed file, carrying the governing area alongside its
+  // level — not two independent lookups (one for the level, one for the
+  // area) that could each pick a different file/area and disagree.
+  const fileAreaLevels = change.filesChanged.map((f) => resolveFileAreaLevel(f, config));
+  const governing =
+    fileAreaLevels.length === 0
+      ? { level: config.defaultLevel, area: undefined }
+      : fileAreaLevels.reduce((acc, x) => (levelIndex(x.level) <= levelIndex(acc.level) ? x : acc));
+  const effectiveLevel = governing.level;
+  const matchedArea = governing.area ?? "default";
 
   if (levelIndex(effectiveLevel) < levelIndex("L3")) {
     return {

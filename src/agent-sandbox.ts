@@ -20,9 +20,23 @@ import { homedir } from "node:os";
  * potentially attacker-influenced input (a bug report's text, a deployed
  * page's content) could ever steer: the orchestrator's own secrets, and
  * the credential stores under the operator's home directory.
+ *
+ * `CLOUDFLARE_API_TOKEN`/`~/.wrangler` are denied for the same reason as
+ * Sentry/Anthropic, not a separate concern: `release.ts` runs real
+ * `wrangler` deploys from this same operator environment, so whichever
+ * credential wrangler picks up (env var or `~/.wrangler`'s OAuth session)
+ * is just as reachable to a sandboxed agent's shell as `SENTRY_AUTH_TOKEN`
+ * was before that got added here — found by re-auditing this denylist
+ * against everything else in the repo that needs a real secret in this
+ * process's environment, not by an incident.
  */
 
-export const DENIED_ENV_VARS = ["SENTRY_AUTH_TOKEN", "SENTRY_REGION_URL", "ANTHROPIC_API_KEY"];
+export const DENIED_ENV_VARS = [
+  "SENTRY_AUTH_TOKEN",
+  "SENTRY_REGION_URL",
+  "ANTHROPIC_API_KEY",
+  "CLOUDFLARE_API_TOKEN",
+];
 
 const home = homedir();
 export const DENIED_READ_PATHS = [
@@ -34,6 +48,7 @@ export const DENIED_READ_PATHS = [
   `${home}/.npmrc`,
   `${home}/.docker`,
   `${home}/.gnupg`,
+  `${home}/.wrangler`,
 ];
 
 /** The exact `sandbox` option object every agent-invoking `query()` call in
