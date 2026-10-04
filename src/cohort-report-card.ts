@@ -7,7 +7,10 @@
  */
 
 import type { Diagnosis } from "./diagnosis";
+import { UNATTRIBUTED_ARM, UNKNOWN_BUCKET } from "./metrics";
 import type { MetricValue } from "./metrics";
+import type { AuditEntry } from "./owner-feed";
+import type { RecordedProposal } from "./proposals";
 
 const FUNNEL_METRICS_IN_ORDER = [
   "ctr",
@@ -127,6 +130,13 @@ export function buildCohortReportCard(
   baseline: Partial<Record<string, number>>,
   expectedEffectDescription: string,
   creativeThumbnailRef?: string,
+  // Additive, both default to `[]` so every existing call site (and every
+  // existing test) keeps working unchanged: real proposal/audit records to
+  // cross-reference into `linkedItems` (see `findLinkedItems` above) —
+  // previously always `[]` regardless of what either feed actually
+  // contained, a real orphaned-logic finding from the independent audit.
+  relatedProposals: RecordedProposal[] = [],
+  relatedAuditEntries: AuditEntry[] = [],
 ): CohortReportCard {
   const primary = diagnoses.find((d) => d.primary);
   // Highlighting naturally no-ops for a primary diagnosis whose evidence
@@ -146,12 +156,82 @@ export function buildCohortReportCard(
     proposedAction: primary ? RULE_ACTIONS[primary.ruleId] : "No action proposed yet — keep watching.",
     expectedEffect: expectedEffectDescription,
     ...(primary ? { primaryDiagnosis: primary } : {}),
-    linkedItems: [],
+    linkedItems: findLinkedItems(primary, arm, channel, relatedProposals, relatedAuditEntries),
   };
 }
 
 function primaryFunnelMetricFor(diagnosis: Diagnosis): string | undefined {
   return diagnosis.evidence[0]?.metric;
+}
+
+/**
+ * Spec §11: "the report card links to their items" — a real cross-reference
+ * into `proposals.ts`'s recorded-proposal log and `owner-feed.ts`'s autonomy
+ * audit trail, the two real stores this milestone scopes the linked-items
+ * side to (growth-feed.ts items are out of scope here). Neither store
+ * carries a `cohortKey` field: a `RecordedProposal` is a standalone document
+ * a human reviews; an `AuditEntry` records one code change in one area —
+ * neither file was built cohort-aware. So this is a disclosed, inspectable
+ * heuristic, not a guaranteed foreign-key join: a candidate record links to
+ * this cohort only when (1) it was recorded on or after the diagnosis
+ * driving this card (a real response can't predate the problem it's
+ * responding to), and (2) its own real text mentions this cohort's real arm
+ * or channel. No match is a normal, honest outcome for most real cohorts
+ * today — most proposals and audit entries don't yet mention a specific
+ * arm/channel in their text.
+ *
+ * Scoped by `diagnosis.route`, the same routing `rules.ts` already computes
+ * and `RULE_ACTIONS` above already describes in plain language: D4 is the
+ * only rule whose route is "evolution" and whose real proposed action is
+ * "Draft a feature proposal for this cohort and segment" — so only an
+ * "evolution"-routed diagnosis scans proposals. D6/D8's routes
+ * ("healing"/"release") are the only ones whose real proposed action is
+ * about a shipped/auto-applied change ("Raise heal priority..."/"Check the
+ * most recent release for a rollback") — so only those scan the audit
+ * trail. Every other route (allocator/creative/config/composer) has no real
+ * surface among these two feeds to link to yet.
+ */
+export function findLinkedItems(
+  diagnosis: Diagnosis | undefined,
+  arm: string,
+  channel: string,
+  relatedProposals: RecordedProposal[],
+  relatedAuditEntries: AuditEntry[],
+): CohortReportCard["linkedItems"] {
+  if (!diagnosis) return [];
+
+  const needles = [arm, channel]
+    .filter((s): s is string => !!s && s !== UNATTRIBUTED_ARM && s !== UNKNOWN_BUCKET)
+    .map((s) => s.toLowerCase());
+  if (needles.length === 0) return []; // no real, specific arm/channel to search real text for
+
+  const mentionsThisCohort = (text: string): boolean => {
+    const lower = text.toLowerCase();
+    return needles.some((n) => lower.includes(n));
+  };
+  const createdAtMs = new Date(diagnosis.createdAt).getTime();
+
+  const linked: CohortReportCard["linkedItems"] = [];
+
+  if (diagnosis.route === "evolution") {
+    for (const p of relatedProposals) {
+      if (new Date(p.recordedAt).getTime() < createdAtMs) continue;
+      if (mentionsThisCohort(`${p.title} ${p.rationale} ${p.observedEvidence}`)) {
+        linked.push({ feed: "proposals", id: p.title });
+      }
+    }
+  }
+
+  if (diagnosis.route === "release" || diagnosis.route === "healing") {
+    for (const e of relatedAuditEntries) {
+      if (new Date(e.timestamp).getTime() < createdAtMs) continue;
+      if (mentionsThisCohort(`${e.area} ${e.reason} ${e.summary ?? ""} ${e.filesChanged.join(" ")}`)) {
+        linked.push({ feed: "owner-feed", id: e.sourceId });
+      }
+    }
+  }
+
+  return linked;
 }
 
 /** Plain-language render, same idiom as `owner-feed.ts`/`approvals.ts` —

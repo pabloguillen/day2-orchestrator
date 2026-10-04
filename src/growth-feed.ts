@@ -3,7 +3,7 @@ import type { AllocatorState, Arm } from "./growth-allocator";
 import { renderAllocatorSummary } from "./growth-allocator";
 import type { ChannelExecutionResult } from "./growth-execution";
 import type { AuthenticityVerdict, ClaimCheckVerdict } from "./growth-creative";
-import type { JudgePrediction } from "./growth-judge-model";
+import { predictForCandidate, type GroundingPatternLookup, type JudgeModelWeights, type JudgePrediction } from "./growth-judge-model";
 import type { AppStage } from "./growth-strategy";
 import type { GrowthCapability } from "./growth-tools-config";
 
@@ -60,22 +60,60 @@ export type GrowthActionRecord = {
   executionResult: ChannelExecutionResult["status"];
   kpiSnapshot?: Record<string, number>;
   /** Advisory only, from `growth-judge-model.ts`'s `predictForCandidate`
-   * (Part 4) — computed by whoever assembles this record, from the real
-   * `claimsCheck`/`authenticityCheck` above plus `arm`/`strategy.stage`.
-   * Never gates or alters anything here or in `growth-execution.ts`; purely
-   * a transparency note. `basis: "no_model_fallback"` on every record
-   * today (zero real executions exist to train on) — `renderActionLine`
+   * (Part 4) — computed automatically by `recordGrowthAction` below from
+   * this same record's real `arm`/`strategy.stage`/`toolUsed`/`claimsCheck`/
+   * `authenticityCheck`/`groundedInPatternId`, unless a caller already
+   * supplied one explicitly (preserved as-is in that case). Never gates or
+   * alters anything here or in `growth-execution.ts`; purely a transparency
+   * note. `basis: "no_model_fallback"` on every record today (zero real
+   * executions exist to train on, so `recordGrowthAction` always calls
+   * `predictForCandidate` with `weights: null`) — `renderActionLine`
    * deliberately suppresses the note in that case rather than printing
-   * "no prediction" on every single line forever. */
+   * "no prediction" on every single line forever. Still declared optional
+   * here since every record written before this field existed has none. */
   judgePrediction?: JudgePrediction;
 };
 
 /** Append-only JSONL, same idiom as `autonomy.ts`'s `recordAutonomyAudit` —
  * called unconditionally by whoever orchestrates a real action, regardless
  * of whether it was blocked, simulated, or (once real execution is wired
- * up) actually executed. The ledger is a complete record either way. */
-export function recordGrowthAction(auditFile: string, record: GrowthActionRecord): void {
-  appendFileSync(auditFile, `${JSON.stringify(record)}\n`);
+ * up) actually executed. The ledger is a complete record either way.
+ *
+ * Also the one real call site for `growth-judge-model.ts`'s
+ * `predictForCandidate`: every persisted record gets a real `judgePrediction`
+ * attached, computed from this same record's own `arm`/`strategy.stage`/
+ * `toolUsed`/`claimsCheck`/`authenticityCheck`/`groundedInPatternId` — unless
+ * the caller already set one explicitly, which is preserved as-is rather
+ * than overwritten. `weights`/`patternLookup` default to `null`/`{}` (no
+ * trained model, no pattern library wired in), which is honest and correct
+ * today: `predictForCandidate` fails closed to its disclosed
+ * `no_model_fallback` whenever fewer than `MIN_LABELED_EXAMPLES_TO_TRAIN`
+ * real labeled examples exist — true for every real call right now, since
+ * zero real executions have happened yet. That is expected, working
+ * behavior, not an error; a caller that later has real trained weights (or a
+ * real `GroundingPatternLookup`) can pass them through to get a genuine
+ * `learned_model` prediction instead. */
+export function recordGrowthAction(
+  auditFile: string,
+  record: GrowthActionRecord,
+  weights: JudgeModelWeights | null = null,
+  patternLookup: GroundingPatternLookup = {},
+): void {
+  const judgePrediction =
+    record.judgePrediction ??
+    predictForCandidate(
+      {
+        arm: record.arm,
+        strategy: { stage: record.strategy.stage },
+        toolUsed: record.toolUsed,
+        claimsCheck: { truthful: record.claimsCheck.truthful },
+        authenticityCheck: { readsAsGeneric: record.authenticityCheck.readsAsGeneric },
+        groundedInPatternId: record.groundedInPatternId,
+      },
+      weights,
+      patternLookup,
+    );
+  appendFileSync(auditFile, `${JSON.stringify({ ...record, judgePrediction })}\n`);
 }
 
 export function loadGrowthActions(auditFile: string, since?: Date): GrowthActionRecord[] {

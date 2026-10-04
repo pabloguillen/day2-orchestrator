@@ -1,7 +1,34 @@
 import { describe, expect, test } from "bun:test";
-import { buildCohortReportCard, buildFunnelSteps, hasChangedMaterially, renderCohortReportCard, renderCohortReportCards } from "./cohort-report-card";
+import { buildCohortReportCard, buildFunnelSteps, findLinkedItems, hasChangedMaterially, renderCohortReportCard, renderCohortReportCards } from "./cohort-report-card";
 import type { Diagnosis } from "./diagnosis";
 import type { MetricValue } from "./metrics";
+import type { AuditEntry } from "./owner-feed";
+import type { RecordedProposal } from "./proposals";
+
+function proposal(overrides: Partial<RecordedProposal> = {}): RecordedProposal {
+  return {
+    title: "Quick re-add for dominant category",
+    rationale: "Users in arm-a are stuck re-picking the same category every time.",
+    observedEvidence: "deviceId w1: 6/6 expenses in one category.",
+    proposedContract: "type QuickAddShortcut = {...}",
+    openQuestions: [],
+    recordedAt: "2026-10-02T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function auditEntry(overrides: Partial<AuditEntry> = {}): AuditEntry {
+  return {
+    timestamp: "2026-10-02T00:00:00.000Z",
+    sourceId: "src-1",
+    area: "release",
+    filesChanged: ["src/foo.ts"],
+    level: "L3",
+    autoShip: true,
+    reason: "Bug fix, independently verified, CI green.",
+    ...overrides,
+  };
+}
 
 function mv(value: number | null, n = 200): MetricValue {
   return { metric: "x", breakdown: {}, value, n, ci: null, sufficientData: n >= 30 };
@@ -141,5 +168,90 @@ describe("renderCohortReportCard / renderCohortReportCards", () => {
 
   test("zero changed cohorts renders an honest empty state, not a blank string", () => {
     expect(renderCohortReportCards([])).toContain("No cohorts changed materially");
+  });
+});
+
+describe("findLinkedItems — real cross-references into proposals.ts and owner-feed.ts", () => {
+  test("an evolution-routed diagnosis links a real proposal that mentions this arm", () => {
+    const d = diagnosis({ ruleId: "D4", route: "evolution", createdAt: "2026-10-01T00:00:00.000Z" });
+    const p = proposal({ rationale: "Users in arm-a are stuck re-picking the same category every time.", recordedAt: "2026-10-02T00:00:00.000Z" });
+    const linked = findLinkedItems(d, "arm-a", "paid_social", [p], []);
+    expect(linked).toEqual([{ feed: "proposals", id: p.title }]);
+  });
+
+  test("a proposal recorded BEFORE the diagnosis is excluded — a response can't predate the problem", () => {
+    const d = diagnosis({ ruleId: "D4", route: "evolution", createdAt: "2026-10-05T00:00:00.000Z" });
+    const p = proposal({ rationale: "Mentions arm-a.", recordedAt: "2026-09-20T00:00:00.000Z" });
+    expect(findLinkedItems(d, "arm-a", "paid_social", [p], [])).toEqual([]);
+  });
+
+  test("a proposal that never mentions this cohort's arm or channel is excluded", () => {
+    const d = diagnosis({ ruleId: "D4", route: "evolution", createdAt: "2026-10-01T00:00:00.000Z" });
+    const p = proposal({ rationale: "A totally unrelated pattern in arm-z.", recordedAt: "2026-10-02T00:00:00.000Z" });
+    expect(findLinkedItems(d, "arm-a", "paid_social", [p], [])).toEqual([]);
+  });
+
+  test("a non-evolution route (e.g. D3's composer route) never scans proposals, even if one mentions the arm", () => {
+    const d = diagnosis({ ruleId: "D3", route: "composer", createdAt: "2026-10-01T00:00:00.000Z" });
+    const p = proposal({ rationale: "Mentions arm-a directly.", recordedAt: "2026-10-02T00:00:00.000Z" });
+    expect(findLinkedItems(d, "arm-a", "paid_social", [p], [])).toEqual([]);
+  });
+
+  test("a release-routed diagnosis (D8) links a real owner-feed audit entry that mentions this cohort's channel", () => {
+    const d = diagnosis({ ruleId: "D8", route: "release", createdAt: "2026-10-01T00:00:00.000Z" });
+    const e = auditEntry({ sourceId: "src-42", reason: "Regression affecting paid_social users after the last release.", timestamp: "2026-10-02T00:00:00.000Z" });
+    const linked = findLinkedItems(d, "arm-a", "paid_social", [], [e]);
+    expect(linked).toEqual([{ feed: "owner-feed", id: "src-42" }]);
+  });
+
+  test("a healing-routed diagnosis (D6) also links a matching owner-feed audit entry", () => {
+    const d = diagnosis({ ruleId: "D6", route: "healing", createdAt: "2026-10-01T00:00:00.000Z" });
+    const e = auditEntry({ sourceId: "src-7", area: "arm-a", timestamp: "2026-10-02T00:00:00.000Z" });
+    expect(findLinkedItems(d, "arm-a", "paid_social", [], [e])).toEqual([{ feed: "owner-feed", id: "src-7" }]);
+  });
+
+  test("no diagnosis at all (undefined primary) never links anything", () => {
+    const p = proposal({ rationale: "Mentions arm-a." });
+    const e = auditEntry({ area: "arm-a" });
+    expect(findLinkedItems(undefined, "arm-a", "paid_social", [p], [e])).toEqual([]);
+  });
+
+  test("an unattributed arm/unknown channel never produces a match (nothing real and specific to search for)", () => {
+    const d = diagnosis({ ruleId: "D4", route: "evolution", createdAt: "2026-10-01T00:00:00.000Z" });
+    const p = proposal({ rationale: "unattributed users show this pattern", recordedAt: "2026-10-02T00:00:00.000Z" });
+    expect(findLinkedItems(d, "unattributed", "(none)", [p], [])).toEqual([]);
+  });
+});
+
+describe("buildCohortReportCard — real linkedItems wiring (previously always [])", () => {
+  test("a card for an evolution-routed cohort picks up a real matching proposal in linkedItems", () => {
+    const d = diagnosis({ ruleId: "D4", route: "evolution", createdAt: "2026-10-01T00:00:00.000Z" });
+    const p = proposal({ rationale: "A real pattern observed in arm-a.", recordedAt: "2026-10-02T00:00:00.000Z" });
+    const card = buildCohortReportCard(
+      "arm-a@2026-W40",
+      "paid_social",
+      "arm-a",
+      [d],
+      { activation_rate: mv(0.2) },
+      { activation_rate: 0.6 },
+      "Expected to lift activation_rate toward baseline.",
+      undefined,
+      [p],
+      [],
+    );
+    expect(card.linkedItems).toEqual([{ feed: "proposals", id: p.title }]);
+  });
+
+  test("a card with no related proposals/audit entries supplied still returns a real empty array, not a crash", () => {
+    const card = buildCohortReportCard("arm-a@2026-W40", "paid_social", "arm-a", [diagnosis()], {}, {}, "x");
+    expect(card.linkedItems).toEqual([]);
+  });
+
+  test("rendering a card with real linkedItems includes the Linked: line", () => {
+    const d = diagnosis({ ruleId: "D8", route: "release", createdAt: "2026-10-01T00:00:00.000Z" });
+    const e = auditEntry({ sourceId: "src-99", reason: "arm-a regression", timestamp: "2026-10-02T00:00:00.000Z" });
+    const card = buildCohortReportCard("arm-a@2026-W40", "paid_social", "arm-a", [d], {}, {}, "x", undefined, [], [e]);
+    const rendered = renderCohortReportCard(card);
+    expect(rendered).toContain("Linked: owner-feed#src-99");
   });
 });

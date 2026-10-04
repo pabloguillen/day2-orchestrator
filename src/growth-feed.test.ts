@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { AllocatorState, Arm } from "./growth-allocator";
 import type { Creative } from "./growth-creative";
 import { countConsecutiveGenericFlags, loadGrowthActions, recordGrowthAction, renderGrowthFeed, type GrowthActionRecord } from "./growth-feed";
+import { buildFeatureVocabulary, type JudgeModelWeights } from "./growth-judge-model";
 
 const arm: Arm = { channel: "social_content", assetType: "text", formatTag: "text-post" };
 
@@ -65,6 +66,67 @@ describe("recordGrowthAction / loadGrowthActions", () => {
       recordGrowthAction(auditFile, makeRecord({ creativeId: "new", timestamp: "2026-09-10T00:00:00.000Z" }));
       const records = loadGrowthActions(auditFile, new Date("2026-09-05T00:00:00.000Z"));
       expect(records.map((r) => r.creativeId)).toEqual(["new"]);
+    });
+  });
+
+  test("attaches a real (fallback) judgePrediction when the record doesn't set one — never left undefined", () => {
+    withTempDir((dir) => {
+      const auditFile = join(dir, "actions.jsonl");
+      recordGrowthAction(auditFile, makeRecord({ creativeId: "a" }));
+      const [record] = loadGrowthActions(auditFile);
+      expect(record!.judgePrediction).toEqual({
+        predictedSuccessProbability: 0.5,
+        confidence: "none",
+        basis: "no_model_fallback",
+        trainedOnExampleCount: 0,
+      });
+    });
+  });
+
+  test("honestly fails closed to the no_model_fallback even for a record flagged by claims/authenticity checks", () => {
+    withTempDir((dir) => {
+      const auditFile = join(dir, "actions.jsonl");
+      recordGrowthAction(
+        auditFile,
+        makeRecord({
+          creativeId: "flagged",
+          claimsCheck: { creative: creative("all-users"), truthful: false, issues: ["overstated"] },
+          authenticityCheck: { creative: creative("all-users"), readsAsGeneric: true, matchedPatterns: ["x"], suggestion: "y" },
+        }),
+      );
+      const [record] = loadGrowthActions(auditFile);
+      // No real trained model exists yet (zero labeled examples ever passed
+      // in production) — the real call site still fails closed exactly like
+      // growth-judge-model.ts's own `predict` does, not a crash or a
+      // fabricated confident number.
+      expect(record!.judgePrediction?.basis).toBe("no_model_fallback");
+    });
+  });
+
+  test("preserves an explicitly-provided judgePrediction rather than recomputing it", () => {
+    withTempDir((dir) => {
+      const auditFile = join(dir, "actions.jsonl");
+      const explicit = { predictedSuccessProbability: 0.73, confidence: "medium" as const, basis: "learned_model" as const, trainedOnExampleCount: 300 };
+      recordGrowthAction(auditFile, makeRecord({ creativeId: "a", judgePrediction: explicit }));
+      const [record] = loadGrowthActions(auditFile);
+      expect(record!.judgePrediction).toEqual(explicit);
+    });
+  });
+
+  test("attaches a real learned_model prediction when real trained weights are passed in", () => {
+    withTempDir((dir) => {
+      const auditFile = join(dir, "actions.jsonl");
+      const vocabulary = buildFeatureVocabulary();
+      const weights: JudgeModelWeights = {
+        vocabulary,
+        weights: new Array(vocabulary.length + 1).fill(0),
+        trainedOnExampleCount: 200,
+        trainedAt: "2026-09-05T00:00:00.000Z",
+      };
+      recordGrowthAction(auditFile, makeRecord({ creativeId: "a" }), weights);
+      const [record] = loadGrowthActions(auditFile);
+      expect(record!.judgePrediction?.basis).toBe("learned_model");
+      expect(record!.judgePrediction?.trainedOnExampleCount).toBe(200);
     });
   });
 });
