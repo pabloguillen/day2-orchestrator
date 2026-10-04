@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Diagnosis } from "./diagnosis";
 import { runPipeline } from "./pipeline";
 import { fetchFrictionSignals } from "./sources/interaction-friction-signals";
 import { fetchUnresolvedIssuesAsSignals } from "./sources/sentry-signals";
 import { clusterSignals } from "./signals/cluster";
+import { diagnosesToSignals } from "./signals/diagnosis-to-signal";
 import { reportToBugReport } from "./signals/report-to-bug-report";
 import type { Signal } from "./signals/types";
 
@@ -38,6 +40,14 @@ export type AppScoutConfig = {
   appBaseUrl?: string;
   sentryOrg?: string;
   sentryProject?: string;
+  /** Real growth-diagnosis router output for this app (`diagnoseFunnel`'s
+   * `Diagnosis[]`), computed upstream by whatever job already has this
+   * app's cohort metrics/baselines — this CLI doesn't recompute diagnoses,
+   * it only converts the `route: "healing"` ones into signals
+   * (`diagnosisToSignal`) so a confirmed crash/error-rate spike that used
+   * to be a dead-end label on a report card becomes a real candidate the
+   * healing pipeline can act on. */
+  diagnoses?: Diagnosis[];
 };
 
 function parseArgs() {
@@ -55,6 +65,11 @@ function parseArgs() {
     appBaseUrl: get("--app-base-url"),
     sentryOrg: get("--sentry-org"),
     sentryProject: get("--sentry-project"),
+    // Single-app convenience mirror of --apps's inline `diagnoses` field: a
+    // path to a JSON file holding this one app's `Diagnosis[]`, so
+    // --app-id mode can exercise the same healing-diagnosis bridge without
+    // requiring a full multi-app config file.
+    diagnoses: get("--diagnoses"),
     dryRun: args.includes("--dry-run"),
   };
 }
@@ -68,6 +83,9 @@ export function loadAppConfigs(opts: ReturnType<typeof parseArgs>): AppScoutConf
     return parsed as AppScoutConfig[];
   }
   if (opts.appId) {
+    const diagnoses = opts.diagnoses
+      ? (JSON.parse(readFileSync(resolve(opts.diagnoses), "utf-8")) as Diagnosis[])
+      : undefined;
     return [
       {
         id: opts.appId,
@@ -75,13 +93,14 @@ export function loadAppConfigs(opts: ReturnType<typeof parseArgs>): AppScoutConf
         appBaseUrl: opts.appBaseUrl,
         sentryOrg: opts.sentryOrg,
         sentryProject: opts.sentryProject,
+        ...(diagnoses ? { diagnoses } : {}),
       },
     ];
   }
   return [];
 }
 
-async function gatherSignalsForApp(app: AppScoutConfig): Promise<Signal[]> {
+export async function gatherSignalsForApp(app: AppScoutConfig): Promise<Signal[]> {
   const signals: Signal[] = [];
 
   if (app.appBaseUrl) {
@@ -98,6 +117,19 @@ async function gatherSignalsForApp(app: AppScoutConfig): Promise<Signal[]> {
       console.warn(`[day2-health-scout] ${app.id}: Sentry fetch failed: ${err}`);
     }
   }
+  if (app.diagnoses && app.diagnoses.length > 0) {
+    try {
+      const healingSignals = diagnosesToSignals(app.diagnoses);
+      if (healingSignals.length > 0) {
+        console.log(
+          `[day2-health-scout] ${app.id}: ${healingSignals.length} healing-routed diagnosis(es) picked up as real signal(s).`,
+        );
+      }
+      signals.push(...healingSignals);
+    } catch (err) {
+      console.warn(`[day2-health-scout] ${app.id}: diagnosis-to-signal conversion failed: ${err}`);
+    }
+  }
   return signals;
 }
 
@@ -108,10 +140,11 @@ async function main() {
     console.error(
       "Usage: bun run health-scout -- --apps <apps.json> [--dry-run]\n" +
         "   or: bun run health-scout -- --app-id <id> [--repo <path>] [--app-base-url <url>] " +
-        "[--sentry-org <org>] [--sentry-project <project>] [--dry-run]\n\n" +
+        "[--sentry-org <org>] [--sentry-project <project>] [--diagnoses <diagnoses.json>] [--dry-run]\n\n" +
         "Scans every configured app for real error-tracking and interaction-friction " +
-        "signals, clusters them into prioritized reports, and (without --dry-run) files " +
-        "actionable ones through the real healing pipeline.",
+        "signals (plus any healing-routed growth diagnoses supplied via --diagnoses / the " +
+        "--apps file's `diagnoses` field), clusters them into prioritized reports, and " +
+        "(without --dry-run) files actionable ones through the real healing pipeline.",
     );
     process.exit(1);
   }

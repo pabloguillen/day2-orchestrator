@@ -13,9 +13,18 @@
  * expense-buddy or any other specific app. Every field that identifies
  * *which* app a signal came from is an explicit, passed-in value, matching
  * the multi-app direction `apps-registry.ts`'s own `AppEntry` is heading.
+ *
+ * One narrow, deliberate bridge to the growth side: `diagnosis-to-signal.ts`
+ * converts a `route: "healing"` `Diagnosis` (a confirmed crash/error-rate
+ * spike concentrated in a cohort — `diagnosis/rules.ts`'s D6) into a real
+ * `Signal`, because that specific diagnosis route *is* a product-health
+ * finding, not a growth-economics one. Every other `DiagnosisRoute`
+ * (`allocator`, `creative`, `config`, `composer`, `evolution`, `release`)
+ * stays exactly what it was: a human-readable label `cohort-report-card.ts`/
+ * `growth-arm-check.ts` render, never converted here.
  */
 
-export type SignalSource = "sentry" | "interaction-friction" | "ux-swarm";
+export type SignalSource = "sentry" | "interaction-friction" | "ux-swarm" | "growth-diagnosis";
 
 export type Signal = {
   /** Stable id for dedup across repeated scout runs — same discipline as
