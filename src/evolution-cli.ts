@@ -52,7 +52,7 @@ export function parseArgs() {
   };
 }
 
-async function main() {
+export async function main() {
   const { list, appUrl, deviceIds, proposalsFile, rejectionsFile, researchCompetitors, reject, reason } = parseArgs();
   const file = resolve(proposalsFile ?? DEFAULT_PROPOSALS_FILE);
   const rejectionsPath = resolve(rejectionsFile ?? DEFAULT_REJECTIONS_FILE);
