@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { GrowthCapability } from "./growth-tools-config";
 import type { GrowthChannel } from "./growth-strategy";
 import type { BudgetConfig } from "./spend-governance";
+import { computeStagedReward, type StagedRewardInputs, type StagedRewardWeights } from "./growth-reward";
 
 /**
  * Step 4 (self-distributing), Component 3 — adaptive format/content
@@ -63,7 +64,11 @@ export type Arm = {
 /** `totalWeightedReward` — additive, optional (closed-loop M3,
  * docs/closed-loop-spec.md §7): accumulates a real, continuous, staged
  * reward (`growth-reward.ts`'s `computeStagedReward`) per arm, for the new
- * `recordWeightedOutcome`/`selectArmWeighted` pair below. Never written by
+ * `recordWeightedOutcome`/`selectArmWeighted` pair below — concretely wired
+ * via `recordStagedOutcome` further down this file, which is the one place
+ * that actually calls `computeStagedReward` and folds its result into
+ * `recordWeightedOutcome`; callers with staged lifecycle data should go
+ * through it rather than hand-computing a fraction. Never written by
  * `recordOutcome`/read by `selectArm` — those two keep their exact,
  * already-shipped, already-tested integer-only behavior untouched. A state
  * file can accumulate stats via either pathway (or both, on different
@@ -321,6 +326,34 @@ export function recordWeightedOutcome(
   const arms = [...state.arms];
   arms[index] = updated;
   return { arms, updatedAt, ...(state.reconciledCreativeIds ? { reconciledCreativeIds: state.reconciledCreativeIds } : {}) };
+}
+
+/**
+ * Pure. The real wiring this file's own `ArmStats.totalWeightedReward` doc
+ * above refers to: computes the device's current staged reward via
+ * `growth-reward.ts`'s `computeStagedReward`, then folds the result
+ * straight into `recordWeightedOutcome`. This is the only place in the
+ * codebase that turns raw `StagedRewardInputs` (activation/retention/
+ * revenue-or-LTV) into the `[0,1]` fraction `recordWeightedOutcome` expects
+ * — callers who have staged lifecycle data should call this instead of
+ * hand-computing a fraction and calling `recordWeightedOutcome` directly,
+ * so there's exactly one definition of "staged reward" feeding the bandit.
+ *
+ * `computeStagedReward.normalizedReward` is `null` only when
+ * `maturedWeight` is `0` — shouldn't happen in practice (R0 always matures
+ * from day 1), but handled honestly here too: folded in as `0`, the same
+ * "no evidence yet" default `selectArmWeighted` already applies to an arm
+ * with no weighted evidence at all, rather than throwing or guessing.
+ */
+export function recordStagedOutcome(
+  state: AllocatorState,
+  arm: Arm,
+  inputs: StagedRewardInputs,
+  spendUsd: number,
+  weights?: StagedRewardWeights,
+): AllocatorState {
+  const staged = computeStagedReward(inputs, weights);
+  return recordWeightedOutcome(state, arm, staged.normalizedReward ?? 0, spendUsd);
 }
 
 /**

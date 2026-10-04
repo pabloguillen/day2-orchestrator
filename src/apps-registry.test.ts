@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -123,6 +123,70 @@ describe("addApp", () => {
       if (second.ok) return;
       expect(second.reason).toMatch(/already registered/);
       expect(second.reason).toContain("expense-buddy");
+    });
+  });
+
+  describe("pricing-tier enforcement (docs/offering-logic.md — Starter: 1 app, Growth: 5 apps)", () => {
+    test("no maxApps configured (the default) allows adding well past any real plan's tier size — unlimited", () => {
+      withTmpDir((dir) => {
+        const dirs = Array.from({ length: 10 }, (_, i) => `${dir}/app-${i}`);
+        for (const d of dirs) mkdirSync(d);
+        let registry: AppsRegistry = { apps: [] };
+        for (const d of dirs) {
+          const result = addApp(registry, { name: d, repoPath: d, connectionMethod: "local_path" });
+          expect(result.ok).toBe(true);
+          if (result.ok) registry = result.registry;
+        }
+        expect(registry.apps).toHaveLength(10);
+      });
+    });
+
+    test("a Starter-tier cap of 1 allows exactly one app and rejects a second", () => {
+      withTmpDir((dir) => {
+        const dirA = `${dir}/a`;
+        const dirB = `${dir}/b`;
+        mkdirSync(dirA);
+        mkdirSync(dirB);
+        const first = addApp({ apps: [] }, { name: "first-app", repoPath: dirA, connectionMethod: "local_path" }, { maxApps: 1 });
+        expect(first.ok).toBe(true);
+        if (!first.ok) return;
+        const second = addApp(first.registry, { name: "second-app", repoPath: dirB, connectionMethod: "local_path" }, { maxApps: 1 });
+        expect(second.ok).toBe(false);
+        if (second.ok) return;
+        expect(second.reason).toMatch(/allows up to 1 app/);
+      });
+    });
+
+    test("a Growth-tier cap of 5 allows exactly up to 5 apps and rejects the 6th", () => {
+      withTmpDir((dir) => {
+        let registry: AppsRegistry = { apps: [] };
+        for (let i = 0; i < 5; i++) {
+          const d = `${dir}/app-${i}`;
+          mkdirSync(d);
+          const result = addApp(registry, { name: `app-${i}`, repoPath: d, connectionMethod: "local_path" }, { maxApps: 5 });
+          expect(result.ok).toBe(true);
+          if (result.ok) registry = result.registry;
+        }
+        expect(registry.apps).toHaveLength(5);
+
+        const sixthDir = `${dir}/app-5`;
+        mkdirSync(sixthDir);
+        const sixth = addApp(registry, { name: "app-5", repoPath: sixthDir, connectionMethod: "local_path" }, { maxApps: 5 });
+        expect(sixth.ok).toBe(false);
+        if (sixth.ok) return;
+        expect(sixth.reason).toMatch(/allows up to 5 apps/);
+      });
+    });
+
+    test("the cap check doesn't mask the repoPath-exists check — that one still fires first", () => {
+      const result = addApp(
+        { apps: [{ id: "app_1", name: "x", repoPath: "/tmp/x", connectionMethod: "local_path", addedAt: "2026-01-01T00:00:00.000Z" }] },
+        { name: "ghost", repoPath: "/definitely/does/not/exist/anywhere", connectionMethod: "local_path" },
+        { maxApps: 1 },
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toMatch(/doesn't exist/);
     });
   });
 });

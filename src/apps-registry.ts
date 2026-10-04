@@ -58,8 +58,11 @@ export function generateAppId(): string {
 
 /**
  * Fails closed rather than silently creating a duplicate or dangling entry:
- * rejects a `repoPath` that doesn't exist on disk, or one already registered
- * under a different app.
+ * rejects a `repoPath` that doesn't exist on disk, one already registered
+ * under a different app, or (when `options.maxApps` is given) an add that
+ * would exceed the caller's pricing-tier app allowance
+ * (docs/offering-logic.md — Starter: 1 app, Growth: 5 apps, Enterprise:
+ * unlimited).
  */
 export function addApp(
   registry: AppsRegistry,
@@ -75,6 +78,16 @@ export function addApp(
      * other caller omits this and gets a fresh generated id. */
     id?: string;
   },
+  options: {
+    /** The caller's plan entitlement (docs/offering-logic.md's pricing
+     * tiers — Starter: 1, Growth: 5, Enterprise: unlimited), not a
+     * mechanism this file decides on its own; this function only enforces
+     * whatever cap the caller passes in. `undefined` (the default) means
+     * unlimited — every existing caller that doesn't pass `options` keeps
+     * today's exact behavior, including the one real app this platform
+     * powers (expense-buddy). */
+    maxApps?: number;
+  } = {},
 ): { ok: true; registry: AppsRegistry; app: AppEntry } | { ok: false; reason: string } {
   if (!existsSync(input.repoPath)) {
     return { ok: false, reason: `${input.repoPath} doesn't exist on disk.` };
@@ -82,6 +95,12 @@ export function addApp(
   const existing = registry.apps.find((a) => a.repoPath === input.repoPath);
   if (existing) {
     return { ok: false, reason: `${input.repoPath} is already registered as "${existing.name}" (${existing.id}).` };
+  }
+  if (options.maxApps !== undefined && registry.apps.length >= options.maxApps) {
+    return {
+      ok: false,
+      reason: `This plan allows up to ${options.maxApps} app${options.maxApps === 1 ? "" : "s"} — remove one before adding another, or upgrade your plan.`,
+    };
   }
   const app: AppEntry = {
     id: input.id ?? generateAppId(),

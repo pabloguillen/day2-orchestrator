@@ -66,7 +66,7 @@ describe("loadGrowthToolsConfig", () => {
           makeBinding({
             capability: "social_account_operation",
             mcpServerName: "posteverywhere",
-            connectedAccountRef: "expense-buddy-instagram",
+            connectedAccountRefs: { "app_expense_buddy": "expense-buddy-instagram" },
           }),
         ],
       };
@@ -101,6 +101,24 @@ describe("loadGrowthToolsConfig", () => {
       expect(() => loadGrowthToolsConfig(path)).toThrow();
     });
   });
+
+  test("throws on a connectedAccountRefs value that isn't a string-valued map", () => {
+    withTempDir((dir) => {
+      const path = join(dir, ".day2-platform-tools.json");
+      const bad = { ...makeBinding(), connectedAccountRefs: { app_a: 123 } };
+      writeFileSync(path, JSON.stringify({ bindings: [bad] }));
+      expect(() => loadGrowthToolsConfig(path)).toThrow();
+    });
+  });
+
+  test("throws when connectedAccountRefs is an array instead of a map", () => {
+    withTempDir((dir) => {
+      const path = join(dir, ".day2-platform-tools.json");
+      const bad = { ...makeBinding(), connectedAccountRefs: ["not-a-map"] };
+      writeFileSync(path, JSON.stringify({ bindings: [bad] }));
+      expect(() => loadGrowthToolsConfig(path)).toThrow();
+    });
+  });
 });
 
 describe("resolveBindings", () => {
@@ -127,39 +145,89 @@ describe("resolveBindings", () => {
     expect(resolveBindings(config, "creative_generation", "expense-buddy")).toHaveLength(1);
   });
 
-  test("an identity-bearing capability fails closed when connectedAccountRef is unset, even though enabled: true platform-wide", () => {
+  test("an identity-bearing capability fails closed when connectedAccountRefs is unset, even though enabled: true platform-wide", () => {
     const config: GrowthToolsConfig = {
       bindings: [makeBinding({ capability: "social_account_operation", mcpServerName: "posteverywhere", enabled: true })],
     };
     expect(resolveBindings(config, "social_account_operation", "expense-buddy")).toEqual([]);
   });
 
-  test("an identity-bearing capability resolves once connectedAccountRef is set", () => {
+  test("an identity-bearing capability resolves once this app's own connectedAccountRefs entry is set", () => {
     const config: GrowthToolsConfig = {
       bindings: [
         makeBinding({
           capability: "social_account_operation",
           mcpServerName: "posteverywhere",
           enabled: true,
-          connectedAccountRef: "expense-buddy-instagram",
+          connectedAccountRefs: { "expense-buddy": "expense-buddy-instagram" },
         }),
       ],
     };
     expect(resolveBindings(config, "social_account_operation", "expense-buddy")).toHaveLength(1);
   });
 
-  test("all three identity-bearing capabilities fail closed without a connectedAccountRef", () => {
+  test("all three identity-bearing capabilities fail closed without a connectedAccountRefs entry", () => {
     for (const capability of ["social_account_operation", "ad_platform", "website_generation"] as const) {
       const config: GrowthToolsConfig = { bindings: [makeBinding({ capability, enabled: true })] };
       expect(resolveBindings(config, capability, "expense-buddy")).toEqual([]);
     }
   });
 
-  test("design_reference (W46) is NOT identity-bearing — resolves without a connectedAccountRef, unlike the three that are", () => {
+  test("design_reference (W46) is NOT identity-bearing — resolves without a connectedAccountRefs entry, unlike the three that are", () => {
     const config: GrowthToolsConfig = {
       bindings: [makeBinding({ capability: "design_reference", mcpServerName: "figma", enabled: true })],
     };
     expect(resolveBindings(config, "design_reference", "expense-buddy")).toHaveLength(1);
+  });
+
+  describe("per-app scoping (real multi-tenancy — closes former Open Question 12)", () => {
+    test("two different apps with different connection states on the SAME binding resolve independently", () => {
+      const config: GrowthToolsConfig = {
+        bindings: [
+          makeBinding({
+            capability: "social_account_operation",
+            mcpServerName: "posteverywhere",
+            enabled: true,
+            connectedAccountRefs: { "app_expense_buddy": "expense-buddy-instagram" },
+            // app_second-app deliberately has no entry here.
+          }),
+        ],
+      };
+      expect(resolveBindings(config, "social_account_operation", "app_expense_buddy")).toHaveLength(1);
+      expect(resolveBindings(config, "social_account_operation", "app_second_app")).toEqual([]);
+    });
+
+    test("a second app onboarded later does NOT inherit a first app's connected status (the exact latent bug this closes)", () => {
+      const config: GrowthToolsConfig = {
+        bindings: [
+          makeBinding({
+            capability: "ad_platform",
+            mcpServerName: "some-ad-platform",
+            enabled: true,
+            connectedAccountRefs: { "app_a": "ad-account-a" },
+          }),
+        ],
+      };
+      // Before this fix, appId was discarded and this would have incorrectly
+      // resolved as connected for every app once ANY app had a ref set.
+      expect(resolveBindings(config, "ad_platform", "app_b")).toEqual([]);
+    });
+
+    test("both apps connected (with different refs) both resolve, independently of each other", () => {
+      const config: GrowthToolsConfig = {
+        bindings: [
+          makeBinding({
+            capability: "ad_platform",
+            mcpServerName: "some-ad-platform",
+            enabled: true,
+            connectedAccountRefs: { "app_a": "ad-account-a", "app_b": "ad-account-b" },
+          }),
+        ],
+      };
+      expect(resolveBindings(config, "ad_platform", "app_a")).toHaveLength(1);
+      expect(resolveBindings(config, "ad_platform", "app_b")).toHaveLength(1);
+      expect(resolveBindings(config, "ad_platform", "app_c")).toEqual([]);
+    });
   });
 });
 

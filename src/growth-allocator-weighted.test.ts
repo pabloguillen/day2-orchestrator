@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  recordStagedOutcome,
   recordWeightedOutcome,
   selectArmWeighted,
   type AllocatorState,
   type Arm,
 } from "./growth-allocator";
+import { computeStagedReward, type StagedRewardInputs } from "./growth-reward";
 
 // Deterministic PRNG (mulberry32) — real, seeded, reproducible across runs,
 // same "no ambient randomness, inject rng" discipline this project already
@@ -116,6 +118,86 @@ describe("selectArmWeighted — real statistical behavior, not just plumbing", (
 
   test("throws on an empty candidate list rather than guessing", () => {
     expect(() => selectArmWeighted(emptyState, [], mulberry32(1))).toThrow();
+  });
+});
+
+describe("recordStagedOutcome — real growth-reward.ts wiring into the weighted allocator", () => {
+  test("folds computeStagedReward's normalizedReward into recordWeightedOutcome's totalWeightedReward, not a hand-rolled fraction", () => {
+    const inputs: StagedRewardInputs = {
+      activated: true,
+      d7Retained: true,
+      d30Retained: null,
+      revenueOrLtvUsd: null,
+      cacUsd: null,
+    };
+    const expectedFraction = computeStagedReward(inputs).normalizedReward!;
+    const direct = recordWeightedOutcome(emptyState, armA, expectedFraction, 5);
+    const viaStaged = recordStagedOutcome(emptyState, armA, inputs, 5);
+    expect(viaStaged).toEqual(direct);
+  });
+
+  test("a device with zero matured weight folds in as 0 reward rather than throwing or guessing", () => {
+    const inputs: StagedRewardInputs = {
+      activated: false,
+      d7Retained: null,
+      d30Retained: null,
+      revenueOrLtvUsd: null,
+      cacUsd: null,
+    };
+    const zeroWeights = { r0: 0, r1: 0, r2: 0 };
+    // Sanity: computeStagedReward itself really does return null here.
+    expect(computeStagedReward(inputs, zeroWeights).normalizedReward).toBeNull();
+    const result = recordStagedOutcome(emptyState, armA, inputs, 3, zeroWeights);
+    expect(result.arms[0]!.totalWeightedReward).toBe(0);
+  });
+
+  test("a custom weights table is honored end-to-end, not just the default", () => {
+    const inputs: StagedRewardInputs = {
+      activated: true,
+      d7Retained: null,
+      d30Retained: null,
+      revenueOrLtvUsd: null,
+      cacUsd: null,
+    };
+    const customWeights = { r0: 1, r1: 0, r2: 0 };
+    const result = recordStagedOutcome(emptyState, armA, inputs, 1, customWeights);
+    expect(result.arms[0]!.totalWeightedReward).toBe(1);
+  });
+
+  test("accumulates across repeated staged outcomes for the same arm, same as recordWeightedOutcome", () => {
+    let state = recordStagedOutcome(
+      emptyState,
+      armA,
+      { activated: true, d7Retained: null, d30Retained: null, revenueOrLtvUsd: null, cacUsd: null },
+      1,
+    );
+    state = recordStagedOutcome(
+      state,
+      armA,
+      { activated: true, d7Retained: true, d30Retained: null, revenueOrLtvUsd: null, cacUsd: null },
+      1,
+    );
+    expect(state.arms[0]!.attempts).toBe(2);
+    expect(state.arms[0]!.totalWeightedReward).toBeCloseTo(1 + 1, 10); // both inputs normalize to 1.0
+  });
+
+  test("feeds selectArmWeighted end-to-end: a strong staged history for one arm outpicks an untried one", () => {
+    const rng = mulberry32(5);
+    let state = emptyState;
+    state = recordStagedOutcome(
+      state,
+      armA,
+      { activated: true, d7Retained: true, d30Retained: true, revenueOrLtvUsd: 100, cacUsd: 10 },
+      1,
+    );
+    expect(state.arms[0]!.totalWeightedReward).toBeCloseTo(1, 10);
+    let armAPicks = 0;
+    let armBPicks = 0;
+    for (let i = 0; i < 100; i++) {
+      if (selectArmWeighted(state, [armA, armB], rng) === armA) armAPicks++;
+      else armBPicks++;
+    }
+    expect(armAPicks).toBeGreaterThan(armBPicks);
   });
 });
 

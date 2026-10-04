@@ -71,8 +71,9 @@ const GROWTH_CAPABILITIES: readonly GrowthCapability[] = [
  * identity resource (a social account, an ad account, a website/domain)
  * that day2 itself provisions as a one-time, manual, day2-operator action —
  * never conjured by code, never owner-supplied. A binding for one of these
- * capabilities only ever resolves for a given app once `connectedAccountRef`
- * is set, independently of the platform-wide `enabled` flag. */
+ * capabilities only ever resolves for a given app once that app's own entry
+ * in `connectedAccountRefs` is set, independently of the platform-wide
+ * `enabled` flag. */
 const IDENTITY_BEARING_CAPABILITIES: ReadonlySet<GrowthCapability> = new Set([
   "social_account_operation",
   "ad_platform",
@@ -96,10 +97,15 @@ export type ToolBinding = {
    * at the real, app-specific identity resource day2 has provisioned for
    * this app under its own agency/multi-tenant relationship with that
    * platform. Fails closed unset (safety rail 5). Never owner-supplied.
-   * A flat, single-app field — day2 powers exactly one app today
-   * (expense-buddy), so this isn't real per-app multi-tenancy yet; see
-   * Open Question 12 and `resolveBindings`'s own note below. */
-  connectedAccountRef?: string;
+   * Keyed by `appId` (`AppEntry.id` from `apps-registry.ts`'s single
+   * registry — same "one registry, shared across every app" pattern this
+   * file's own `GrowthToolsConfig` already follows, just one level deeper):
+   * a binding can be genuinely "connected" for one app and not another,
+   * which a flat single-app field couldn't express (previously Open
+   * Question 12 — this closes it). `resolveBindings` below looks up
+   * `[appId]`; an app with no entry here is honestly "not connected," never
+   * assumed connected just because some other app is. */
+  connectedAccountRefs?: Record<string, string>;
   /** Disclosed addition beyond the plan's literal type snippet. The plan's
    * own prose describes `selectBestFitBinding` v1 as a rule that "match[es]
    * on assetType/videoFormat/channel, then fall[s] back to the first
@@ -150,7 +156,12 @@ function isValidToolBinding(value: unknown): value is ToolBinding {
   if (!isValidMcpServerConfig(b.serverConfig)) return false;
   if (!Array.isArray(b.allowedTools) || !b.allowedTools.every((t) => typeof t === "string")) return false;
   if (typeof b.enabled !== "boolean") return false;
-  if (b.connectedAccountRef !== undefined && typeof b.connectedAccountRef !== "string") return false;
+  if (b.connectedAccountRefs !== undefined) {
+    if (typeof b.connectedAccountRefs !== "object" || b.connectedAccountRefs === null || Array.isArray(b.connectedAccountRefs)) {
+      return false;
+    }
+    if (!Object.values(b.connectedAccountRefs).every((v) => typeof v === "string")) return false;
+  }
   return true;
 }
 
@@ -186,21 +197,22 @@ export function loadGrowthToolsConfig(path: string): GrowthToolsConfig {
  * Foreplay/tryholo.ai/Arcads.ai subscription doesn't mean every app
  * automatically has a live ad account or social account to operate through.
  *
- * v1 honesty note (Open Question 12): `connectedAccountRef` is a flat,
- * single-app field on `ToolBinding` today, not a per-`appId` map — day2
- * powers exactly one app (expense-buddy), so "unconnected for this app"
- * and "unconnected, period" are indistinguishable right now. `appId` is
- * accepted and threaded through for forward compatibility (real
- * multi-tenancy would key `connectedAccountRef` by it), not because it
- * changes today's behavior — same disclosed simplification as
- * `AppProfile.competitors: null` elsewhere in this project.
+ * Real per-app scoping (closes former Open Question 12): identity-bearing
+ * capabilities resolve a binding as "connected" only when
+ * `connectedAccountRefs[appId]` is set for *this specific* `appId` —
+ * previously `connectedAccountRef` was a flat, single-app field, which
+ * meant the moment a second app was onboarded, any connected binding would
+ * have incorrectly resolved as connected for every app (nothing was keyed
+ * per app). Two apps with different connection state for the same binding
+ * now resolve independently, exactly as a real multi-app registry
+ * (`apps-registry.ts`) requires.
  */
 export function resolveBindings(config: GrowthToolsConfig, capability: GrowthCapability, appId: string): ToolBinding[] {
-  void appId;
   return config.bindings.filter((b) => {
     if (b.capability !== capability || !b.enabled) return false;
     if (IDENTITY_BEARING_CAPABILITIES.has(capability)) {
-      return typeof b.connectedAccountRef === "string" && b.connectedAccountRef.trim().length > 0;
+      const ref = b.connectedAccountRefs?.[appId];
+      return typeof ref === "string" && ref.trim().length > 0;
     }
     return true;
   });
