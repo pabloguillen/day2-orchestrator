@@ -94,7 +94,12 @@ import { ASK_LOG_FILENAME, askDay2, buildAskContext, loadAskLog, recordAsk, vali
 
 const PORT = Number(process.env.DAY2_CONSOLE_API_PORT ?? 4700);
 const ORCHESTRATOR_ROOT = resolve(import.meta.dir, "..");
-const APPS_REGISTRY_PATH = resolve(ORCHESTRATOR_ROOT, APPS_REGISTRY_FILENAME);
+/** Read on every call (not once at import) so integration tests can point
+ * the server at a throwaway registry via DAY2_APPS_REGISTRY_PATH without
+ * ever touching the operator's real `.day2-apps.json`. */
+function appsRegistryPath(): string {
+  return process.env.DAY2_APPS_REGISTRY_PATH ?? resolve(ORCHESTRATOR_ROOT, APPS_REGISTRY_FILENAME);
+}
 
 class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -110,7 +115,7 @@ function json(data: unknown, init?: ResponseInit): Response {
 }
 
 function requireApp(id: string): AppEntry {
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   const app = findApp(registry, id);
   if (!app) throw new HttpError(404, `No app registered with id "${id}".`);
   return app;
@@ -183,13 +188,13 @@ function route(method: string, pathname: string, handler: Handler): void {
 // ---- Apps registry (plan §4/§5) ----
 
 route("GET", "/api/apps", () => {
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   return json({ apps: registry.apps, summary: renderAppsSummary(registry) });
 });
 
 /** Headline numbers for every app at once (console "Your apps" grid). */
 route("GET", "/api/apps/overview", async () => {
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   const apps = await Promise.all(
     registry.apps.map(async (app) => {
       const { spend } = spendFor(app);
@@ -225,7 +230,7 @@ route("POST", "/api/apps", async (req) => {
   if (!body.name || !body.repoPath || !body.connectionMethod) {
     throw new HttpError(400, "name, repoPath, and connectionMethod are required.");
   }
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   const result = addApp(registry, {
     name: body.name,
     repoPath: body.repoPath,
@@ -234,7 +239,7 @@ route("POST", "/api/apps", async (req) => {
     appBaseUrl: body.appBaseUrl,
   });
   if (!result.ok) throw new HttpError(409, result.reason);
-  saveAppsRegistry(APPS_REGISTRY_PATH, result.registry);
+  saveAppsRegistry(appsRegistryPath(), result.registry);
   return json({ app: result.app }, { status: 201 });
 });
 
@@ -243,17 +248,17 @@ route("PATCH", "/api/apps/:id", async (req, params) => {
   if (body.appBaseUrl !== undefined && body.appBaseUrl !== null && typeof body.appBaseUrl !== "string") {
     throw new HttpError(400, "appBaseUrl must be a string.");
   }
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   const result = setAppBaseUrl(registry, params.id!, (body.appBaseUrl as string | null | undefined) ?? undefined);
   if (!result.ok) throw new HttpError(result.reason.startsWith("No app registered") ? 404 : 400, result.reason);
-  saveAppsRegistry(APPS_REGISTRY_PATH, result.registry);
+  saveAppsRegistry(appsRegistryPath(), result.registry);
   return json({ app: result.app });
 });
 
 route("DELETE", "/api/apps/:id", (_req, params) => {
-  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const registry = loadAppsRegistry(appsRegistryPath());
   const next = removeApp(registry, params.id!);
-  saveAppsRegistry(APPS_REGISTRY_PATH, next);
+  saveAppsRegistry(appsRegistryPath(), next);
   return json({ ok: true });
 });
 
@@ -321,13 +326,13 @@ route("POST", "/api/apps/upload", async (req) => {
     await $`unzip -o ${zipPath} -d ${destDir}`.quiet();
     rmSync(zipPath, { force: true });
 
-    const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+    const registry = loadAppsRegistry(appsRegistryPath());
     const result = addApp(registry, { id, name, repoPath: destDir, connectionMethod: "upload" });
     if (!result.ok) {
       rmSync(destDir, { recursive: true, force: true });
       throw new HttpError(409, result.reason);
     }
-    saveAppsRegistry(APPS_REGISTRY_PATH, result.registry);
+    saveAppsRegistry(appsRegistryPath(), result.registry);
     return json({ app: result.app }, { status: 201 });
   } catch (err) {
     rmSync(destDir, { recursive: true, force: true });
