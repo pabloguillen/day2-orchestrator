@@ -255,3 +255,70 @@ export function renderBudgetSummary(config: BudgetConfig, ledger: SpendLedgerEnt
   }
   return lines.join("\n");
 }
+
+export type SpendBreakdown = {
+  spentUsd: number;
+  monthlyBudgetUsd: number;
+  remainingUsd: number;
+  pct: number;
+  killSwitch: boolean;
+  byCategory: Array<{ category: SpendCategory; amountUsd: number }>;
+  /** One entry per calendar day (UTC), oldest first, ending on `now`'s
+   * day — zero-filled so a chart never has to guess at gaps. */
+  byDay: Array<{ date: string; amountUsd: number }>;
+};
+
+/**
+ * Structured twin of `renderBudgetSummary` for the console: the same
+ * ledger, the same dedupe/allowed-only/current-period rules, as numbers
+ * rather than a sentence — so the UI never has to regex-parse prose to
+ * draw a progress bar. Pure (`now` injectable for tests).
+ *
+ * `byDay` covers the last `days` calendar days regardless of period
+ * boundaries, but only ever counts allowed, deduped spend — a denied or
+ * replayed request is never shown as money spent.
+ */
+export function computeSpendBreakdown(
+  config: BudgetConfig,
+  ledger: SpendLedgerEntry[],
+  now: Date = new Date(),
+  days = 8,
+): SpendBreakdown {
+  const allowed = dedupedAllowed(ledger);
+  const bounds = periodBounds(config.periodStart);
+  const inCurrentPeriod = allowed.filter((e) => inPeriod(e.request.requestedAt, bounds));
+  const spentUsd = sumAmounts(inCurrentPeriod);
+  const pct = config.monthlyBudgetUsd > 0 ? Math.round((spentUsd / config.monthlyBudgetUsd) * 100) : 0;
+
+  const byCategoryMap = new Map<SpendCategory, number>();
+  for (const e of inCurrentPeriod) {
+    byCategoryMap.set(e.request.category, (byCategoryMap.get(e.request.category) ?? 0) + e.request.amountUsd);
+  }
+  const byCategory = [...byCategoryMap.entries()]
+    .map(([category, amount]) => ({ category, amountUsd: round2(amount) }))
+    .sort((a, b) => b.amountUsd - a.amountUsd);
+
+  const dayTotals = new Map<string, number>();
+  for (const e of allowed) {
+    const key = dayKey(e.request.requestedAt);
+    dayTotals.set(key, (dayTotals.get(key) ?? 0) + e.request.amountUsd);
+  }
+  const byDay: SpendBreakdown["byDay"] = [];
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    const date = d.toISOString().slice(0, 10);
+    byDay.push({ date, amountUsd: round2(dayTotals.get(date) ?? 0) });
+  }
+
+  return {
+    spentUsd,
+    monthlyBudgetUsd: config.monthlyBudgetUsd,
+    remainingUsd: round2(Math.max(0, config.monthlyBudgetUsd - spentUsd)),
+    pct,
+    killSwitch: config.killSwitch,
+    byCategory,
+    byDay,
+  };
+}

@@ -48,12 +48,20 @@ import {
   setMonthlyBudget,
   setWebsiteEnabled,
 } from "./growth-config";
-import { loadSpendLedger, renderBudgetSummary, type GrowthConfig, type SpendCategory } from "./spend-governance";
+import {
+  computeSpendBreakdown,
+  loadSpendLedger,
+  renderBudgetSummary,
+  type GrowthConfig,
+  type SpendCategory,
+} from "./spend-governance";
 import { deriveGrowthStrategy, fetchStageSignals, renderGrowthStrategySummary } from "./growth-strategy";
 import { loadAllocatorState, renderAllocatorSummary } from "./growth-allocator";
 import { loadGrowthActions, renderGrowthFeed } from "./growth-feed";
 import { listProposals } from "./proposals";
 import type { AutonomyLevel } from "./types";
+import { summarizeApp } from "./app-overview";
+import { ASK_LOG_FILENAME, askDay2, buildAskContext, loadAskLog, recordAsk, validateQuestion } from "./ask-day2";
 
 /**
  * day2 console API server (day2 console plan §5) — Bun.serve, no new
@@ -139,6 +147,29 @@ async function updateGrowthConfig(
   return json({ config: next, summary: renderGrowthConfigSummary(next) });
 }
 
+const SPEND_LEDGER_FILENAME = "day2-spend-ledger.jsonl";
+const AUDIT_FILENAME = "day2-autonomy-audit.jsonl";
+
+function spendFor(app: AppEntry) {
+  const config = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME));
+  const ledger = loadSpendLedger(appFile(app, SPEND_LEDGER_FILENAME));
+  return { config, ledger, spend: computeSpendBreakdown(config.budget, ledger) };
+}
+
+/** Pending day2 PRs for an app, or null when that can't be known (no git
+ * remote, `gh` failing or slow) — callers show "unknown", never a fake 0. */
+async function pendingCardsOrNull(app: AppEntry, timeoutMs = 8000) {
+  if (!hasGitRemote(app.repoPath)) return null;
+  try {
+    return await Promise.race([
+      fetchPendingChangeCards(app.repoPath),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs)),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
 type Handler = (req: Request, params: Record<string, string>) => Promise<Response> | Response;
 type Route = { method: string; pattern: URLPattern; handler: Handler };
 const routes: Route[] = [];
@@ -152,6 +183,33 @@ function route(method: string, pathname: string, handler: Handler): void {
 route("GET", "/api/apps", () => {
   const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
   return json({ apps: registry.apps, summary: renderAppsSummary(registry) });
+});
+
+/** Headline numbers for every app at once (console "Your apps" grid). */
+route("GET", "/api/apps/overview", async () => {
+  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const apps = await Promise.all(
+    registry.apps.map(async (app) => {
+      const { spend } = spendFor(app);
+      const cards = await pendingCardsOrNull(app);
+      return summarizeApp({
+        id: app.id,
+        hasGitRemote: hasGitRemote(app.repoPath),
+        pendingApprovals: cards ? cards.length : null,
+        audit: loadAuditEntries(appFile(app, AUDIT_FILENAME)),
+        spend,
+      });
+    }),
+  );
+  return json({ apps });
+});
+
+/** Who is operating this console — the local git identity, so the UI can
+ * greet the real operator instead of a hardcoded name. */
+route("GET", "/api/operator", async () => {
+  const fromGit = (await $`git config --global user.name`.quiet().nothrow().text()).trim();
+  const name = fromGit || process.env.USER || "there";
+  return json({ name, source: fromGit ? "git" : process.env.USER ? "env" : "default" });
 });
 
 route("POST", "/api/apps", async (req) => {
@@ -329,7 +387,7 @@ route("POST", "/api/apps/:id/autonomy/preview", async (req, params) => {
 
 route("GET", "/api/apps/:id/autonomy/audit", (req, params) => {
   const app = requireApp(params.id!);
-  const entries = loadAuditEntries(appFile(app, "day2-autonomy-audit.jsonl"), sinceParam(req));
+  const entries = loadAuditEntries(appFile(app, AUDIT_FILENAME), sinceParam(req));
   return json({ entries, rendered: renderFeed(entries) });
 });
 
@@ -379,12 +437,12 @@ route("GET", "/api/apps/:id/releases", (req, params) => {
 
 route("GET", "/api/apps/:id/growth/config", (_req, params) => {
   const app = requireApp(params.id!);
-  const config = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME));
-  const ledger = loadSpendLedger(appFile(app, "day2-spend-ledger.jsonl"));
+  const { config, ledger, spend } = spendFor(app);
   return json({
     config,
     summary: renderGrowthConfigSummary(config),
     budgetSummary: renderBudgetSummary(config.budget, ledger),
+    spend,
   });
 });
 
@@ -467,6 +525,45 @@ route("GET", "/api/apps/:id/evolution/proposals", (_req, params) => {
   const app = requireApp(params.id!);
   const proposals = listProposals(appFile(app, "day2-proposals.jsonl"));
   return json({ proposals });
+});
+
+// ---- Ask day2 (console Home question bar) — read-only answers ----
+
+route("GET", "/api/apps/:id/ask", (_req, params) => {
+  const app = requireApp(params.id!);
+  return json({ entries: loadAskLog(appFile(app, ASK_LOG_FILENAME)) });
+});
+
+route("POST", "/api/apps/:id/ask", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { question?: unknown };
+  const valid = validateQuestion(body.question);
+  if (!valid.ok) throw new HttpError(400, valid.reason);
+
+  const { spend } = spendFor(app);
+  const remote = hasGitRemote(app.repoPath);
+  const context = buildAskContext({
+    appName: app.name,
+    profile: loadAppProfile(appFile(app, APP_PROFILE_FILENAME)),
+    spend,
+    autonomySummary: remote ? renderConfigSummary(loadAutonomyConfig(appFile(app, AUTONOMY_CONFIG_FILENAME))) : null,
+    audit: loadAuditEntries(appFile(app, AUDIT_FILENAME)),
+    approvals: await pendingCardsOrNull(app),
+    releases: loadReleaseResults(appFile(app, "day2-release-results.jsonl")),
+    growth: loadGrowthActions(appFile(app, "day2-growth-actions.jsonl")),
+    proposals: listProposals(appFile(app, "day2-proposals.jsonl")),
+  });
+
+  const result = await askDay2(app.repoPath, valid.question, context);
+  if (result.ok) {
+    recordAsk(appFile(app, ASK_LOG_FILENAME), {
+      askedAt: result.askedAt,
+      question: valid.question,
+      answer: result.answer,
+      costUsd: result.costUsd,
+    });
+  }
+  return json(result);
 });
 
 // ---- Dispatch ----

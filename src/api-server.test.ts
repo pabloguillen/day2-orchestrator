@@ -49,6 +49,24 @@ describe("handleRequest — router mechanics", () => {
     expect(typeof body.summary).toBe("string");
   });
 
+  test("GET /api/operator returns a non-empty operator name", async () => {
+    const res = await handleRequest(new Request("http://localhost:4700/api/operator"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.name).toBe("string");
+    expect(body.name.length).toBeGreaterThan(0);
+  });
+
+  test("POST /api/apps/:id/ask 404s for an unknown app before any agent call", async () => {
+    const res = await handleRequest(
+      new Request("http://localhost:4700/api/apps/definitely-not-a-real-id/ask", {
+        method: "POST",
+        body: JSON.stringify({ question: "What shipped?" }),
+      }),
+    );
+    expect(res.status).toBe(404);
+  });
+
   test("a route needing a real app ID 404s cleanly for an ID that doesn't exist, without touching the registry", async () => {
     const res = await handleRequest(new Request("http://localhost:4700/api/apps/definitely-not-a-real-id/releases"));
     expect(res.status).toBe(404);
