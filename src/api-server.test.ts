@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
-import { assertZipEntriesAreContained, handleRequest } from "./api-server";
+import { assertZipEntriesAreContained, handleRequest, isAgentBackedPath } from "./api-server";
 
 /**
  * This file only existed as untested code until now — importing it used to
@@ -124,5 +124,14 @@ describe("assertZipEntriesAreContained — zip-slip hardening", () => {
     await $`python3 ${join(workDir, "make_good.py")}`.quiet();
 
     await expect(assertZipEntriesAreContained(zipPath, destDir)).resolves.toBeUndefined();
+  });
+});
+
+describe("isAgentBackedPath — long-running agent routes get no idle timeout", () => {
+  test("matches the scan and ask routes only", () => {
+    expect(isAgentBackedPath("/api/apps/abc/onboarding/scan")).toBe(true);
+    expect(isAgentBackedPath("/api/apps/abc/ask")).toBe(true);
+    expect(isAgentBackedPath("/api/apps/abc/approvals")).toBe(false);
+    expect(isAgentBackedPath("/api/apps/abc/ask/extra")).toBe(false);
   });
 });

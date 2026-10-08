@@ -11,6 +11,7 @@ import {
   removeApp,
   renderAppsSummary,
   saveAppsRegistry,
+  setAppBaseUrl,
 } from "./apps-registry";
 import type { AppsRegistry } from "./apps-registry";
 
@@ -258,5 +259,29 @@ describe("hasGitRemote", () => {
       execSync("git remote add origin https://github.com/example/example.git", { cwd: dir });
       expect(hasGitRemote(dir)).toBe(true);
     });
+  });
+});
+
+describe("setAppBaseUrl", () => {
+  const registry = {
+    apps: [{ id: "a1", name: "x", repoPath: "/tmp/x", connectionMethod: "local_path" as const, addedAt: "2026-10-01T00:00:00Z" }],
+  };
+
+  test("stores a normalized http(s) URL without a trailing slash", () => {
+    const r = setAppBaseUrl(registry, "a1", " https://expense-buddy.app/ ");
+    expect(r.ok && r.app.appBaseUrl).toBe("https://expense-buddy.app");
+    expect(r.ok && r.registry.apps[0]!.appBaseUrl).toBe("https://expense-buddy.app");
+  });
+
+  test("clears the URL when given an empty value", () => {
+    const withUrl = { apps: [{ ...registry.apps[0]!, appBaseUrl: "https://a.b" }] };
+    const r = setAppBaseUrl(withUrl, "a1", "");
+    expect(r.ok && "appBaseUrl" in r.app).toBe(false);
+  });
+
+  test("rejects non-http schemes, garbage and unknown ids", () => {
+    expect(setAppBaseUrl(registry, "a1", "javascript:alert(1)").ok).toBe(false);
+    expect(setAppBaseUrl(registry, "a1", "not a url").ok).toBe(false);
+    expect(setAppBaseUrl(registry, "nope", "https://a.b").ok).toBe(false);
   });
 });
