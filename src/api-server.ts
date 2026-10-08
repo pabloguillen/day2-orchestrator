@@ -11,6 +11,7 @@ import {
   MANAGED_REPOS_DIR,
   removeApp,
   renderAppsSummary,
+  setAppBaseUrl,
   saveAppsRegistry,
   type AppEntry,
   type ConnectionMethod,
@@ -234,6 +235,18 @@ route("POST", "/api/apps", async (req) => {
   if (!result.ok) throw new HttpError(409, result.reason);
   saveAppsRegistry(APPS_REGISTRY_PATH, result.registry);
   return json({ app: result.app }, { status: 201 });
+});
+
+route("PATCH", "/api/apps/:id", async (req, params) => {
+  const body = (await req.json().catch(() => ({}))) as { appBaseUrl?: unknown };
+  if (body.appBaseUrl !== undefined && body.appBaseUrl !== null && typeof body.appBaseUrl !== "string") {
+    throw new HttpError(400, "appBaseUrl must be a string.");
+  }
+  const registry = loadAppsRegistry(APPS_REGISTRY_PATH);
+  const result = setAppBaseUrl(registry, params.id!, (body.appBaseUrl as string | null | undefined) ?? undefined);
+  if (!result.ok) throw new HttpError(result.reason.startsWith("No app registered") ? 404 : 400, result.reason);
+  saveAppsRegistry(APPS_REGISTRY_PATH, result.registry);
+  return json({ app: result.app });
 });
 
 route("DELETE", "/api/apps/:id", (_req, params) => {
@@ -579,13 +592,18 @@ const CONSOLE_ORIGIN = process.env.DAY2_CONSOLE_ORIGIN ?? "http://localhost:3000
 
 const CORS_HEADERS = {
   "access-control-allow-origin": CONSOLE_ORIGIN,
-  "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "access-control-allow-headers": "content-type",
 };
 
 function withCors(res: Response): Response {
   for (const [k, v] of Object.entries(CORS_HEADERS)) res.headers.set(k, v);
   return res;
+}
+
+/** Routes whose handler waits on a Claude agent run (tens of seconds+). */
+export function isAgentBackedPath(pathname: string): boolean {
+  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask)$/.test(pathname);
 }
 
 /**
@@ -626,6 +644,17 @@ export async function handleRequest(req: Request): Promise<Response> {
 }
 
 if (import.meta.main) {
-  const server = Bun.serve({ port: PORT, hostname: "localhost", fetch: handleRequest });
+  const server = Bun.serve({
+    port: PORT,
+    hostname: "localhost",
+    fetch(req, srv) {
+      // Bun closes a connection after 10s idle by default — shorter than a
+      // real agent call (onboarding scan, Ask day2), which silently dropped
+      // those requests as "Failed to fetch". Agent-backed POSTs get no idle
+      // limit; everything else keeps the default.
+      if (req.method === "POST" && isAgentBackedPath(new URL(req.url).pathname)) srv.timeout(req, 0);
+      return handleRequest(req);
+    },
+  });
   console.log(`[day2-console-api] Listening on http://localhost:${server.port}`);
 }

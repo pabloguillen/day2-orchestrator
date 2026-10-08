@@ -116,6 +116,35 @@ export function addApp(
 }
 
 /** Registry-only — never touches the app's own repo/clone on disk. */
+/** Sets (or clears, with an empty string/undefined) an app's live base URL —
+ * the address growth-strategy.ts reads `/api/day2-stats` from. Only http(s)
+ * URLs are accepted; anything else is rejected rather than stored. */
+export function setAppBaseUrl(
+  registry: AppsRegistry,
+  id: string,
+  appBaseUrl: string | undefined,
+): { ok: true; registry: AppsRegistry; app: AppEntry } | { ok: false; reason: string } {
+  const existing = registry.apps.find((a) => a.id === id);
+  if (!existing) return { ok: false, reason: `No app registered with id "${id}".` };
+  const trimmed = appBaseUrl?.trim();
+  let normalized: string | undefined;
+  if (trimmed) {
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      return { ok: false, reason: `"${trimmed}" isn't a valid URL.` };
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return { ok: false, reason: "The app's address must start with http:// or https://." };
+    }
+    normalized = url.toString().replace(/\/$/, "");
+  }
+  const app: AppEntry = { ...existing, appBaseUrl: normalized };
+  if (!normalized) delete app.appBaseUrl;
+  return { ok: true, app, registry: { apps: registry.apps.map((a) => (a.id === id ? app : a)) } };
+}
+
 export function removeApp(registry: AppsRegistry, id: string): AppsRegistry {
   return { apps: registry.apps.filter((a) => a.id !== id) };
 }
