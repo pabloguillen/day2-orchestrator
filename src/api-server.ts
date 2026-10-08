@@ -62,6 +62,7 @@ import { loadGrowthActions, renderGrowthFeed } from "./growth-feed";
 import { listProposals } from "./proposals";
 import type { AutonomyLevel } from "./types";
 import { summarizeApp } from "./app-overview";
+import { parseBrandDna } from "./brand-dna";
 import { ASK_LOG_FILENAME, askDay2, buildAskContext, loadAskLog, recordAsk, validateQuestion } from "./ask-day2";
 
 /**
@@ -352,6 +353,13 @@ route("GET", "/api/apps/:id/onboarding/profile", (_req, params) => {
 route("PUT", "/api/apps/:id/onboarding/profile", async (req, params) => {
   const app = requireApp(params.id!);
   const profile = (await req.json()) as AppProfile;
+  // Brand DNA feeds every ad, post, email and outreach message — validate
+  // and normalize it here rather than store something generation can't use.
+  if (profile.brand !== undefined && profile.brand !== null) {
+    const brand = parseBrandDna(profile.brand);
+    if (!brand) throw new HttpError(400, "Brand DNA is incomplete — positioning, primary audience and voice tone are required.");
+    profile.brand = brand;
+  }
   saveAppProfile(appFile(app, APP_PROFILE_FILENAME), profile);
   return json({ ok: true, profile });
 });

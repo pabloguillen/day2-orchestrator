@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AppProfile } from "./onboarding";
+import { renderBrandBrief } from "./brand-dna";
 import { isTrendExpired, type TrendSignal } from "./growth-trends";
 
 /**
@@ -68,7 +69,7 @@ Real app grounding (the ONLY source of truth):
 - Tone of voice: ${appProfile.toneOfVoice ?? "not established"}
 - Business model: ${appProfile.businessModel ?? "not established"}
 - Visual style: ${appProfile.styleGuide ? `${appProfile.styleGuide.framework}, colors ${appProfile.styleGuide.colors.join(", ")}` : "not established"}
-
+${appProfile.brand ? `\n${renderBrandBrief(appProfile.brand, "social")}\n` : ""}
 The trend:
 - Description: ${trend.description}
 - Structural format: ${trend.format}

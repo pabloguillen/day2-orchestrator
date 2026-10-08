@@ -11,6 +11,7 @@ import type { Arm } from "./growth-allocator";
 import type { ProvenPattern, StageComparableInsight } from "./growth-patterns";
 import type { ToolBinding } from "./growth-tools-config";
 import type { AppProfile } from "./onboarding";
+import { brandChannelFor, renderBrandBrief } from "./brand-dna";
 import { renderPatternSummary, type TransferablePattern } from "./pattern-transferability";
 
 /**
@@ -226,7 +227,11 @@ does — never invent a feature, claim, or capability not implied by this):
 - Real features: ${appProfile.featureMap.join(", ")}
 - Tone of voice: ${appProfile.toneOfVoice}
 - Visual style: ${styleGuide!.framework}, color palette ${styleGuide!.colors.join(", ")}
-- Target segment for this creative: ${segment}${assetLines}`;
+- Target segment for this creative: ${segment}${assetLines}${
+    appProfile.brand ? `
+
+${renderBrandBrief(appProfile.brand, brandChannelFor(arm.channel))}` : ""
+  }`;
 
   const researchBlock = untrustedResearchBlock(
     competitorAngles,
@@ -636,7 +641,7 @@ Real app grounding:
 - Purpose: ${appProfile.purpose}
 - Tone of voice: ${appProfile.toneOfVoice}
 - Target users: ${appProfile.targetUsers}
-
+${appProfile.brand ? `\n${renderBrandBrief(appProfile.brand)}\n\nAlso flag it (readsAsGeneric: true) if it breaks the brand's "never say" list or sounds unlike its voice.\n` : ""}
 Creative to check:
 Headline: ${creative.headline}
 Body: ${creative.body}

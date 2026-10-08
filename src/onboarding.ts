@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { parseBrandDna, type BrandDna } from "./brand-dna";
 
 /**
  * One-click onboarding (COORDINATION.md W18, Step 1 roadmap) — "Confirm what
@@ -22,8 +23,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
  */
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
-const MAX_TURNS = 25;
-const MAX_BUDGET_USD = 1;
+// Raised from 25 turns / $1 when the scan also started extracting brand DNA
+// (more files to read: copy, theme, README, marketing pages).
+const MAX_TURNS = 35;
+const MAX_BUDGET_USD = 1.5;
 
 export type StyleGuide = {
   colors: string[];
@@ -41,6 +44,10 @@ export type RawAppProfileFields = {
   toneOfVoice: string | null;
   businessModel: string | null;
   caveats: string[];
+  /** Brand DNA (brand-dna.ts) for ads, social, email and outreach. Optional
+   * so profiles saved before it existed still load; null when the scan
+   * couldn't establish one. */
+  brand?: BrandDna | null;
 };
 
 export type CurrentState = {
@@ -93,7 +100,33 @@ guess or invent anything you can't point to in the code):
 6. businessModel: one sentence if you find real payment/pricing/subscription
    code or copy, describing what you found — or null if there's no such code
    at all. Do not assume a business model that isn't evidenced in the repo.
-7. caveats: a list of honest gaps or uncertainties in this profile — e.g.
+7. brand: the brand DNA a copywriter/designer would need to write ads,
+   social posts, emails and outreach in this app's voice. Ground every
+   field in what you actually read (README, landing/marketing pages, UI
+   copy, onboarding text, theme/tokens, fonts, icons/illustrations):
+   - positioning: one sentence — what it promises, for whom, versus the
+     usual alternative.
+   - personality: 3-5 adjectives that describe the brand as written.
+   - audience: {primary: one sentence on the main target group,
+     segments: distinct sub-groups the app's own copy speaks to,
+     painPoints: problems the copy says it solves, motivations: what the
+     users want to achieve}.
+   - voice: {tone: one sentence, doSay: concrete habits of the copy (e.g.
+     "short sentences", "uses 'you'", "light humour"), dontSay: things the
+     copy clearly avoids or that would clash (e.g. "corporate jargon",
+     "fear-based urgency"), sampleLines: 2-5 real lines quoted verbatim
+     from the app's UI or README}.
+   - visual: {palette: [{hex, role}] with real colors and their role
+     (primary, accent, background, text...), typography: font families
+     and how they're used or null, imagery: the style of images/
+     illustrations/icons or null, designLanguage: shapes, radius,
+     density, motion — the overall look — or null}.
+   - channels: {ads, social, email, outreach}: one sentence each on how
+     the brand should show up there, derived from the above; null if you
+     have nothing grounded to say.
+   If there's too little copy/design to say anything grounded, set brand to
+   null and explain why in caveats.
+8. caveats: a list of honest gaps or uncertainties in this profile — e.g.
    "no payment code found, so businessModel is null", "styleGuide inferred
    from Tailwind config only, no explicit brand colors found". Always
    include at least one entry if any field above is null, explaining why.
@@ -110,6 +143,14 @@ fence:
   "styleGuide": {"colors": ["..."], "framework": "..."} | null,
   "toneOfVoice": "..." | null,
   "businessModel": "..." | null,
+  "brand": {
+    "positioning": "...",
+    "personality": ["..."],
+    "audience": {"primary": "...", "segments": ["..."], "painPoints": ["..."], "motivations": ["..."]},
+    "voice": {"tone": "...", "doSay": ["..."], "dontSay": ["..."], "sampleLines": ["..."]},
+    "visual": {"palette": [{"hex": "#...", "role": "..."}], "typography": "..." | null, "imagery": "..." | null, "designLanguage": "..." | null},
+    "channels": {"ads": "..." | null, "social": "..." | null, "email": "..." | null, "outreach": "..." | null}
+  } | null,
   "caveats": ["..."]
 }`;
 }
@@ -164,6 +205,15 @@ export function parseAppProfileFields(finalText: string, isError: boolean): RawA
   const businessModel = p.businessModel;
   if (businessModel !== null && typeof businessModel !== "string") return null;
 
+  // Brand DNA is additive: a malformed brand block costs the brand (with a
+  // caveat saying so), never the whole otherwise-valid profile.
+  const caveats = [...(p.caveats as string[])];
+  let brand: BrandDna | null = null;
+  if (p.brand !== undefined && p.brand !== null) {
+    brand = parseBrandDna(p.brand);
+    if (!brand) caveats.push("Brand DNA came back incomplete from the scan — fill it in by hand before generating content.");
+  }
+
   return {
     purpose: p.purpose,
     targetUsers: p.targetUsers,
@@ -171,7 +221,8 @@ export function parseAppProfileFields(finalText: string, isError: boolean): RawA
     styleGuide: validStyleGuide,
     toneOfVoice: (toneOfVoice as string | null) ?? null,
     businessModel: (businessModel as string | null) ?? null,
-    caveats: p.caveats as string[],
+    caveats,
+    brand,
   };
 }
 
@@ -339,6 +390,24 @@ export function renderAppProfilePlainLanguage(profile: AppProfile): string {
   lines.push("");
   lines.push("## Business model");
   lines.push(profile.businessModel ?? "No payment/pricing code found.");
+  lines.push("");
+  lines.push("## Brand DNA");
+  if (profile.brand) {
+    const b = profile.brand;
+    lines.push(`**Positioning:** ${b.positioning}`);
+    if (b.personality.length) lines.push(`**Personality:** ${b.personality.join(", ")}`);
+    lines.push(`**Audience:** ${b.audience.primary}`);
+    if (b.audience.segments.length) lines.push(`**Segments:** ${b.audience.segments.join("; ")}`);
+    if (b.audience.painPoints.length) lines.push(`**Pain points:** ${b.audience.painPoints.join("; ")}`);
+    lines.push(`**Voice:** ${b.voice.tone}`);
+    if (b.voice.doSay.length) lines.push(`**Do:** ${b.voice.doSay.join("; ")}`);
+    if (b.voice.dontSay.length) lines.push(`**Don't:** ${b.voice.dontSay.join("; ")}`);
+    if (b.visual.palette.length) lines.push(`**Palette:** ${b.visual.palette.map((c) => `${c.hex}${c.role ? ` (${c.role})` : ""}`).join(", ")}`);
+    if (b.visual.typography) lines.push(`**Typography:** ${b.visual.typography}`);
+    if (b.visual.designLanguage) lines.push(`**Design language:** ${b.visual.designLanguage}`);
+  } else {
+    lines.push("Not established yet.");
+  }
   lines.push("");
   lines.push("## Competitors");
   lines.push("Not scanned — needs live web/store search, out of scope for this pass.");

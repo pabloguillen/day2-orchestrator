@@ -227,7 +227,7 @@ the app beyond what's here):
 - Target users: ${appProfile.targetUsers}
 - Real features: ${appProfile.featureMap.join(", ")}
 - Business model: ${appProfile.businessModel ?? "not established — do not invent pricing or a business model"}
-${patternNotes}
+${appProfile.brand ? `- Audience in their own words: ${appProfile.brand.audience.primary}${appProfile.brand.audience.painPoints.length ? `; pain points: ${appProfile.brand.audience.painPoints.join("; ")}` : ""}\n` : ""}${patternNotes}
 Write 3-6 real question-and-answer pairs a genuine prospective user might
 ask an AI assistant about this category (e.g. "what's the best way to
 track shared expenses") where this app's REAL features are a genuinely

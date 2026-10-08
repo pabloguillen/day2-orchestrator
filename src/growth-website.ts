@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { FigmaDesignContext, UploadedAsset } from "./design-references";
 import type { AppProfile } from "./onboarding";
+import { renderBrandBrief } from "./brand-dna";
 import type { WebsiteConfig } from "./spend-governance";
 import type { ToolBinding } from "./growth-tools-config";
 
@@ -116,7 +117,7 @@ capability not implied by this):
 - Real features: ${appProfile.featureMap.join(", ")}
 - Tone of voice: ${appProfile.toneOfVoice}
 - Visual style: ${styleGuide!.framework}, color palette ${styleGuide!.colors.join(", ")}${assetLine}
-${figmaBlock}
+${appProfile.brand ? `\n${renderBrandBrief(appProfile.brand)}\n` : ""}${figmaBlock}
 
 ${templateNote}
 
