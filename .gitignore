@@ -30,3 +30,7 @@ worktrees-tmp-check/
 .day2-credits-account.json
 .day2-credits-ledger.jsonl
 .day2-credits.lock/
+
+# JIRA / Linear connections per app (backlog-trackers.ts) — customer API
+# tokens, never committed.
+.day2-integrations.json

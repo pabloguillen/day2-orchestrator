@@ -299,6 +299,112 @@ describe("ask day2 (no agent call)", () => {
   });
 });
 
+describe("backlog", () => {
+  test("starts empty with the default rules; work needs a git remote", async () => {
+    const res = await call("GET", `/api/apps/${localId}/backlog`);
+    expect(res.status).toBe(200);
+    expect(res.body.tickets).toEqual([]);
+    expect(res.body.settings.rules.map((r: { kind: string }) => r.kind)).toEqual(["builtin", "builtin", "builtin", "builtin", "builtin"]);
+    expect(res.body.canWork).toBe(false);
+    expect((await call("GET", `/api/apps/${remoteId}/backlog`)).body.canWork).toBe(true);
+    expect(res.body.integrations).toEqual({ linear: { connected: false }, jira: { connected: false } });
+  });
+
+  test("creating tickets: validation, pinning, day2 decides when no priority", async () => {
+    expect((await call("POST", `/api/apps/${localId}/backlog/tickets`, { title: " ", type: "bug" })).status).toBe(400);
+    expect((await call("POST", `/api/apps/${localId}/backlog/tickets`, { title: "x", type: "epic" })).status).toBe(400);
+    expect((await call("POST", `/api/apps/${localId}/backlog/tickets`, { title: "x", type: "bug", priority: 7 })).status).toBe(400);
+    const a = await call("POST", `/api/apps/${localId}/backlog/tickets`, { title: "Export to CSV", type: "feature", description: "One CSV per group", priority: 2 });
+    expect(a.status).toBe(201);
+    expect(a.body.ticket).toMatchObject({ id: "D2-1", priority: 2, pinned: true, source: { kind: "user" }, state: "todo" });
+    const b = await call("POST", `/api/apps/${localId}/backlog/tickets`, { title: "Typo on Groups", type: "task" });
+    expect(b.body.ticket).toMatchObject({ id: "D2-2", priority: 3, pinned: false });
+    expect(existsSync(join(LOCAL_REPO, "day2-backlog.json"))).toBe(true);
+  });
+
+  test("editing: rename, pin and unpin, comment, and states day2 owns are refused", async () => {
+    const r = await call("PATCH", `/api/apps/${localId}/backlog/tickets/D2-2`, { title: "Fix typo on Groups", priority: 1 });
+    expect(r.body.ticket).toMatchObject({ title: "Fix typo on Groups", priority: 1, pinned: true });
+    const back = await call("PATCH", `/api/apps/${localId}/backlog/tickets/D2-2`, { priority: null });
+    expect(back.body.ticket.pinned).toBe(false);
+    expect((await call("PATCH", `/api/apps/${localId}/backlog/tickets/D2-2`, { state: "doing" })).status).toBe(400);
+    expect((await call("PATCH", `/api/apps/${localId}/backlog/tickets/D2-9`, { title: "x" })).status).toBe(404);
+    const c = await call("POST", `/api/apps/${localId}/backlog/tickets/D2-2/comments`, { text: "Seen on mobile too" });
+    expect(c.status).toBe(201);
+    expect(c.body.ticket.activity.at(-1)).toMatchObject({ kind: "comment", actor: "user", text: "Seen on mobile too" });
+    expect((await call("POST", `/api/apps/${localId}/backlog/tickets/D2-2/comments`, { text: "" })).status).toBe(400);
+  });
+
+  test("working on a ticket needs a git remote; approving needs something to approve", async () => {
+    const w = await call("POST", `/api/apps/${localId}/backlog/tickets/D2-2/work`);
+    expect(w.status).toBe(409);
+    expect(w.body.error).toMatch(/no connected git remote/);
+    expect((await call("POST", `/api/apps/${localId}/backlog/tickets/D2-2/approve`)).status).toBe(409);
+  });
+
+  test("rules & limits round-trip and re-rank", async () => {
+    const r = await call("PUT", `/api/apps/${localId}/backlog/settings`, {
+      wipLimit: 3,
+      weights: { competition: 2 },
+      autoStart: { features: true },
+      rules: [{ id: "r-stale", enabled: false }, { text: "Bugs before features this week" }],
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.settings).toMatchObject({ wipLimit: 3, autoStart: { features: true } });
+    expect(r.body.settings.rules.find((x: { text: string }) => x.text === "Bugs before features this week").kind).toBe("custom");
+    expect((await call("PUT", `/api/apps/${localId}/backlog/settings`, { wipLimit: 99 })).status).toBe(400);
+    expect((await call("POST", `/api/apps/${localId}/backlog/rerank`)).body.changes).toEqual([]);
+  });
+
+  test("Tell: validates first, and the kill switch stops it before any agent runs", async () => {
+    expect((await call("POST", `/api/apps/${localId}/backlog/tell`, { instruction: " " })).status).toBe(400);
+    expect((await call("POST", `/api/apps/${localId}/backlog/tell`, { instruction: "x", answerTo: "nope" })).status).toBe(404);
+    await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: true });
+    const r = await call("POST", `/api/apps/${localId}/backlog/tell`, { instruction: "Bugs before features" });
+    expect(r.status).toBe(402);
+    await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: false });
+  });
+
+  test("Tell undo restores the backlog", async () => {
+    const { applyTellPlan, parseTellPlan, saveTellLog } = await import("./backlog-tell");
+    const { loadBacklog, saveBacklog } = await import("./backlog");
+    const file = join(LOCAL_REPO, "day2-backlog.json");
+    const applied = applyTellPlan(
+      loadBacklog(file),
+      parseTellPlan('{"summary":"s","operations":[{"op":"park","id":"D2-2"},{"op":"create","title":"New","type":"task"}]}')!,
+      "Park the typo",
+      new Date(),
+    );
+    saveBacklog(file, applied.backlog);
+    saveTellLog(join(LOCAL_REPO, "day2-backlog-tell.json"), [applied.record]);
+    expect((await call("GET", `/api/apps/${localId}/backlog/tell`)).body.records).toHaveLength(1);
+    const undo = await call("POST", `/api/apps/${localId}/backlog/tell/${applied.record.id}/undo`, {});
+    expect(undo.status).toBe(200);
+    expect(undo.body.record.changes.every((c: { undone?: boolean }) => c.undone)).toBe(true);
+    expect(undo.body.tickets.find((t: { id: string }) => t.id === "D2-2").state).toBe("todo");
+    expect(undo.body.tickets.some((t: { title: string }) => t.title === "New")).toBe(false);
+    expect((await call("POST", `/api/apps/${localId}/backlog/tell/nope/undo`, {})).status).toBe(404);
+  });
+
+  test("JIRA/Linear connections: validated, stored without exposing tokens, removable", async () => {
+    expect((await call("PUT", `/api/apps/${localId}/integrations/jira`, { site: "acme", email: "a@b.c", apiToken: "t", projectKey: "EB" })).status).toBe(400);
+    const ok = await call("PUT", `/api/apps/${localId}/integrations/jira`, { site: "https://acme.atlassian.net/", email: "a@b.c", apiToken: "secret-token", projectKey: "EB" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.jira).toMatchObject({ connected: true, site: "https://acme.atlassian.net", projectKey: "EB", label: "day2", mirror: false });
+    expect(JSON.stringify((await call("GET", `/api/apps/${localId}/integrations`)).body)).not.toContain("secret-token");
+    expect(JSON.stringify((await call("GET", `/api/apps/${localId}/backlog`)).body)).not.toContain("secret-token");
+    expect((await call("PUT", `/api/apps/${localId}/integrations/github`, {})).status).toBe(404);
+    const off = await call("DELETE", `/api/apps/${localId}/integrations/jira`);
+    expect(off.body.jira).toEqual({ connected: false });
+    expect((await call("POST", `/api/apps/${localId}/backlog/sync`)).status).toBe(409);
+  });
+
+  test("deleting a ticket", async () => {
+    expect((await call("DELETE", `/api/apps/${localId}/backlog/tickets/D2-1`)).status).toBe(200);
+    expect((await call("DELETE", `/api/apps/${localId}/backlog/tickets/D2-1`)).status).toBe(404);
+  });
+});
+
 describe("operator, unknown routes and removal", () => {
   test("operator endpoint always returns a name", async () => {
     const res = await call("GET", "/api/operator");

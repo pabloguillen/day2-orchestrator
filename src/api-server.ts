@@ -84,6 +84,42 @@ import {
 } from "./credits";
 import { appsRegistryPath, creditStore, ORCHESTRATOR_ROOT } from "./day2-paths";
 import { withCreditContext, type CreditContext } from "./metered-query";
+import { dirname } from "node:path";
+import {
+  findTicket,
+  parseSettingsPatch,
+  rankBacklog,
+  createTicket,
+  updateTicket,
+  deleteTicket,
+  addActivity,
+  putTicket,
+  withBacklog,
+  type Priority,
+  type TicketPatch,
+  type TicketType,
+  type Ticket,
+} from "./backlog";
+import { backlogFile, isRunning, startTicket, syncAppTrackers, tick, trackerClientsFor } from "./backlog-work";
+import {
+  applyTellPlan,
+  buildTellPrompt,
+  loadTellLog,
+  runTellAgent,
+  saveTellLog,
+  TELL_LOG_FILENAME,
+  TELL_MAX_BUDGET_USD,
+  undoTell,
+  validateInstruction,
+} from "./backlog-tell";
+import {
+  INTEGRATIONS_FILENAME,
+  linearClient,
+  loadIntegrations,
+  publicIntegrations,
+  saveIntegrations,
+} from "./backlog-trackers";
+import { gatherSignalsForApp } from "./health-scout-cli";
 
 /**
  * day2 console API server (day2 console plan §5) — Bun.serve, no new
@@ -761,6 +797,410 @@ route("PUT", "/api/apps/:id/credits/caps", async (req, params) => {
   return json({ credits: appCreditUsage(account, events, app.id, new Date()), config });
 });
 
+// ---- Backlog (one board of bugs, features, improvements and tasks) ----
+
+const TYPES: TicketType[] = ["bug", "feature", "improvement", "task"];
+const isPriority = (p: unknown): p is Priority => p === 1 || p === 2 || p === 3 || p === 4;
+
+function integrationsPath(): string {
+  return resolve(dirname(appsRegistryPath()), INTEGRATIONS_FILENAME);
+}
+
+async function requirePlanFeature(feature: "trackerSync" | "createApps"): Promise<void> {
+  const { account } = await readCredits(creditStore());
+  const plan = PLANS[account.plan];
+  if (!plan.features[feature]) {
+    throw new HttpError(402, feature === "trackerSync" ? `JIRA and Linear sync aren't included in the ${plan.name} plan — switch to Growth or Scale.` : `Creating apps isn't included in the ${plan.name} plan — switch to Growth or Scale.`);
+  }
+}
+
+/** Done tickets older than this stay in the file but aren't sent. */
+const DONE_WINDOW_DAYS = 30;
+
+function backlogResponse(app: AppEntry, b: Awaited<ReturnType<typeof loadBacklogFor>>) {
+  const cutoff = Date.now() - DONE_WINDOW_DAYS * 86_400_000;
+  return {
+    tickets: b.tickets.filter((t) => t.state !== "done" || new Date(t.doneAt ?? t.updatedAt).getTime() >= cutoff),
+    settings: b.settings,
+    lastRankedAt: b.lastRankedAt ?? null,
+    running: b.tickets.filter((t) => isRunning(app.id, t.id)).map((t) => t.id),
+    canWork: hasGitRemote(app.repoPath),
+    integrations: publicIntegrations(loadIntegrations(integrationsPath())[app.id]),
+  };
+}
+
+function loadBacklogFor(app: AppEntry) {
+  return withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }));
+}
+
+function trackerClients(appId: string) {
+  return trackerClientsFor(integrationsPath(), appId);
+}
+
+function syncAll(app: AppEntry): Promise<string[]> {
+  return syncAppTrackers(app, integrationsPath());
+}
+
+route("GET", "/api/apps/:id/backlog", async (_req, params) => {
+  const app = requireApp(params.id!);
+  return json(backlogResponse(app, await loadBacklogFor(app)));
+});
+
+route("POST", "/api/apps/:id/backlog/tickets", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  if (!title) throw new HttpError(400, "A ticket needs a title.");
+  if (title.length > 200) throw new HttpError(400, "Keep the title under 200 characters.");
+  if (!TYPES.includes(body.type as TicketType)) throw new HttpError(400, "type must be bug, feature, improvement or task.");
+  if (body.priority !== undefined && body.priority !== null && !isPriority(body.priority)) throw new HttpError(400, "priority must be 1–4, or left out to let day2 decide.");
+  const alsoIn = Array.isArray(body.alsoCreateIn) ? (body.alsoCreateIn as unknown[]).filter((x): x is "linear" | "jira" => x === "linear" || x === "jira") : [];
+  const createdBy = (await $`git config --global user.name`.quiet().nothrow().text()).trim() || undefined;
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const r = createTicket(
+      b,
+      {
+        title,
+        type: body.type as TicketType,
+        description: typeof body.description === "string" ? body.description.slice(0, 8000) : "",
+        doneWhen: Array.isArray(body.doneWhen) ? (body.doneWhen as unknown[]).filter((d): d is string => typeof d === "string").slice(0, 12) : [],
+        ...(isPriority(body.priority) ? { priority: body.priority } : {}),
+        source: { kind: "user", createdBy },
+        actor: "user",
+        actorName: createdBy,
+      },
+      new Date(),
+    );
+    return { backlog: rankBacklog(r.backlog, new Date()).backlog, result: r.ticket };
+  });
+  if (alsoIn.length) {
+    await requirePlanFeature("trackerSync");
+    for (const { client } of trackerClients(app.id).filter((c) => alsoIn.includes(c.client.system))) {
+      const remote = await client.create(ticket);
+      await withBacklog(backlogFile(app), (b) => {
+        const t = findTicket(b, ticket.id)!;
+        const linked: Ticket = {
+          ...t,
+          trackers: [
+            ...t.trackers,
+            { system: client.system, id: remote.id, key: remote.key, url: remote.url, remoteUpdatedAt: remote.updatedAt, syncedPriority: t.priority, syncedState: t.state, seenCommentIds: [], lastSyncedAt: new Date().toISOString() },
+          ],
+          activity: [...t.activity, { at: new Date().toISOString(), actor: "day2", kind: "sync", text: `Also created in ${client.system === "linear" ? "Linear" : "JIRA"} as ${remote.key}.` }],
+        };
+        return { backlog: putTicket(b, linked), result: null };
+      });
+    }
+  }
+  const b = await loadBacklogFor(app);
+  return json({ ticket: findTicket(b, ticket.id) }, { status: 201 });
+});
+
+route("PATCH", "/api/apps/:id/backlog/tickets/:tid", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const patch: TicketPatch = {};
+  if (body.title !== undefined) {
+    if (typeof body.title !== "string" || !body.title.trim()) throw new HttpError(400, "A ticket needs a title.");
+    patch.title = body.title.slice(0, 200);
+  }
+  if (body.type !== undefined) {
+    if (!TYPES.includes(body.type as TicketType)) throw new HttpError(400, "type must be bug, feature, improvement or task.");
+    patch.type = body.type as TicketType;
+  }
+  if (body.description !== undefined) patch.description = String(body.description).slice(0, 8000);
+  if (body.doneWhen !== undefined) {
+    if (!Array.isArray(body.doneWhen)) throw new HttpError(400, "doneWhen must be a list.");
+    patch.doneWhen = (body.doneWhen as unknown[]).filter((d): d is string => typeof d === "string").slice(0, 12);
+  }
+  if (body.priority !== undefined) {
+    if (body.priority !== null && !isPriority(body.priority)) throw new HttpError(400, "priority must be 1–4, or null to let day2 decide.");
+    patch.priority = body.priority as Priority | null;
+  }
+  if (body.state !== undefined) {
+    if (!["todo", "done", "parked"].includes(body.state as string)) {
+      throw new HttpError(400, "state can be set to todo, done or parked — day2 moves tickets into Doing and To be approved itself.");
+    }
+    patch.state = body.state as TicketPatch["state"];
+  }
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const t = findTicket(b, params.tid!);
+    if (!t) throw new HttpError(404, `No ticket ${params.tid}.`);
+    if (patch.state && t.state === "doing" && isRunning(app.id, t.id)) throw new HttpError(409, "day2 is working on this ticket right now.");
+    const r = updateTicket(b, t.id, patch, new Date(), { kind: "user" });
+    const ranked = patch.priority === null ? rankBacklog(r.backlog, new Date()).backlog : r.backlog;
+    return { backlog: ranked, result: findTicket(ranked, t.id)! };
+  });
+  return json({ ticket });
+});
+
+route("DELETE", "/api/apps/:id/backlog/tickets/:tid", async (_req, params) => {
+  const app = requireApp(params.id!);
+  if (isRunning(app.id, params.tid!)) throw new HttpError(409, "day2 is working on this ticket right now.");
+  await withBacklog(backlogFile(app), (b) => {
+    if (!findTicket(b, params.tid!)) throw new HttpError(404, `No ticket ${params.tid}.`);
+    return { backlog: deleteTicket(b, params.tid!), result: null };
+  });
+  return json({ ok: true });
+});
+
+route("POST", "/api/apps/:id/backlog/tickets/:tid/comments", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { text?: unknown };
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text) throw new HttpError(400, "The comment is empty.");
+  if (text.length > 4000) throw new HttpError(400, "Keep a comment under 4,000 characters.");
+  const name = (await $`git config --global user.name`.quiet().nothrow().text()).trim() || undefined;
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    if (!findTicket(b, params.tid!)) throw new HttpError(404, `No ticket ${params.tid}.`);
+    const next = addActivity(b, params.tid!, { actor: "user", name, kind: "comment", text }, new Date());
+    return { backlog: next, result: findTicket(next, params.tid!)! };
+  });
+  return json({ ticket }, { status: 201 });
+});
+
+route("POST", "/api/apps/:id/backlog/tickets/:tid/work", async (_req, params) => {
+  const app = requireApp(params.id!);
+  const r = await startTicket(app, params.tid!);
+  if (!r.ok) throw new HttpError(r.status, r.reason);
+  return json({ ticket: r.ticket, started: r.started }, { status: 202 });
+});
+
+/** OK on a plan (starts the build) or on a fix PR (merges it). */
+route("POST", "/api/apps/:id/backlog/tickets/:tid/approve", async (_req, params) => {
+  const app = requireApp(params.id!);
+  const b = await loadBacklogFor(app);
+  const t = findTicket(b, params.tid!);
+  if (!t) throw new HttpError(404, `No ticket ${params.tid}.`);
+  if (t.state !== "to_approve" || !t.approval) throw new HttpError(409, "Nothing on this ticket is waiting for approval.");
+  if (t.approval.kind === "pr") {
+    requireGitRemote(app);
+    await applyChange(app.repoPath, t.approval.number);
+    const ticket = await withBacklog(backlogFile(app), (bb) => {
+      const r = updateTicket(bb, t.id, { state: "done" }, new Date(), { kind: "user" });
+      return { backlog: r.backlog, result: r.ticket };
+    });
+    return json({ ticket });
+  }
+  // Plan approved: back to To do with the plan kept, then start building.
+  await withBacklog(backlogFile(app), (bb) => {
+    const cur = findTicket(bb, t.id)!;
+    const ticket: Ticket = {
+      ...cur,
+      state: "todo",
+      activity: [...cur.activity, { at: new Date().toISOString(), actor: "user", kind: "work", text: "approved the plan." }],
+    };
+    return { backlog: putTicket(bb, ticket), result: null };
+  });
+  const r = await startTicket(app, t.id);
+  if (!r.ok) throw new HttpError(r.status, r.reason);
+  return json({ ticket: r.ticket, started: r.started }, { status: 202 });
+});
+
+/** "Not this" on a plan, or close the fix PR without merging. */
+route("POST", "/api/apps/:id/backlog/tickets/:tid/reject", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { reason?: unknown };
+  const b = await loadBacklogFor(app);
+  const t = findTicket(b, params.tid!);
+  if (!t) throw new HttpError(404, `No ticket ${params.tid}.`);
+  if (t.state !== "to_approve" || !t.approval) throw new HttpError(409, "Nothing on this ticket is waiting for approval.");
+  if (t.approval.kind === "pr") {
+    requireGitRemote(app);
+    await undoChange(app.repoPath, t.approval.number);
+  }
+  const reason = typeof body.reason === "string" && body.reason.trim() ? `: ${body.reason.trim().slice(0, 500)}` : ".";
+  const what = t.approval.kind === "pr" ? `closed PR #${t.approval.number} without merging` : "sent the plan back";
+  const ticket = await withBacklog(backlogFile(app), (bb) => {
+    const r = updateTicket(bb, t.id, { state: "todo" }, new Date(), { kind: "user" });
+    const next: Ticket = {
+      ...r.ticket,
+      activity: [...r.ticket.activity, { at: new Date().toISOString(), actor: "user", kind: "work", text: `${what}${reason}` }],
+    };
+    return { backlog: putTicket(r.backlog, next), result: next };
+  });
+  return json({ ticket });
+});
+
+route("PUT", "/api/apps/:id/backlog/settings", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = await req.json().catch(() => null);
+  const settings = await withBacklog(backlogFile(app), (b) => {
+    let next;
+    try {
+      next = parseSettingsPatch(body, b.settings);
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+    const ranked = rankBacklog({ ...b, settings: next }, new Date());
+    return { backlog: ranked.backlog, result: next };
+  });
+  return json({ settings });
+});
+
+route("POST", "/api/apps/:id/backlog/rerank", async (_req, params) => {
+  const app = requireApp(params.id!);
+  const changes = await withBacklog(backlogFile(app), (b) => {
+    const r = rankBacklog(b, new Date());
+    return { backlog: r.backlog, result: r.changes };
+  });
+  return json({ changes, ...backlogResponse(app, await loadBacklogFor(app)) });
+});
+
+/** Import new findings, re-rank, reconcile PRs, sync trackers. Never
+ * starts work by itself — that's `bun run backlog tick` on a schedule. */
+route("POST", "/api/apps/:id/backlog/refresh", async (_req, params) => {
+  const app = requireApp(params.id!);
+  const b0 = await loadBacklogFor(app);
+  const sentry = b0.settings.sentry;
+  const report = await tick(app, {
+    gatherSignals:
+      sentry && process.env.SENTRY_AUTH_TOKEN
+        ? () => gatherSignalsForApp({ id: app.id, sentryOrg: sentry.org, sentryProject: sentry.project })
+        : undefined,
+  });
+  const sync = trackerClients(app.id).length ? await syncAll(app) : [];
+  return json({ report, sync, ...backlogResponse(app, await loadBacklogFor(app)) });
+});
+
+// ---- Tell day2 (plain-words instructions that change the backlog) ----
+
+function tellLogPath(app: AppEntry) {
+  return appFile(app, TELL_LOG_FILENAME);
+}
+
+route("GET", "/api/apps/:id/backlog/tell", (_req, params) => {
+  const app = requireApp(params.id!);
+  return json({ records: loadTellLog(tellLogPath(app)) });
+});
+
+route("POST", "/api/apps/:id/backlog/tell", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { instruction?: unknown; answerTo?: unknown };
+  const valid = validateInstruction(body.instruction);
+  if (!valid.ok) throw new HttpError(400, valid.reason);
+  const log = loadTellLog(tellLogPath(app));
+  const earlier = typeof body.answerTo === "string" ? log.find((r) => r.id === body.answerTo) : undefined;
+  if (typeof body.answerTo === "string" && !earlier?.question) throw new HttpError(404, "There's no open question with that id.");
+
+  const profile = loadAppProfile(appFile(app, APP_PROFILE_FILENAME));
+  const goals = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME)).kpiGoals;
+  const appContext = [
+    profile ? renderAppProfilePlainLanguage(profile).slice(0, 4000) : "No app profile yet.",
+    goals.length ? `Goals: ${goals.map((g) => `${g.metric} → ${g.target}${g.byDate ? ` by ${g.byDate}` : ""}`).join("; ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const backlog = await loadBacklogFor(app);
+  const prompt = buildTellPrompt({
+    instruction: valid.instruction,
+    backlog,
+    appName: app.name,
+    appContext,
+    ...(earlier?.question ? { earlierQuestion: { text: earlier.question.text, instruction: earlier.instruction } } : {}),
+  });
+  const { result, credits } = await runWithCredits(app, "scan_answer", "Backlog plan", TELL_MAX_BUDGET_USD, () => runTellAgent(app.repoPath, prompt));
+  if (!result.ok) return json({ ok: false, reason: result.reason, credits });
+
+  const record = await withBacklog(backlogFile(app), (b) => {
+    const applied = applyTellPlan(b, result.plan, valid.instruction, new Date());
+    return { backlog: rankBacklog(applied.backlog, new Date()).backlog, result: { ...applied.record, credits, ...(earlier ? { answerTo: earlier.id } : {}) } };
+  });
+  const nextLog = log.map((r) =>
+    earlier && r.id === earlier.id && r.question ? { ...r, question: { ...r.question, answer: valid.instruction, answeredAt: record.at } } : r,
+  );
+  saveTellLog(tellLogPath(app), [record, ...nextLog]);
+  return json({ ok: true, record, ...backlogResponse(app, await loadBacklogFor(app)) });
+});
+
+route("POST", "/api/apps/:id/backlog/tell/:rid/undo", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { index?: unknown };
+  const log = loadTellLog(tellLogPath(app));
+  const record = log.find((r) => r.id === params.rid);
+  if (!record) throw new HttpError(404, "No such request.");
+  const index = typeof body.index === "number" ? body.index : undefined;
+  if (index !== undefined && !record.changes[index]) throw new HttpError(400, "No such change.");
+  const undone = await withBacklog(backlogFile(app), (b) => {
+    const r = undoTell(b, record, new Date(), index);
+    return { backlog: r.backlog, result: r.record };
+  });
+  saveTellLog(tellLogPath(app), log.map((r) => (r.id === record.id ? undone : r)));
+  return json({ record: undone, ...backlogResponse(app, await loadBacklogFor(app)) });
+});
+
+// ---- JIRA / Linear connections ----
+
+route("GET", "/api/apps/:id/integrations", (_req, params) => {
+  const app = requireApp(params.id!);
+  return json(publicIntegrations(loadIntegrations(integrationsPath())[app.id]));
+});
+
+route("PUT", "/api/apps/:id/integrations/:system", async (req, params) => {
+  const app = requireApp(params.id!);
+  await requirePlanFeature("trackerSync");
+  const system = params.system;
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const s = (k: string) => (typeof body[k] === "string" ? (body[k] as string).trim() : "");
+  const all = loadIntegrations(integrationsPath());
+  const current = all[app.id] ?? {};
+  if (system === "linear") {
+    const apiKey = s("apiKey") || current.linear?.apiKey || "";
+    const teamKey = s("teamKey") || current.linear?.teamKey || "";
+    if (!apiKey || !teamKey) throw new HttpError(400, "Linear needs an API key and a team key (like EXP).");
+    const cfg = { apiKey, teamKey, mirror: body.mirror === undefined ? (current.linear?.mirror ?? true) : body.mirror === true };
+    try {
+      await linearClient(cfg).resolveTeam();
+    } catch (err) {
+      throw new HttpError(400, `Couldn't connect to Linear: ${(err as Error).message}`);
+    }
+    all[app.id] = { ...current, linear: { ...current.linear, ...cfg, lastError: null } };
+  } else if (system === "jira") {
+    const site = s("site") || current.jira?.site || "";
+    const email = s("email") || current.jira?.email || "";
+    const apiToken = s("apiToken") || current.jira?.apiToken || "";
+    const projectKey = s("projectKey") || current.jira?.projectKey || "";
+    if (!/^https:\/\/[^/]+$/.test(site.replace(/\/+$/, ""))) throw new HttpError(400, "JIRA site must look like https://your-team.atlassian.net");
+    if (!email || !apiToken || !projectKey) throw new HttpError(400, "JIRA needs your email, an API token and a project key (like EB).");
+    all[app.id] = {
+      ...current,
+      jira: {
+        ...current.jira,
+        site: site.replace(/\/+$/, ""),
+        email,
+        apiToken,
+        projectKey,
+        label: s("label") || current.jira?.label || "day2",
+        mirror: body.mirror === undefined ? (current.jira?.mirror ?? false) : body.mirror === true,
+        lastError: null,
+      },
+    };
+  } else {
+    throw new HttpError(404, "Only linear and jira can be connected.");
+  }
+  saveIntegrations(integrationsPath(), all);
+  return json(publicIntegrations(all[app.id]));
+});
+
+route("DELETE", "/api/apps/:id/integrations/:system", (_req, params) => {
+  const app = requireApp(params.id!);
+  const all = loadIntegrations(integrationsPath());
+  const current = { ...(all[app.id] ?? {}) };
+  if (params.system === "linear") delete current.linear;
+  else if (params.system === "jira") delete current.jira;
+  else throw new HttpError(404, "Only linear and jira can be connected.");
+  all[app.id] = current;
+  saveIntegrations(integrationsPath(), all);
+  return json(publicIntegrations(current));
+});
+
+route("POST", "/api/apps/:id/backlog/sync", async (_req, params) => {
+  const app = requireApp(params.id!);
+  await requirePlanFeature("trackerSync");
+  if (!trackerClients(app.id).length) throw new HttpError(409, "Connect JIRA or Linear first.");
+  const sync = await syncAll(app);
+  return json({ sync, ...backlogResponse(app, await loadBacklogFor(app)) });
+});
+
 // ---- Dispatch ----
 
 /** Scoped to the console's own origin, not "*" — this server binds to
@@ -785,7 +1225,7 @@ function withCors(res: Response): Response {
 
 /** Routes whose handler waits on a Claude agent run (tens of seconds+). */
 export function isAgentBackedPath(pathname: string): boolean {
-  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask)$/.test(pathname);
+  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname);
 }
 
 /**
