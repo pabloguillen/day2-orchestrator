@@ -86,6 +86,20 @@ describe("applyTellPlan", () => {
   });
 });
 
+describe("undo order", () => {
+  test("re-rank then edit of the same ticket: Undo all restores both, and undoing just the re-rank keeps the edit", () => {
+    let b = emptyBacklog();
+    b = createTicket(b, { title: "Comma decimals", type: "bug", source: { kind: "user" } }, now).backlog;
+    const plan = parseTellPlan('{"summary":"s","operations":[{"op":"reprioritize","id":"D2-1","priority":1},{"op":"edit","id":"D2-1","addDoneWhen":["12,50 parses"]}]}')!;
+    const applied = applyTellPlan(b, plan, "Spain", now);
+    expect(findTicket(applied.backlog, "D2-1")).toMatchObject({ priority: 1, doneWhen: ["12,50 parses"] });
+    const all = undoTell(applied.backlog, applied.record, now);
+    expect(findTicket(all.backlog, "D2-1")).toMatchObject({ priority: 3, doneWhen: [] });
+    const onlyRank = undoTell(applied.backlog, applied.record, now, 0);
+    expect(findTicket(onlyRank.backlog, "D2-1")).toMatchObject({ priority: 3, doneWhen: ["12,50 parses"] });
+  });
+});
+
 describe("prompt and validation", () => {
   test("fences outside text and the owner's words; leaves out done tickets", () => {
     let b = seed();

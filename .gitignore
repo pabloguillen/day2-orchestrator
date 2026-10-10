@@ -34,3 +34,7 @@ worktrees-tmp-check/
 # JIRA / Linear connections per app (backlog-trackers.ts) — customer API
 # tokens, never committed.
 .day2-integrations.json
+
+# day2's own Lovable account (lovable.ts): OAuth tokens and build records.
+.day2-lovable.json
+.day2-lovable-builds.json

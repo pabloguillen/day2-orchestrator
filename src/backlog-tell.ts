@@ -289,20 +289,30 @@ export function applyTellPlan(backlog: Backlog, plan: TellPlan, instruction: str
 export function undoTell(backlog: Backlog, record: TellRecord, now: Date, index?: number): { backlog: Backlog; record: TellRecord } {
   let b = backlog;
   const at = now.toISOString();
-  const changes = record.changes.map((c, i) => {
-    if ((index !== undefined && i !== index) || c.undone || (!c.undo.before.length && !c.undo.createdIds.length)) return c;
+  const changes = [...record.changes];
+  // Newest first, so two changes to the same ticket unwind in order.
+  for (let i = changes.length - 1; i >= 0; i--) {
+    const c = changes[i]!;
+    if ((index !== undefined && i !== index) || c.undone || (!c.undo.before.length && !c.undo.createdIds.length)) continue;
     for (const id of c.undo.createdIds) if (findTicket(b, id)) b = deleteTicket(b, id);
     for (const before of c.undo.before) {
       const current = findTicket(b, before.id);
       if (!current) continue;
+      // Only the fields this change touched go back — later edits stay.
+      const restored: Ticket =
+        c.kind === "reranked"
+          ? { ...current, priority: before.priority, prioritySource: before.prioritySource, pinned: before.pinned }
+          : c.kind === "parked"
+            ? { ...current, state: before.state }
+            : { ...current, title: before.title, description: before.description, doneWhen: before.doneWhen };
       b = putTicket(b, {
-        ...before,
+        ...restored,
         activity: [...current.activity, { at, actor: "user", kind: "edit", text: "undid day2’s change from a Tell request." }],
         updatedAt: at,
       });
     }
-    return { ...c, undone: true };
-  });
+    changes[i] = { ...c, undone: true };
+  }
   return { backlog: b, record: { ...record, changes } };
 }
 

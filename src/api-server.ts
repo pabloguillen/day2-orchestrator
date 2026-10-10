@@ -120,6 +120,20 @@ import {
   saveIntegrations,
 } from "./backlog-trackers";
 import { gatherSignalsForApp } from "./health-scout-cli";
+import {
+  answerBuild,
+  beginConnect,
+  connectTools,
+  defaultPushToGitHub,
+  finishConnect,
+  getBuild,
+  loadBuilds,
+  lovableStatus,
+  startBuild,
+  validateBuildRequest,
+  type BuildDeps,
+  type LovableSetup,
+} from "./lovable";
 
 /**
  * day2 console API server (day2 console plan §5) — Bun.serve, no new
@@ -1201,6 +1215,80 @@ route("POST", "/api/apps/:id/backlog/sync", async (_req, params) => {
   return json({ sync, ...backlogResponse(app, await loadBacklogFor(app)) });
 });
 
+// ---- Create an app with Lovable (day2's own Lovable account) ----
+
+function lovableSetup(): LovableSetup {
+  return { dir: dirname(appsRegistryPath()), callbackUrl: `http://localhost:${PORT}/api/lovable/oauth/callback` };
+}
+
+function buildDeps(): BuildDeps {
+  const setup = lovableSetup();
+  return {
+    tools: () => connectTools(setup),
+    repoDir: (id) => resolve(ORCHESTRATOR_ROOT, MANAGED_REPOS_DIR, id),
+    pushToGitHub: defaultPushToGitHub,
+    registryPath: appsRegistryPath(),
+    credits: creditStore(),
+  };
+}
+
+route("GET", "/api/lovable", () => {
+  const setup = lovableSetup();
+  return json({ ...lovableStatus(setup), builds: loadBuilds(setup).slice(0, 10) });
+});
+
+/** One-time: the operator signs day2's own Lovable account in. */
+route("POST", "/api/lovable/connect", async () => {
+  try {
+    return json(await beginConnect(lovableSetup()));
+  } catch (err) {
+    throw new HttpError(502, `Couldn't reach Lovable to connect: ${(err as Error).message}`);
+  }
+});
+
+route("GET", "/api/lovable/oauth/callback", async (req) => {
+  const url = new URL(req.url);
+  const code = url.searchParams.get("code");
+  const back = `${CONSOLE_ORIGIN}/setup/create`;
+  if (!code) return Response.redirect(`${back}?lovable=error`, 302);
+  try {
+    await finishConnect(lovableSetup(), code, url.searchParams.get("state"));
+    return Response.redirect(`${back}?lovable=connected`, 302);
+  } catch (err) {
+    console.error("[day2-lovable] connect failed:", err);
+    return Response.redirect(`${back}?lovable=error`, 302);
+  }
+});
+
+route("POST", "/api/apps/create", async (req) => {
+  await requirePlanFeature("createApps");
+  const valid = validateBuildRequest(await req.json().catch(() => null));
+  if (!valid.ok) throw new HttpError(400, valid.reason);
+  await requireAppSlot();
+  try {
+    return json({ build: await startBuild(lovableSetup(), valid.request, buildDeps()) }, { status: 202 });
+  } catch (err) {
+    if (err instanceof CreditsError) throw err;
+    throw new HttpError(409, (err as Error).message);
+  }
+});
+
+route("GET", "/api/lovable/builds/:bid", (_req, params) => {
+  const build = getBuild(lovableSetup(), params.bid!);
+  if (!build) throw new HttpError(404, "No such build.");
+  return json({ build });
+});
+
+route("POST", "/api/lovable/builds/:bid/answer", async (req, params) => {
+  const body = (await req.json().catch(() => ({}))) as { decision?: unknown };
+  if (body.decision !== "approved" && body.decision !== "rejected") throw new HttpError(400, "decision must be approved or rejected.");
+  try {
+    return json({ build: await answerBuild(lovableSetup(), params.bid!, body.decision, buildDeps()) });
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+});
+
 // ---- Dispatch ----
 
 /** Scoped to the console's own origin, not "*" — this server binds to
@@ -1225,7 +1313,7 @@ function withCors(res: Response): Response {
 
 /** Routes whose handler waits on a Claude agent run (tens of seconds+). */
 export function isAgentBackedPath(pathname: string): boolean {
-  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname);
+  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname);
 }
 
 /**

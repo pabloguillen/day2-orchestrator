@@ -405,6 +405,23 @@ describe("backlog", () => {
   });
 });
 
+describe("create an app with Lovable (no Lovable calls)", () => {
+  test("status, validation, and a clear refusal while day2's Lovable account isn't connected", async () => {
+    const prevKey = process.env.DAY2_LOVABLE_API_KEY;
+    delete process.env.DAY2_LOVABLE_API_KEY;
+    const status = await call("GET", "/api/lovable");
+    expect(status.body).toMatchObject({ connected: false, method: null, builds: [] });
+    expect(status.body.estimateCredits).toBeGreaterThan(0);
+    expect((await call("POST", "/api/apps/create", { name: "Bad Name", description: "x".repeat(40) })).status).toBe(400);
+    const r = await call("POST", "/api/apps/create", { name: "habit-loop", description: "A habit tracker for people who break streaks." });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/Lovable account isn't connected/);
+    expect((await call("GET", "/api/lovable/builds/nope")).status).toBe(404);
+    expect((await call("POST", "/api/lovable/builds/nope/answer", { decision: "maybe" })).status).toBe(400);
+    if (prevKey !== undefined) process.env.DAY2_LOVABLE_API_KEY = prevKey;
+  });
+});
+
 describe("operator, unknown routes and removal", () => {
   test("operator endpoint always returns a name", async () => {
     const res = await call("GET", "/api/operator");
