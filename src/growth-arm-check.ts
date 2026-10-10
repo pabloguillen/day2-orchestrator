@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { sandboxConfig } from "./agent-sandbox";
 import type { ClaimCheckVerdict } from "./growth-creative";
 import type { DiagnosisRuleId } from "./diagnosis";
+
+const query = meteredQuery("content_generation", "Content check");
 
 /**
  * Swarm checks for new arms (docs/closed-loop-spec.md §10): "Reuse swarm.ts

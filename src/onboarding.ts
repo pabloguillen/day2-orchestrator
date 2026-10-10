@@ -1,6 +1,8 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { parseBrandDna, type BrandDna } from "./brand-dna";
+
+const query = meteredQuery("scan_answer", "App scan");
 
 /**
  * One-click onboarding (COORDINATION.md W18, Step 1 roadmap) — "Confirm what
@@ -26,7 +28,8 @@ const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 // Raised from 25 turns / $1 when the scan also started extracting brand DNA
 // (more files to read: copy, theme, README, marketing pages).
 const MAX_TURNS = 35;
-const MAX_BUDGET_USD = 1.5;
+export const SCAN_MAX_BUDGET_USD = 1.5;
+const MAX_BUDGET_USD = SCAN_MAX_BUDGET_USD;
 
 export type StyleGuide = {
   colors: string[];

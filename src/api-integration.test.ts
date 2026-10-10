@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleRequest } from "./api-server";
 import { ASK_LOG_FILENAME } from "./ask-day2";
+import { listUsdForCredits, recordCharge } from "./credits";
 
 /**
  * End-to-end tests of the console API through the real router
@@ -47,8 +48,13 @@ beforeAll(async () => {
   execSync("git init -q", { cwd: LOCAL_REPO });
 
   const a = await call("POST", "/api/apps", { name: "it-remote", repoPath: REMOTE_REPO, connectionMethod: "local_path" });
-  const b = await call("POST", "/api/apps", { name: "it-local", repoPath: LOCAL_REPO, connectionMethod: "local_path" });
   expect(a.status).toBe(201);
+  // A new account is a one-app trial — the second app needs a plan.
+  const refused = await call("POST", "/api/apps", { name: "it-local", repoPath: LOCAL_REPO, connectionMethod: "local_path" });
+  expect(refused.status).toBe(402);
+  expect(refused.body.error).toMatch(/Trial plan includes 1 app/);
+  expect((await call("PUT", "/api/credits/plan", { plan: "growth", billingCycle: "monthly" })).status).toBe(200);
+  const b = await call("POST", "/api/apps", { name: "it-local", repoPath: LOCAL_REPO, connectionMethod: "local_path" });
   expect(b.status).toBe(201);
   remoteId = a.body.app.id;
   localId = b.body.app.id;
@@ -86,42 +92,112 @@ describe("apps registry", () => {
   });
 });
 
-describe("budget and spend", () => {
-  test("a new app starts with a zero spend breakdown", async () => {
+describe("per-app credits and growth config", () => {
+  test("a new app has used no credits and has no cap", async () => {
     const res = await call("GET", `/api/apps/${localId}/growth/config`);
     expect(res.status).toBe(200);
-    expect(res.body.spend.spentUsd).toBe(0);
-    expect(res.body.spend.byDay).toHaveLength(8);
+    expect(res.body.credits).toMatchObject({ usedThisMonth: 0, usedToday: 0, caps: {} });
+    expect(res.body.credits.byDay).toHaveLength(8);
+    expect(res.body.spend).toBeUndefined();
   });
 
-  test("budget, kill switch, daily cap and goals round-trip through the files", async () => {
-    await call("PUT", `/api/apps/${localId}/growth/budget`, { monthlyBudgetUsd: 120 });
+  test("credit caps round-trip and keep the growth budget rails in step", async () => {
+    const set = await call("PUT", `/api/apps/${localId}/credits/caps`, { monthlyCredits: 6000, dailyCredits: 1500 });
+    expect(set.status).toBe(200);
+    expect(set.body.credits.caps).toEqual({ monthlyCredits: 6000, dailyCredits: 1500 });
+    expect(set.body.config.budget).toMatchObject({ monthlyBudgetUsd: listUsdForCredits(6000), dailyCapUsd: listUsdForCredits(1500) });
+    const cleared = await call("PUT", `/api/apps/${localId}/credits/caps`, { dailyCredits: null });
+    expect(cleared.body.credits.caps).toEqual({ monthlyCredits: 6000 });
+    expect(cleared.body.config.budget.dailyCapUsd).toBeUndefined();
+    expect((await call("PUT", `/api/apps/${localId}/credits/caps`, { monthlyCredits: -5 })).status).toBe(400);
+    expect((await call("PUT", `/api/apps/${localId}/credits/caps`, { monthlyCredits: 1.5 })).status).toBe(400);
+    expect((await call("PUT", "/api/apps/nope/credits/caps", { monthlyCredits: 5 })).status).toBe(404);
+  });
+
+  test("kill switch and goals still round-trip through the files", async () => {
     await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: true });
-    await call("PUT", `/api/apps/${localId}/growth/daily-cap`, { dailyCapUsd: 15 });
     await call("PUT", `/api/apps/${localId}/growth/kpi-goals/wau`, { target: 500, byDate: "2026-12-31" });
     const res = await call("GET", `/api/apps/${localId}/growth/config`);
-    expect(res.body.config.budget).toMatchObject({ monthlyBudgetUsd: 120, killSwitch: true, dailyCapUsd: 15 });
+    expect(res.body.config.budget.killSwitch).toBe(true);
     expect(res.body.config.kpiGoals).toEqual([{ metric: "wau", target: 500, byDate: "2026-12-31" }]);
-    expect(res.body.spend.killSwitch).toBe(true);
     await call("DELETE", `/api/apps/${localId}/growth/kpi-goals/wau`);
     await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: false });
     expect((await call("GET", `/api/apps/${localId}/growth/config`)).body.config.kpiGoals).toEqual([]);
   });
 
-  test("structured spend matches the summary sentence and ignores denied requests", async () => {
-    const cfg = (await call("GET", `/api/apps/${localId}/growth/config`)).body.config;
-    const at = new Date(new Date(cfg.budget.periodStart).getTime() + 3600_000).toISOString();
-    const entry = (id: string, amountUsd: number, allowed: boolean) =>
-      JSON.stringify({
-        timestamp: at,
-        request: { id, category: "social_content", amountUsd, description: "t", requestedAt: at },
-        decision: { allowed, reason: "", remainingMonthlyUsd: 0, remainingDailyUsd: null },
-      });
-    writeFileSync(join(LOCAL_REPO, "day2-spend-ledger.jsonl"), [entry("a", 30, true), entry("b", 999, false)].join("\n") + "\n");
+  test("the kill switch stops agent work before it starts (402, no agent call)", async () => {
+    await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: true });
+    const ask = await call("POST", `/api/apps/${localId}/ask`, { question: "How are signups?" });
+    expect(ask.status).toBe(402);
+    expect(ask.body.code).toBe("kill_switch");
+    const scan = await call("POST", `/api/apps/${localId}/onboarding/scan`);
+    expect(scan.status).toBe(402);
+    await call("PUT", `/api/apps/${localId}/growth/kill-switch`, { killSwitch: false });
+  });
+
+  test("usage shows up per app, per service and per day", async () => {
+    await recordCharge({ dir: ROOT }, { id: "it-1", appId: localId, service: "scan_answer", costUsd: 0.5, description: "App scan" });
     const res = await call("GET", `/api/apps/${localId}/growth/config`);
-    expect(res.body.spend.spentUsd).toBe(30);
-    expect(res.body.spend.byCategory).toEqual([{ category: "social_content", amountUsd: 30 }]);
-    expect(res.body.budgetSummary).toContain("$30.00 of $120.00 used this month (25%)");
+    expect(res.body.credits.usedThisMonth).toBeGreaterThan(0);
+    expect(res.body.credits.byService[0]).toMatchObject({ service: "scan_answer", name: "Scans & answers", count: 1 });
+    expect(res.body.credits.byDay.at(-1).credits).toBe(res.body.credits.usedThisMonth);
+  });
+
+  test("growth feed and formats only ever show credits, never day2's cost", async () => {
+    const record = {
+      id: "r1",
+      timestamp: new Date().toISOString(),
+      strategy: { stage: "pre_launch", channel: "paid_ads" },
+      arm: { channel: "paid_ads", assetType: "image", formatTag: "x" },
+      toolUsed: null,
+      frequency: "once",
+      spend: { requested: 12.34, allowed: true, runningMonthlyTotalUsd: 12.34, monthlyBudgetUsd: 100 },
+      claimsCheck: { truthful: true, fabricatesTestimonialIdentity: false, issues: [] },
+      authenticityCheck: { readsAsGeneric: false, issues: [] },
+      executionResult: "simulated_stopped_before_live_action",
+    };
+    writeFileSync(join(LOCAL_REPO, "day2-growth-actions.jsonl"), JSON.stringify(record) + "\n");
+    writeFileSync(
+      join(LOCAL_REPO, "day2-allocator-state.json"),
+      JSON.stringify({ arms: [{ arm: record.arm, attempts: 1, successes: 0, spendUsd: 12.34 }], updatedAt: record.timestamp }),
+    );
+    const feed = await call("GET", `/api/apps/${localId}/growth/feed`);
+    expect(feed.body.records[0].spend).toEqual({ credits: expect.any(Number), allowed: true });
+    expect(JSON.stringify(feed.body)).not.toContain("12.34");
+    const formats = await call("GET", `/api/apps/${localId}/growth/allocator`);
+    expect(formats.body.state.arms[0].spendCredits).toBeGreaterThan(0);
+    expect(JSON.stringify(formats.body)).not.toContain("12.34");
+  });
+});
+
+describe("plan & credits", () => {
+  test("one balance for the account; nothing reveals cost or markup", async () => {
+    const res = await call("GET", "/api/credits");
+    expect(res.status).toBe(200);
+    expect(res.body.plan.id).toBe("growth");
+    expect(res.body.balance.allowance).toBe(8500);
+    expect(res.body.catalog.plans.map((p: { id: string }) => p.id)).toEqual(["trial", "starter", "growth", "scale"]);
+    expect(res.body.catalog.paymentsConnected).toBe(false);
+    const text = JSON.stringify(res.body);
+    expect(text).not.toMatch(/costUsd|markup|MARKUP|eurCents"/);
+  });
+
+  test("top-ups, auto top-up and plan changes", async () => {
+    const topUp = await call("POST", "/api/credits/top-ups", { packId: "1k" });
+    expect(topUp.status).toBe(201);
+    expect(topUp.body.balance.topUp).toBe(1000);
+    expect((await call("POST", "/api/credits/top-ups", { packId: "nope" })).status).toBe(400);
+    const auto = await call("PUT", "/api/credits/auto-top-up", { enabled: true, packId: "10k" });
+    expect(auto.body.autoTopUp).toEqual({ enabled: true, packId: "10k" });
+    expect((await call("PUT", "/api/credits/auto-top-up", { enabled: "yes" })).status).toBe(400);
+    const up = await call("PUT", "/api/credits/plan", { plan: "scale", billingCycle: "monthly" });
+    expect(up.body.effective).toBe("now");
+    expect(up.body.plan.id).toBe("scale");
+    const down = await call("PUT", "/api/credits/plan", { plan: "starter", billingCycle: "yearly" });
+    expect(down.body.effective).toBe("next_month");
+    expect(down.body.pendingPlan).toMatchObject({ plan: "starter", billingCycle: "yearly" });
+    expect((await call("PUT", "/api/credits/plan", { plan: "trial" })).status).toBe(400);
+    expect((await call("PUT", "/api/credits/plan", { plan: "growth", billingCycle: "weekly" })).status).toBe(400);
   });
 });
 
@@ -134,7 +210,8 @@ describe("apps overview", () => {
     const res = await call("GET", "/api/apps/overview");
     expect(res.status).toBe(200);
     const local = res.body.apps.find((a: { id: string }) => a.id === localId);
-    expect(local).toMatchObject({ hasGitRemote: false, pendingApprovals: null, autoShippedThisMonth: 1, spentUsd: 30 });
+    expect(local).toMatchObject({ hasGitRemote: false, pendingApprovals: null, autoShippedThisMonth: 1, monthlyCreditCap: 6000 });
+    expect(local.creditsUsedThisMonth).toBeGreaterThan(0);
     const remote = res.body.apps.find((a: { id: string }) => a.id === remoteId);
     expect(remote.hasGitRemote).toBe(true);
   }, 20_000);
@@ -211,8 +288,8 @@ describe("ask day2 (no agent call)", () => {
     writeFileSync(
       join(LOCAL_REPO, ASK_LOG_FILENAME),
       [
-        { askedAt: "2026-10-01T00:00:00Z", question: "old", answer: "A", costUsd: 0 },
-        { askedAt: "2026-10-02T00:00:00Z", question: "new", answer: "B", costUsd: 0 },
+        { askedAt: "2026-10-01T00:00:00Z", question: "old", answer: "A", credits: 0 },
+        { askedAt: "2026-10-02T00:00:00Z", question: "new", answer: "B", credits: 0 },
       ]
         .map((e) => JSON.stringify(e))
         .join("\n") + "\n",

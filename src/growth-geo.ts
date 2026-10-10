@@ -1,7 +1,9 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { AppProfile } from "./onboarding";
 import { isValidMechanismDependsOn } from "./pattern-transferability";
 import type { ContextDimension } from "./pattern-transferability";
+
+const query = meteredQuery("content_generation", "AI search content");
 
 /**
  * Step 4 (self-distributing) extension — GEO (generative-engine

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { sandboxConfig } from "./agent-sandbox";
 import { buildAuthenticityChecklist } from "./ai-slop-patterns";
 import type { CompetitorAngleInsight, SocialTrendInsight } from "./competitor-feed";
@@ -13,6 +13,8 @@ import type { ToolBinding } from "./growth-tools-config";
 import type { AppProfile } from "./onboarding";
 import { brandChannelFor, renderBrandBrief } from "./brand-dna";
 import { renderPatternSummary, type TransferablePattern } from "./pattern-transferability";
+
+const query = meteredQuery("content_generation", "Creative");
 
 /**
  * Step 4 (self-distributing), Component 5 — creative generation

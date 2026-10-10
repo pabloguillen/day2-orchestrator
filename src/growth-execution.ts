@@ -10,6 +10,7 @@ import {
 import type { AuthenticityVerdict, ClaimCheckVerdict, Creative } from "./growth-creative";
 import type { ArmLaunchGateResult } from "./growth-arm-check";
 import type { GrowthCapability, ToolBinding } from "./growth-tools-config";
+import type { CreditCheck } from "./credits";
 import { evaluateSpend, type BudgetConfig, type SpendDecision, type SpendLedgerEntry, type SpendRequest } from "./spend-governance";
 
 /**
@@ -77,6 +78,13 @@ export type ChannelExecutionOptions = {
    * already-cleared arm on every single execution isn't what the spec
    * asks for and would be wasted real agent spend. */
   armLaunchGate?: ArmLaunchGateResult;
+  /** The account-wide credits gate (credits.ts `checkCredits`, for this
+   * app, service `paid_ads` or `content_generation`, with the spend
+   * request's amount as the worst case). Checked right after the per-app
+   * budget: an action must fit both the app's growth rails and the
+   * account's credit balance/caps. The caller charges the real amount with
+   * `recordCharge` after a live action, same split as `recordSpend`. */
+  creditCheck?: CreditCheck;
   /** Default FALSE — opposite polarity from `release.ts`'s `dryRun`, same
    * late placement (checked last, immediately before the one real external
    * call). See the file header on why the polarity must differ: everything
@@ -91,6 +99,7 @@ export type ChannelExecutionResult =
   | { status: "blocked_by_authenticity_check"; verdict: AuthenticityVerdict }
   | { status: "blocked_by_arm_launch_gate"; gateResult: Exclude<ArmLaunchGateResult, { allowed: true }> }
   | { status: "blocked_by_budget"; spendDecision: SpendDecision }
+  | { status: "blocked_by_credits"; reason: string }
   | { status: "blocked_by_tool_policy"; reason: string }
   | { status: "blocked_by_unconnected_account"; capability: GrowthCapability }
   | { status: "simulated_stopped_before_live_action"; spendDecision: SpendDecision; wouldSpendUsd: number; wouldPublishTo: string }
@@ -139,6 +148,10 @@ export async function executeChannelAction(opts: ChannelExecutionOptions): Promi
   const spendDecision = evaluateSpend(opts.spendRequest, opts.budget, opts.ledger);
   if (!spendDecision.allowed) {
     return { status: "blocked_by_budget", spendDecision };
+  }
+
+  if (opts.creditCheck && !opts.creditCheck.ok) {
+    return { status: "blocked_by_credits", reason: opts.creditCheck.reason };
   }
 
   if (opts.toolBinding && hasAlwaysDenyPolicy(opts.toolBinding)) {

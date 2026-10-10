@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { chromium } from "playwright";
 import { ingestCandidate, loadPatternLibrary, savePatternLibrary, type PatternLibrary, type RawCandidate } from "./pattern-library";
 import { isValidMechanismDependsOn, type ContextDimension } from "./pattern-transferability";
@@ -10,6 +10,8 @@ import {
   type RedditPost,
   type YoutubeTrendingVideo,
 } from "./growth-trend-sources";
+
+const query = meteredQuery("content_generation", "Trend research");
 
 /**
  * Track B — trend/timely detection (docs/distribution-intelligence.md,

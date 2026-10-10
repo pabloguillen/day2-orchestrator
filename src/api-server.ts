@@ -3,7 +3,6 @@ import { mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   addApp,
-  APPS_REGISTRY_FILENAME,
   findApp,
   generateAppId,
   hasGitRemote,
@@ -52,18 +51,39 @@ import {
 import {
   computeSpendBreakdown,
   loadSpendLedger,
-  renderBudgetSummary,
   type GrowthConfig,
   type SpendCategory,
 } from "./spend-governance";
-import { deriveGrowthStrategy, fetchStageSignals, renderGrowthStrategySummary } from "./growth-strategy";
-import { loadAllocatorState, renderAllocatorSummary } from "./growth-allocator";
-import { loadGrowthActions, renderGrowthFeed } from "./growth-feed";
+import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
+import { loadAllocatorState, type AllocatorState } from "./growth-allocator";
+import { loadGrowthActions } from "./growth-feed";
 import { listProposals } from "./proposals";
 import type { AutonomyLevel } from "./types";
 import { summarizeApp } from "./app-overview";
 import { parseBrandDna } from "./brand-dna";
-import { ASK_LOG_FILENAME, askDay2, buildAskContext, loadAskLog, recordAsk, validateQuestion } from "./ask-day2";
+import { ASK_LOG_FILENAME, ASK_MAX_BUDGET_USD, askDay2, buildAskContext, loadAskLog, recordAsk, validateQuestion } from "./ask-day2";
+import { SCAN_MAX_BUDGET_USD } from "./onboarding";
+import {
+  appCreditUsage,
+  authorize,
+  buyTopUp,
+  creditsForCost,
+  creditsForListUsd,
+  CreditsError,
+  getSummary,
+  listUsdForCredits,
+  PLANS,
+  readCredits,
+  setPlan,
+  TOPUP_PACKS,
+  updateAccount,
+  YEARLY_DISCOUNT,
+  type BillingCycle,
+  type CreditService,
+  type PaidPlanId,
+} from "./credits";
+import { appsRegistryPath, creditStore, ORCHESTRATOR_ROOT } from "./day2-paths";
+import { withCreditContext, type CreditContext } from "./metered-query";
 
 /**
  * day2 console API server (day2 console plan §5) — Bun.serve, no new
@@ -93,13 +113,6 @@ import { ASK_LOG_FILENAME, askDay2, buildAskContext, loadAskLog, recordAsk, vali
  */
 
 const PORT = Number(process.env.DAY2_CONSOLE_API_PORT ?? 4700);
-const ORCHESTRATOR_ROOT = resolve(import.meta.dir, "..");
-/** Read on every call (not once at import) so integration tests can point
- * the server at a throwaway registry via DAY2_APPS_REGISTRY_PATH without
- * ever touching the operator's real `.day2-apps.json`. */
-function appsRegistryPath(): string {
-  return process.env.DAY2_APPS_REGISTRY_PATH ?? resolve(ORCHESTRATOR_ROOT, APPS_REGISTRY_FILENAME);
-}
 
 class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -177,6 +190,60 @@ async function pendingCardsOrNull(app: AppEntry, timeoutMs = 8000) {
   }
 }
 
+function killSwitchFor(app: AppEntry): boolean {
+  return loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME)).budget.killSwitch;
+}
+
+/**
+ * Runs an agent-backed action for an app, paid from the account's credits.
+ * Checks the worst case up front (so the request fails fast with a clear
+ * 402 instead of half-running), then lets every agent run inside `fn` be
+ * charged through metered-query.ts. Returns how many credits it used.
+ */
+async function runWithCredits<T>(
+  app: AppEntry,
+  service: CreditService,
+  description: string,
+  maxCostUsd: number,
+  fn: () => Promise<T>,
+): Promise<{ result: T; credits: number }> {
+  const killSwitch = killSwitchFor(app);
+  const check = await authorize(creditStore(), { appId: app.id, appName: app.name, service, maxCostUsd, killSwitch });
+  if (!check.ok) throw new CreditsError(check);
+  const ctx: CreditContext = { appId: app.id, appName: app.name, service, description, killSwitch };
+  const result = await withCreditContext(ctx, fn);
+  return { result, credits: ctx.charged ?? 0 };
+}
+
+/** Plan limit on how many apps the account can have. */
+async function requireAppSlot(): Promise<void> {
+  const { account } = await readCredits(creditStore());
+  const plan = PLANS[account.plan];
+  const count = loadAppsRegistry(appsRegistryPath()).apps.length;
+  if (count >= plan.maxApps) {
+    throw new HttpError(
+      402,
+      `The ${plan.name} plan includes ${plan.maxApps} app${plan.maxApps === 1 ? "" : "s"} — switch plans to add another.`,
+    );
+  }
+}
+
+/** Growth spend categories map onto the credit services they're paid from. */
+function serviceForChannel(channel: string): CreditService {
+  return channel === "paid_ads" ? "paid_ads" : "content_generation";
+}
+
+/** Allocator arms carry day2's real spend per format — sent as credits. */
+function publicAllocatorState(state: AllocatorState) {
+  return {
+    ...state,
+    arms: state.arms.map(({ spendUsd, ...arm }) => ({
+      ...arm,
+      spendCredits: creditsForCost(spendUsd, serviceForChannel(arm.arm.channel)),
+    })),
+  };
+}
+
 type Handler = (req: Request, params: Record<string, string>) => Promise<Response> | Response;
 type Route = { method: string; pattern: URLPattern; handler: Handler };
 const routes: Route[] = [];
@@ -195,16 +262,19 @@ route("GET", "/api/apps", () => {
 /** Headline numbers for every app at once (console "Your apps" grid). */
 route("GET", "/api/apps/overview", async () => {
   const registry = loadAppsRegistry(appsRegistryPath());
+  const { account, events } = await readCredits(creditStore());
+  const now = new Date();
   const apps = await Promise.all(
     registry.apps.map(async (app) => {
-      const { spend } = spendFor(app);
       const cards = await pendingCardsOrNull(app);
       return summarizeApp({
         id: app.id,
         hasGitRemote: hasGitRemote(app.repoPath),
         pendingApprovals: cards ? cards.length : null,
         audit: loadAuditEntries(appFile(app, AUDIT_FILENAME)),
-        spend,
+        credits: appCreditUsage(account, events, app.id, now),
+        killSwitch: killSwitchFor(app),
+        now,
       });
     }),
   );
@@ -230,6 +300,7 @@ route("POST", "/api/apps", async (req) => {
   if (!body.name || !body.repoPath || !body.connectionMethod) {
     throw new HttpError(400, "name, repoPath, and connectionMethod are required.");
   }
+  await requireAppSlot();
   const registry = loadAppsRegistry(appsRegistryPath());
   const result = addApp(registry, {
     name: body.name,
@@ -316,6 +387,7 @@ route("POST", "/api/apps/upload", async (req) => {
   if (!(file instanceof File) || typeof name !== "string" || !name) {
     throw new HttpError(400, "multipart form with a `file` (.zip) and a `name` field is required.");
   }
+  await requireAppSlot();
   const id = generateAppId();
   const destDir = resolve(ORCHESTRATOR_ROOT, MANAGED_REPOS_DIR, id);
   mkdirSync(destDir, { recursive: true });
@@ -345,8 +417,10 @@ route("POST", "/api/apps/upload", async (req) => {
 
 route("POST", "/api/apps/:id/onboarding/scan", async (_req, params) => {
   const app = requireApp(params.id!);
-  const result = await scanAppProfile(app.repoPath);
-  return json(result);
+  const { result, credits } = await runWithCredits(app, "scan_answer", "App scan", SCAN_MAX_BUDGET_USD, () =>
+    scanAppProfile(app.repoPath),
+  );
+  return json({ ...result, credits });
 });
 
 route("GET", "/api/apps/:id/onboarding/profile", (_req, params) => {
@@ -461,15 +535,11 @@ route("GET", "/api/apps/:id/releases", (req, params) => {
 
 // ---- Budget & Spend (plan §3.5) ----
 
-route("GET", "/api/apps/:id/growth/config", (_req, params) => {
+route("GET", "/api/apps/:id/growth/config", async (_req, params) => {
   const app = requireApp(params.id!);
-  const { config, ledger, spend } = spendFor(app);
-  return json({
-    config,
-    summary: renderGrowthConfigSummary(config),
-    budgetSummary: renderBudgetSummary(config.budget, ledger),
-    spend,
-  });
+  const config = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME));
+  const { account, events } = await readCredits(creditStore());
+  return json({ config, credits: appCreditUsage(account, events, app.id, new Date()) });
 });
 
 route("PUT", "/api/apps/:id/growth/budget", async (req, params) => {
@@ -522,7 +592,15 @@ route("GET", "/api/apps/:id/growth/strategy", async (_req, params) => {
   const config = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME));
   const signals = await fetchStageSignals(app.appBaseUrl);
   const strategy = deriveGrowthStrategy(config.budget, profile, signals, config.kpiGoals);
-  return json({ strategy, summary: renderGrowthStrategySummary(strategy) });
+  // Budgets here are at credit list value (the per-app cap), so this is a
+  // unit change, not a cost — no markup is revealed.
+  return json({
+    strategy: {
+      ...strategy,
+      totalCredits: creditsForListUsd(strategy.totalBudgetUsd),
+      allocations: strategy.allocations.map((a) => ({ ...a, credits: creditsForListUsd(a.budgetUsd) })),
+    },
+  });
 });
 
 // ---- Growth formats / allocator (plan §3.6) ----
@@ -530,7 +608,7 @@ route("GET", "/api/apps/:id/growth/strategy", async (_req, params) => {
 route("GET", "/api/apps/:id/growth/allocator", (_req, params) => {
   const app = requireApp(params.id!);
   const state = loadAllocatorState(appFile(app, "day2-allocator-state.json"));
-  return json({ state, summary: renderAllocatorSummary(state) });
+  return json({ state: publicAllocatorState(state) });
 });
 
 // ---- Growth feed / creative library (plan §3.6) ----
@@ -541,8 +619,13 @@ route("GET", "/api/apps/:id/growth/allocator", (_req, params) => {
 route("GET", "/api/apps/:id/growth/feed", (req, params) => {
   const app = requireApp(params.id!);
   const records = loadGrowthActions(appFile(app, "day2-growth-actions.jsonl"), sinceParam(req));
-  const state = loadAllocatorState(appFile(app, "day2-allocator-state.json"));
-  return json({ records, rendered: renderGrowthFeed(records, state) });
+  // Spend on these records is day2's real cost — shown only as credits.
+  return json({
+    records: records.map(({ spend, ...r }) => ({
+      ...r,
+      spend: { credits: creditsForCost(spend.requested, serviceForChannel(r.strategy.channel)), allowed: spend.allowed },
+    })),
+  });
 });
 
 // ---- Feature proposals (plan §3.7) ----
@@ -580,16 +663,102 @@ route("POST", "/api/apps/:id/ask", async (req, params) => {
     proposals: listProposals(appFile(app, "day2-proposals.jsonl")),
   });
 
-  const result = await askDay2(app.repoPath, valid.question, context);
-  if (result.ok) {
-    recordAsk(appFile(app, ASK_LOG_FILENAME), {
-      askedAt: result.askedAt,
-      question: valid.question,
-      answer: result.answer,
-      costUsd: result.costUsd,
-    });
+  const { result, credits } = await runWithCredits(app, "scan_answer", "Answer", ASK_MAX_BUDGET_USD, () =>
+    askDay2(app.repoPath, valid.question, context),
+  );
+  if (!result.ok) return json(result);
+  recordAsk(appFile(app, ASK_LOG_FILENAME), { askedAt: result.askedAt, question: valid.question, answer: result.answer, credits });
+  return json({ ok: true, answer: result.answer, askedAt: result.askedAt, credits });
+});
+
+// ---- Plan & credits (one balance for the whole account) ----
+
+/** Nothing here exposes a cost or a markup — only credits and list prices. */
+function catalog() {
+  return {
+    plans: Object.values(PLANS),
+    topUps: TOPUP_PACKS,
+    yearlyDiscount: YEARLY_DISCOUNT,
+    // No payment provider is wired up yet: plan changes and top-ups are
+    // recorded straight to the ledger. The console says so.
+    paymentsConnected: false,
+  };
+}
+
+route("GET", "/api/credits", async () => {
+  return json({ ...(await getSummary(creditStore())), catalog: catalog() });
+});
+
+route("PUT", "/api/credits/plan", async (req) => {
+  const body = (await req.json().catch(() => ({}))) as { plan?: unknown; billingCycle?: unknown };
+  const plan = body.plan as PaidPlanId;
+  const cycle = (body.billingCycle ?? "monthly") as BillingCycle;
+  if (!["starter", "growth", "scale"].includes(plan)) throw new HttpError(400, "plan must be starter, growth or scale.");
+  if (cycle !== "monthly" && cycle !== "yearly") throw new HttpError(400, "billingCycle must be monthly or yearly.");
+  const { effective, summary } = await setPlan(creditStore(), plan, cycle);
+  return json({ effective, ...summary, catalog: catalog() });
+});
+
+route("POST", "/api/credits/top-ups", async (req) => {
+  const body = (await req.json().catch(() => ({}))) as { packId?: unknown };
+  if (typeof body.packId !== "string" || !TOPUP_PACKS.some((p) => p.id === body.packId)) {
+    throw new HttpError(400, `packId must be one of: ${TOPUP_PACKS.map((p) => p.id).join(", ")}.`);
   }
-  return json(result);
+  try {
+    await buyTopUp(creditStore(), body.packId);
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+  return json({ ...(await getSummary(creditStore())), catalog: catalog() }, { status: 201 });
+});
+
+route("PUT", "/api/credits/auto-top-up", async (req) => {
+  const body = (await req.json().catch(() => ({}))) as { enabled?: unknown; packId?: unknown };
+  if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false.");
+  const packId = typeof body.packId === "string" ? body.packId : TOPUP_PACKS[0]!.id;
+  if (!TOPUP_PACKS.some((p) => p.id === packId)) throw new HttpError(400, "Unknown top-up pack.");
+  const summary = await updateAccount(creditStore(), (a) => ({ ...a, autoTopUp: { enabled: body.enabled as boolean, packId } }));
+  return json({ ...summary, catalog: catalog() });
+});
+
+function parseCap(v: unknown, name: string): number | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) throw new HttpError(400, `${name} must be a whole number of credits, or null for no cap.`);
+  return v;
+}
+
+/**
+ * An app's share of the balance. The growth engine's own budget rails
+ * (per-action cap, exploration ceiling — spend-governance.ts) are kept in
+ * step at credit list value, so they scale with the cap instead of
+ * disagreeing with it.
+ */
+route("PUT", "/api/apps/:id/credits/caps", async (req, params) => {
+  const app = requireApp(params.id!);
+  const body = (await req.json().catch(() => ({}))) as { monthlyCredits?: unknown; dailyCredits?: unknown };
+  const monthly = parseCap(body.monthlyCredits, "monthlyCredits");
+  const daily = parseCap(body.dailyCredits, "dailyCredits");
+  await updateAccount(creditStore(), (a) => {
+    const prev = a.appCaps[app.id] ?? {};
+    const next = { ...prev };
+    if (monthly !== undefined) {
+      if (monthly === null) delete next.monthlyCredits;
+      else next.monthlyCredits = monthly;
+    }
+    if (daily !== undefined) {
+      if (daily === null) delete next.dailyCredits;
+      else next.dailyCredits = daily;
+    }
+    return { ...a, appCaps: { ...a.appCaps, [app.id]: next } };
+  });
+  const path = appFile(app, GROWTH_CONFIG_FILENAME);
+  let config = loadGrowthConfig(path);
+  if (typeof monthly === "number") config = setMonthlyBudget(config, listUsdForCredits(monthly));
+  if (daily !== undefined) config = setDailyCap(config, daily === null ? undefined : listUsdForCredits(daily));
+  if (monthly !== undefined || daily !== undefined) saveGrowthConfig(path, config);
+  const { account, events } = await readCredits(creditStore());
+  return json({ credits: appCreditUsage(account, events, app.id, new Date()), config });
 });
 
 // ---- Dispatch ----
@@ -648,6 +817,9 @@ export async function handleRequest(req: Request): Promise<Response> {
     } catch (err) {
       if (err instanceof HttpError) {
         return withCors(json({ error: err.message }, { status: err.status }));
+      }
+      if (err instanceof CreditsError) {
+        return withCors(json({ error: err.message, code: err.check.code }, { status: 402 }));
       }
       console.error(err);
       return withCors(json({ error: (err as Error).message ?? "Internal error" }, { status: 500 }));

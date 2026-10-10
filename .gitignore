@@ -24,3 +24,9 @@ day2-proposals.jsonl
 day2-release-results.jsonl
 day2-autonomy-audit.jsonl
 worktrees-tmp-check/
+
+# Account-wide credits (credits.ts) — the operator's balance and ledger,
+# machine/account data, not source.
+.day2-credits-account.json
+.day2-credits-ledger.jsonl
+.day2-credits.lock/
