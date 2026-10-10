@@ -315,10 +315,15 @@ export type BuildDeps = {
 export async function defaultPushToGitHub(dir: string, name: string): Promise<string | null> {
   const authed = await $`gh auth status`.quiet().nothrow();
   if (authed.exitCode !== 0) return null;
-  const res = await $`gh repo create ${name} --private --source ${dir} --push`.cwd(dir).quiet().nothrow();
+  // DAY2_GITHUB_OWNER puts new app repos under an organization (or another
+  // account the signed-in gh user can create repos in); default: the
+  // signed-in user's own account.
+  const owner = process.env.DAY2_GITHUB_OWNER?.trim();
+  const full = owner ? `${owner}/${name}` : name;
+  const res = await $`gh repo create ${full} --private --source ${dir} --push`.cwd(dir).quiet().nothrow();
   if (res.exitCode !== 0) throw new Error(`Couldn't create the GitHub repo: ${res.stderr.toString().slice(0, 300)}`);
   const view = await $`gh repo view --json nameWithOwner`.cwd(dir).quiet().nothrow();
-  return view.exitCode === 0 ? (JSON.parse(view.stdout.toString()) as { nameWithOwner: string }).nameWithOwner : name;
+  return view.exitCode === 0 ? (JSON.parse(view.stdout.toString()) as { nameWithOwner: string }).nameWithOwner : full;
 }
 
 /**

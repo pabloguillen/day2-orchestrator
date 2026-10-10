@@ -60,8 +60,11 @@ day2 uses its own Lovable account; customers never need one.
    Lovable credit, default 0.60). Lovable's tools don't report usage per build,
    so builds are charged at this estimate — compare with Lovable's invoice
    and adjust.
-4. `gh` must be signed in on this machine for the code to go to a private
-   GitHub repo; otherwise the app stays a local repository.
-5. Logo: put Lovable's official logo (from their Brand Hub,
-   lovablebrand.lovable.app) at `console/public/brand/lovable-logo.svg`.
-   Until then a plain "Lovable" label is shown.
+4. GitHub: the orchestrator uses the `gh` login of the account it runs
+   under. Run `gh auth login` (GitHub.com → HTTPS → "Login with a web
+   browser"), then `gh auth status` to check; the token needs the `repo`
+   scope (the default). New app repos are private and created under that
+   account, or under `DAY2_GITHUB_OWNER` (e.g. your organization) if set.
+   Without a gh login the app stays a local repository.
+5. Logo: Lovable's official logomark is at
+   `console/public/brand/lovable-logo.png` (resized to 256 px).
