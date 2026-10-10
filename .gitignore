@@ -38,3 +38,7 @@ worktrees-tmp-check/
 # day2's own Lovable account (lovable.ts): OAuth tokens and build records.
 .day2-lovable.json
 .day2-lovable-builds.json
+
+# Production settings and local backups (deploy/).
+deploy/.env
+deploy/backups/

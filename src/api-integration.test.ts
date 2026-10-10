@@ -408,7 +408,7 @@ describe("backlog", () => {
 describe("create an app with Lovable (no Lovable calls)", () => {
   test("hidden by default: the flag is off and every endpoint is unreachable", async () => {
     delete process.env.DAY2_FEATURE_CREATE_APPS;
-    expect((await call("GET", "/api/features")).body).toEqual({ createApps: false });
+    expect((await call("GET", "/api/features")).body).toMatchObject({ createApps: false, mode: "local" });
     expect((await call("GET", "/api/lovable")).status).toBe(404);
     expect((await call("POST", "/api/lovable/connect")).status).toBe(404);
     expect((await call("POST", "/api/apps/create", { name: "habit-loop", description: "A habit tracker for people who break streaks." })).status).toBe(404);
@@ -417,7 +417,7 @@ describe("create an app with Lovable (no Lovable calls)", () => {
 
   test("status, validation, and a clear refusal while day2's Lovable account isn't connected", async () => {
     process.env.DAY2_FEATURE_CREATE_APPS = "on";
-    expect((await call("GET", "/api/features")).body).toEqual({ createApps: true });
+    expect((await call("GET", "/api/features")).body).toMatchObject({ createApps: true });
     const prevKey = process.env.DAY2_LOVABLE_API_KEY;
     delete process.env.DAY2_LOVABLE_API_KEY;
     const status = await call("GET", "/api/lovable");

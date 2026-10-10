@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolve, sep } from "node:path";
 import { query as sdkQuery, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { loadAppsRegistry } from "./apps-registry";
-import { authorize, CreditsError, recordCharge, type CreditService } from "./credits";
-import { appsRegistryPath, creditStore } from "./day2-paths";
+import { authorize, CreditsError, recordCharge, type CreditService, type CreditStore } from "./credits";
+import { creditStore } from "./day2-paths";
+import { currentTenant, serverMode, tenantForPath } from "./tenant";
 
 /**
  * Every Claude agent run in day2 goes through here, so every run is paid
@@ -14,9 +14,14 @@ import { appsRegistryPath, creditStore } from "./day2-paths";
  * balance and the app's caps, or it throws `CreditsError` without starting.
  * When the run reports its real cost, that — not the worst case — is charged.
  *
- * Which app pays: the surrounding `withCreditContext` if a caller set one
- * (API handlers do), else the registered app whose repo contains the run's
- * `cwd`, else the account itself (platform-level work).
+ * Which account pays: the tenant of the request (or background job) the run
+ * belongs to (tenant.ts), else the account whose app contains the run's
+ * `cwd`. In accounts mode a run that belongs to no account is refused —
+ * there'd be no one to charge.
+ *
+ * Which app it's booked against: the surrounding `withCreditContext` if a
+ * caller set one (API handlers do), else the app whose repo contains the
+ * run's `cwd`, else the account itself (platform-level work).
  */
 
 export type CreditContext = {
@@ -46,18 +51,20 @@ export function creditsEnabled(): boolean {
   return process.env.DAY2_CREDITS !== "off";
 }
 
-function appForCwd(cwd: string | undefined): { id: string; name: string } | null {
-  if (!cwd) return null;
-  try {
+const contains = (root: string, target: string) => target === root || target.startsWith(root + sep);
+
+async function payerFor(cwd: string | undefined): Promise<{ store: CreditStore; app: { id: string; name: string } | null }> {
+  const tenant = currentTenant();
+  if (tenant) {
+    if (!cwd) return { store: tenant.credits, app: null };
     const target = resolve(cwd);
-    const app = loadAppsRegistry(appsRegistryPath()).apps.find((a) => {
-      const root = resolve(a.repoPath);
-      return target === root || target.startsWith(root + sep);
-    });
-    return app ? { id: app.id, name: app.name } : null;
-  } catch {
-    return null;
+    const app = (await tenant.apps.list()).find((a) => contains(resolve(a.repoPath), target));
+    return { store: tenant.credits, app: app ? { id: app.id, name: app.name } : null };
   }
+  const hit = cwd ? await tenantForPath(cwd) : null;
+  if (hit) return { store: hit.tenant.credits, app: { id: hit.app.id, name: hit.app.name } };
+  if (serverMode() === "accounts") throw new Error("This agent run doesn't belong to any account, so there's no one to charge.");
+  return { store: creditStore(), app: null };
 }
 
 type QueryParams = Parameters<typeof sdkQuery>[0];
@@ -74,12 +81,13 @@ export function meteredQuery(defaultService: CreditService, label = "Agent run")
     }
     const ctx = storage.getStore();
     const options = (params.options ?? {}) as { cwd?: string; maxBudgetUsd?: number };
-    const inferred = ctx?.appId !== undefined ? null : appForCwd(options.cwd);
+    const payer = await payerFor(options.cwd);
+    const inferred = ctx?.appId !== undefined ? null : payer.app;
     const appId = ctx?.appId !== undefined ? ctx.appId : (inferred?.id ?? null);
     const appName = ctx?.appName ?? inferred?.name;
     const service = ctx?.service ?? defaultService;
     const maxCostUsd = options.maxBudgetUsd ?? DEFAULT_MAX_COST_USD;
-    const store = creditStore();
+    const store = payer.store;
 
     const check = await authorize(store, { appId, appName, service, maxCostUsd, killSwitch: ctx?.killSwitch });
     if (!check.ok) throw new CreditsError(check);

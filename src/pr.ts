@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { gitEnv } from "./tenant";
 import type { BugReport } from "./types";
 
 /**
@@ -23,6 +24,7 @@ export async function openFixPr(
   const result =
     await $`gh pr create --title ${title} --body ${body} --head ${branch} --base main`
       .cwd(cwd)
+      .env(await gitEnv())
       .text();
 
   const url = result.trim().split("\n").pop() ?? result.trim();

@@ -22,6 +22,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { SQL } from "bun";
 
 // ---------------------------------------------------------------------------
 // Catalog — plans, top-ups, markups
@@ -723,58 +724,84 @@ export function shouldAutoTopUp(account: CreditAccount, events: CreditEvent[], n
 }
 
 // ---------------------------------------------------------------------------
-// IO — files + a cross-process lock
+// IO — Postgres in production (one row per account + an append-only event
+// table, under a per-account advisory lock), files for local tools/tests.
 // ---------------------------------------------------------------------------
 
 export const CREDIT_ACCOUNT_FILENAME = ".day2-credits-account.json";
 export const CREDIT_LEDGER_FILENAME = ".day2-credits-ledger.jsonl";
 
-export type CreditStore = { dir: string };
+/** Where an account's credits live: a customer account in Postgres, or a
+ * directory of files (local tools and unit tests). */
+export type CreditStore = { dir: string } | { db: SQL; accountId: string };
 
-function accountPath(store: CreditStore) {
-  return join(store.dir, CREDIT_ACCOUNT_FILENAME);
-}
-function ledgerPath(store: CreditStore) {
-  return join(store.dir, CREDIT_LEDGER_FILENAME);
+type CreditIO = {
+  loadAccount(): Promise<CreditAccount | null>;
+  saveAccount(account: CreditAccount): Promise<void>;
+  loadEvents(): Promise<CreditEvent[]>;
+  appendEvents(events: CreditEvent[]): Promise<void>;
+};
+
+const normalize = (acc: CreditAccount): CreditAccount => ({ ...acc, appCaps: acc.appCaps ?? {} });
+
+function fileIO(dir: string): CreditIO {
+  const accountPath = join(dir, CREDIT_ACCOUNT_FILENAME);
+  const ledgerPath = join(dir, CREDIT_LEDGER_FILENAME);
+  return {
+    async loadAccount() {
+      return existsSync(accountPath) ? normalize(JSON.parse(readFileSync(accountPath, "utf-8")) as CreditAccount) : null;
+    },
+    async saveAccount(account) {
+      mkdirSync(dir, { recursive: true });
+      const tmp = `${accountPath}.${process.pid}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(account, null, 2)}\n`);
+      renameSync(tmp, accountPath);
+    },
+    async loadEvents() {
+      if (!existsSync(ledgerPath)) return [];
+      return readFileSync(ledgerPath, "utf-8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as CreditEvent);
+    },
+    async appendEvents(events) {
+      if (!events.length) return;
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(ledgerPath, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    },
+  };
 }
 
-export function loadEvents(store: CreditStore): CreditEvent[] {
-  const p = ledgerPath(store);
-  if (!existsSync(p)) return [];
-  return readFileSync(p, "utf-8")
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as CreditEvent);
-}
-
-function loadAccountRaw(store: CreditStore): CreditAccount | null {
-  const p = accountPath(store);
-  if (!existsSync(p)) return null;
-  const acc = JSON.parse(readFileSync(p, "utf-8")) as CreditAccount;
-  return { ...acc, appCaps: acc.appCaps ?? {} };
-}
-
-function saveAccount(store: CreditStore, account: CreditAccount): void {
-  mkdirSync(store.dir, { recursive: true });
-  const p = accountPath(store);
-  const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(account, null, 2)}\n`);
-  renameSync(tmp, p);
-}
-
-function appendEvents(store: CreditStore, events: CreditEvent[]): void {
-  if (!events.length) return;
-  mkdirSync(store.dir, { recursive: true });
-  appendFileSync(ledgerPath(store), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+function dbIO(tx: SQL, accountId: string): CreditIO {
+  return {
+    async loadAccount() {
+      const rows = (await tx`SELECT data FROM credit_accounts WHERE account_id = ${accountId}`) as Array<{ data: CreditAccount }>;
+      return rows[0] ? normalize(rows[0].data) : null;
+    },
+    async saveAccount(account) {
+      await tx`INSERT INTO credit_accounts (account_id, data, updated_at) VALUES (${accountId}, ${account}::jsonb, now())
+        ON CONFLICT (account_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`;
+    },
+    async loadEvents() {
+      const rows = (await tx`SELECT data FROM credit_events WHERE account_id = ${accountId} ORDER BY seq`) as Array<{ data: CreditEvent }>;
+      return rows.map((r) => r.data);
+    },
+    async appendEvents(events) {
+      for (const e of events) {
+        await tx`INSERT INTO credit_events (account_id, id, kind, at, data) VALUES (${accountId}, ${e.id}, ${e.kind}, ${e.at}, ${e}::jsonb)
+          ON CONFLICT (account_id, id) DO NOTHING`;
+      }
+    },
+  };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** mkdir is atomic across processes — the API server and CLIs share one
- * ledger. A lock older than 30s is treated as left behind by a crash. */
-export async function withCreditLock<T>(store: CreditStore, fn: () => T | Promise<T>): Promise<T> {
-  mkdirSync(store.dir, { recursive: true });
-  const lock = join(store.dir, ".day2-credits.lock");
+/** mkdir is atomic across processes. A lock older than 30s is treated as
+ * left behind by a crash. */
+async function withFileLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, ".day2-credits.lock");
   const deadline = Date.now() + 15_000;
   for (;;) {
     try {
@@ -797,24 +824,35 @@ export async function withCreditLock<T>(store: CreditStore, fn: () => T | Promis
   }
 }
 
+/** Runs `fn` with exclusive access to one account's credits: a transaction
+ * holding a per-account advisory lock in Postgres (safe across any number
+ * of servers and workers), or a lock directory for files. */
+async function runLocked<T>(store: CreditStore, fn: (io: CreditIO) => Promise<T>): Promise<T> {
+  if ("dir" in store) return withFileLock(store.dir, () => fn(fileIO(store.dir)));
+  return store.db.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${`credits:${store.accountId}`}))`;
+    return fn(dbIO(tx as unknown as SQL, store.accountId));
+  }) as Promise<T>;
+}
+
 /** Account + events with any due grants written first. Creates a trial
- * account on first use. Call inside `withCreditLock`. */
-function syncState(store: CreditStore, now: Date): { account: CreditAccount; events: CreditEvent[] } {
-  const raw = loadAccountRaw(store);
+ * account on first use. */
+async function syncState(io: CreditIO, now: Date): Promise<{ account: CreditAccount; events: CreditEvent[] }> {
+  const raw = await io.loadAccount();
   let account = raw ?? newAccount(now);
-  let events = loadEvents(store);
+  let events = await io.loadEvents();
   const due = dueGrants(account, events, now);
-  if (!raw || due.account !== account) saveAccount(store, due.account);
+  if (!raw || due.account !== account) await io.saveAccount(due.account);
   account = due.account;
   if (due.grants.length) {
-    appendEvents(store, due.grants);
+    await io.appendEvents(due.grants);
     events = [...events, ...due.grants];
   }
   return { account, events };
 }
 
 export async function readCredits(store: CreditStore, now = new Date()) {
-  return withCreditLock(store, () => syncState(store, now));
+  return runLocked(store, (io) => syncState(io, now));
 }
 
 export async function getSummary(store: CreditStore, now = new Date()): Promise<CreditSummary> {
@@ -836,14 +874,13 @@ export async function recordCharge(
   req: Omit<Parameters<typeof buildCharge>[0], "events" | "now">,
   now = new Date(),
 ): Promise<ChargeEvent | null> {
-  return withCreditLock(store, () => {
-    const { account, events } = syncState(store, now);
+  return runLocked(store, async (io) => {
+    const { account, events } = await syncState(io, now);
     const charge = buildCharge({ ...req, events, now });
     if (!charge) return null;
-    appendEvents(store, [charge]);
-    const after = [...events, charge];
-    const pack = shouldAutoTopUp(account, after, now);
-    if (pack) appendEvents(store, [topUpGrant(pack, now)]);
+    await io.appendEvents([charge]);
+    const pack = shouldAutoTopUp(account, [...events, charge], now);
+    if (pack) await io.appendEvents([topUpGrant(pack, now)]);
     return charge;
   });
 }
@@ -851,39 +888,39 @@ export async function recordCharge(
 export async function buyTopUp(store: CreditStore, packId: string, now = new Date()): Promise<GrantEvent> {
   const pack = TOPUP_PACKS.find((p) => p.id === packId);
   if (!pack) throw new Error(`Unknown top-up pack "${packId}".`);
-  return withCreditLock(store, () => {
-    const { account } = syncState(store, now);
+  return runLocked(store, async (io) => {
+    const { account } = await syncState(io, now);
     if (account.plan === "trial") throw new Error("Top-ups need a paid plan — choose a plan first.");
     const grant = topUpGrant(pack, now);
-    appendEvents(store, [grant]);
+    await io.appendEvents([grant]);
     return grant;
   });
 }
 
 export async function setPlan(store: CreditStore, to: PaidPlanId, cycle: BillingCycle, now = new Date()) {
   if (!(to in PLANS) || to === ("trial" as PlanId)) throw new Error(`Unknown plan "${to}".`);
-  return withCreditLock(store, () => {
-    const { account, events } = syncState(store, now);
+  return runLocked(store, async (io) => {
+    const { account, events } = await syncState(io, now);
     const result = changePlan(account, events, to, cycle, now);
-    saveAccount(store, result.account);
-    appendEvents(store, result.grants);
+    await io.saveAccount(result.account);
+    await io.appendEvents(result.grants);
     return { effective: result.effective, summary: summarize(result.account, [...events, ...result.grants], now) };
   });
 }
 
 export async function updateAccount(store: CreditStore, fn: (a: CreditAccount) => CreditAccount, now = new Date()) {
-  return withCreditLock(store, () => {
-    const { account, events } = syncState(store, now);
+  return runLocked(store, async (io) => {
+    const { account, events } = await syncState(io, now);
     const next = fn(account);
-    saveAccount(store, next);
+    await io.saveAccount(next);
     return summarize(next, events, now);
   });
 }
 
 export async function grantManual(store: CreditStore, credits: number, note: string, now = new Date()): Promise<GrantEvent> {
   if (!(Number.isInteger(credits) && credits > 0)) throw new Error("credits must be a positive whole number.");
-  return withCreditLock(store, () => {
-    syncState(store, now);
+  return runLocked(store, async (io) => {
+    await syncState(io, now);
     const grant: GrantEvent = {
       kind: "grant",
       id: `manual:${randomUUID()}`,
@@ -894,7 +931,7 @@ export async function grantManual(store: CreditStore, credits: number, note: str
       expiresAt: iso(addDays(now, TOPUP_VALID_DAYS)),
       note,
     };
-    appendEvents(store, [grant]);
+    await io.appendEvents([grant]);
     return grant;
   });
 }

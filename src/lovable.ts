@@ -6,7 +6,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { addApp, generateAppId, loadAppsRegistry, saveAppsRegistry, type AppEntry } from "./apps-registry";
+import { generateAppId, type AppEntry } from "./apps-registry";
+import type { AppsStore } from "./apps-store";
 import { authorize, CreditsError, creditsForCost, recordCharge, type CreditStore } from "./credits";
 import { BACKLOG_FILENAME, createTicket, emptyBacklog, saveBacklog } from "./backlog";
 
@@ -226,6 +227,8 @@ export type Build = {
   previewUrl?: string;
   /** A Lovable approval waiting on the owner. */
   awaiting?: { eventId: string; toolId: string; params: unknown; secure: boolean };
+  /** The customer account the build is for (and whose credits pay). */
+  accountId?: string;
   appId?: string;
   githubRepo?: string;
   skippedFiles?: number;
@@ -262,8 +265,10 @@ export function buildPrompt(r: BuildRequest): string {
     .join("\n\n");
 }
 
-export function loadBuilds(setup: LovableSetup): Build[] {
-  return readJson<Build[]>(join(setup.dir, LOVABLE_BUILDS_FILE), []);
+/** Builds, newest first — only `accountId`'s when given. */
+export function loadBuilds(setup: LovableSetup, accountId?: string): Build[] {
+  const all = readJson<Build[]>(join(setup.dir, LOVABLE_BUILDS_FILE), []);
+  return accountId === undefined ? all : all.filter((b) => b.accountId === accountId);
 }
 
 function saveBuild(setup: LovableSetup, build: Build): Build {
@@ -306,7 +311,9 @@ export type BuildDeps = {
   /** Creates a private GitHub repo from the folder and pushes; returns
    * "owner/name" or null when GitHub isn't available on this machine. */
   pushToGitHub: (dir: string, name: string) => Promise<string | null>;
-  registryPath: string;
+  /** The account's apps — the finished app is registered here. */
+  apps: AppsStore;
+  accountId: string;
   credits: CreditStore;
   pollMs?: number;
   maxWaitMs?: number;
@@ -335,22 +342,22 @@ export async function startBuild(setup: LovableSetup, request: BuildRequest, dep
   const check = await authorize(deps.credits, { appId: null, service: "app_build", maxCostUsd: lovableCostUsd() });
   if (!check.ok) throw new CreditsError(check);
   if (!lovableStatus(setup).connected) throw new Error("day2's Lovable account isn't connected yet — the operator connects it once on this page.");
-  if (loadAppsRegistry(deps.registryPath).apps.some((a) => a.name === request.name)) throw new Error(`There's already an app called "${request.name}".`);
+  if ((await deps.apps.list()).some((a) => a.name === request.name)) throw new Error(`There's already an app called "${request.name}".`);
   const now = new Date().toISOString();
-  const build = saveBuild(setup, { id: `build-${randomUUID().slice(0, 8)}`, at: now, request, status: "building", step: "Lovable is building the first version", updatedAt: now });
+  const build = saveBuild(setup, { id: `build-${randomUUID().slice(0, 8)}`, at: now, accountId: deps.accountId, request, status: "building", step: "Lovable is building the first version", updatedAt: now });
   void continueBuild(setup, build.id, deps, check.maxCredits).catch((err) => {
     saveBuild(setup, { ...getBuild(setup, build.id)!, status: "failed", error: (err as Error).message });
   });
   return build;
 }
 
-export function getBuild(setup: LovableSetup, id: string): Build | undefined {
-  return loadBuilds(setup).find((b) => b.id === id);
+export function getBuild(setup: LovableSetup, id: string, accountId?: string): Build | undefined {
+  return loadBuilds(setup, accountId).find((b) => b.id === id);
 }
 
 /** The owner's decision on a paused Lovable step. */
 export async function answerBuild(setup: LovableSetup, id: string, decision: "approved" | "rejected", deps: BuildDeps): Promise<Build> {
-  const b = getBuild(setup, id);
+  const b = getBuild(setup, id, deps.accountId);
   if (!b) throw new Error("No such build.");
   if (b.status !== "needs_you" || !b.awaiting || !b.projectId || !b.messageId) throw new Error("This build isn't waiting on you.");
   if (b.awaiting.secure) throw new Error("This step needs a secret entered in Lovable's editor — the day2 operator has to finish it there.");
@@ -450,8 +457,7 @@ async function continueBuild(setup: LovableSetup, id: string, deps: BuildDeps, m
         const githubRepo = await deps.pushToGitHub(dir, b.request.name);
 
         // 4. Register the app.
-        const reg = loadAppsRegistry(deps.registryPath);
-        const added = addApp(reg, {
+        const added = await deps.apps.add({
           id: appId,
           name: b.request.name,
           repoPath: dir,
@@ -459,7 +465,6 @@ async function continueBuild(setup: LovableSetup, id: string, deps: BuildDeps, m
           ...(githubRepo ? { githubRepo } : {}),
         });
         if (!added.ok) throw new Error(added.reason);
-        saveAppsRegistry(deps.registryPath, added.registry);
         // Images and fonts can't be read as text through Lovable's tools —
         // say so on the new app's backlog rather than leave a silent gap.
         if (skipped > 0) {

@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { gitEnv } from "./tenant";
 import { resolve } from "node:path";
 import { sandboxConfig } from "./agent-sandbox";
 import type { AppEntry } from "./apps-registry";
@@ -19,7 +20,8 @@ import {
   type Ticket,
 } from "./backlog";
 import { estimateCredits } from "./backlog-tell";
-import { describeSync, jiraClient, linearClient, loadIntegrations, saveIntegrations, syncTracker, type TrackerClient } from "./backlog-trackers";
+import { describeSync, jiraClient, linearClient, syncTracker, type TrackerClient } from "./backlog-trackers";
+import type { IntegrationsStore } from "./integrations-store";
 import { meteredQuery, withCreditContext } from "./metered-query";
 import { runFixAgent, runVerifierAgent } from "./agent";
 import { pushBranch } from "./git";
@@ -330,7 +332,7 @@ export type TickReport = { created: string[]; updated: string[]; reranked: numbe
 /** Merged / closed PRs move their tickets to Done / back to To do. */
 async function prState(repoPath: string, pr: number): Promise<"MERGED" | "CLOSED" | "OPEN" | null> {
   try {
-    const out = await $`gh pr view ${pr} --json state`.cwd(repoPath).quiet().text();
+    const out = await $`gh pr view ${pr} --json state`.cwd(repoPath).env(await gitEnv()).quiet().text();
     return (JSON.parse(out) as { state: "MERGED" | "CLOSED" | "OPEN" }).state;
   } catch {
     return null;
@@ -402,12 +404,11 @@ export async function tick(
 // JIRA / Linear
 // ---------------------------------------------------------------------------
 
-export function trackerClientsFor(
-  integrationsFile: string,
-  appId: string,
-): Array<{ client: TrackerClient; mirror: boolean; commentsBothWays: boolean; lastSyncAt?: string }> {
-  const cfg = loadIntegrations(integrationsFile)[appId] ?? {};
-  const out = [];
+export type TrackerClients = Array<{ client: TrackerClient; mirror: boolean; commentsBothWays: boolean; lastSyncAt?: string }>;
+
+export async function trackerClientsFor(store: IntegrationsStore, appId: string): Promise<TrackerClients> {
+  const cfg = (await store.get(appId)) ?? {};
+  const out: TrackerClients = [];
   if (cfg.linear) out.push({ client: linearClient(cfg.linear), mirror: cfg.linear.mirror, commentsBothWays: true, lastSyncAt: cfg.linear.lastSyncAt });
   if (cfg.jira) out.push({ client: jiraClient(cfg.jira), mirror: cfg.jira.mirror, commentsBothWays: false, lastSyncAt: cfg.jira.lastSyncAt });
   return out;
@@ -415,9 +416,9 @@ export function trackerClientsFor(
 
 /** Runs every connected tracker's sync. One failing tracker doesn't stop
  * the other; its error is kept for the Rules & sources page. */
-export async function syncAppTrackers(app: AppEntry, integrationsFile: string, clients = trackerClientsFor(integrationsFile, app.id)): Promise<string[]> {
+export async function syncAppTrackers(app: AppEntry, store: IntegrationsStore, clients?: TrackerClients): Promise<string[]> {
   const notes: string[] = [];
-  for (const { client, mirror, commentsBothWays, lastSyncAt } of clients) {
+  for (const { client, mirror, commentsBothWays, lastSyncAt } of clients ?? (await trackerClientsFor(store, app.id))) {
     const name = client.system === "linear" ? "Linear" : "JIRA";
     const startedAt = new Date();
     let error: string | null = null;
@@ -431,13 +432,11 @@ export async function syncAppTrackers(app: AppEntry, integrationsFile: string, c
       error = (err as Error).message;
       notes.push(`${name}: ${error}`);
     }
-    const all = loadIntegrations(integrationsFile);
-    const entry = all[app.id]?.[client.system];
-    if (entry) {
-      if (!error) entry.lastSyncAt = startedAt.toISOString();
-      entry.lastError = error;
-      saveIntegrations(integrationsFile, all);
-    }
+    await store.update(app.id, (cur) => {
+      const entry = cur[client.system];
+      if (!entry) return cur;
+      return { ...cur, [client.system]: { ...entry, ...(error ? {} : { lastSyncAt: startedAt.toISOString() }), lastError: error } };
+    });
   }
   return notes;
 }

@@ -1,3 +1,4 @@
+import { fileApps } from "./apps-store";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -66,7 +67,8 @@ function deps(tools: LovableTools, pushed: string | null = "me/habit-loop"): Bui
     tools: async () => tools,
     repoDir: (id) => join(ROOT, "repos", id),
     pushToGitHub: async () => pushed,
-    registryPath,
+    apps: fileApps(registryPath),
+    accountId: "local",
     credits: { dir: ROOT },
     pollMs: 5,
     maxWaitMs: 5_000,
