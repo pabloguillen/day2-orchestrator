@@ -44,6 +44,12 @@ without charging a card, and the console says so.
 
 ## Create an app with Lovable (src/lovable.ts)
 
+**Hidden for now** behind a server-side flag: every endpoint returns 404
+and the console shows no entry point until `DAY2_FEATURE_CREATE_APPS=on`.
+Lovable's docs cover their MCP server for each user's own account (that's
+how their ChatGPT/Claude plugins work); turn this on once Lovable confirms
+in writing that day2 may build apps for its customers on day2's account.
+
 day2 uses its own Lovable account; customers never need one.
 
 1. Connect it once: Apps → Create a new app → "Connect day2's Lovable

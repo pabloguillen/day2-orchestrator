@@ -120,6 +120,7 @@ import {
   saveIntegrations,
 } from "./backlog-trackers";
 import { gatherSignalsForApp } from "./health-scout-cli";
+import { features } from "./features";
 import {
   answerBuild,
   beginConnect,
@@ -1217,6 +1218,12 @@ route("POST", "/api/apps/:id/backlog/sync", async (_req, params) => {
 
 // ---- Create an app with Lovable (day2's own Lovable account) ----
 
+function requireCreateApps(): void {
+  if (!features().createApps) throw new HttpError(404, "Creating apps isn't available yet.");
+}
+
+route("GET", "/api/features", () => json(features()));
+
 function lovableSetup(): LovableSetup {
   return { dir: dirname(appsRegistryPath()), callbackUrl: `http://localhost:${PORT}/api/lovable/oauth/callback` };
 }
@@ -1233,12 +1240,14 @@ function buildDeps(): BuildDeps {
 }
 
 route("GET", "/api/lovable", () => {
+  requireCreateApps();
   const setup = lovableSetup();
   return json({ ...lovableStatus(setup), builds: loadBuilds(setup).slice(0, 10) });
 });
 
 /** One-time: the operator signs day2's own Lovable account in. */
 route("POST", "/api/lovable/connect", async () => {
+  requireCreateApps();
   try {
     return json(await beginConnect(lovableSetup()));
   } catch (err) {
@@ -1248,6 +1257,7 @@ route("POST", "/api/lovable/connect", async () => {
 
 route("GET", "/api/lovable/oauth/callback", async (req) => {
   const url = new URL(req.url);
+  requireCreateApps();
   const code = url.searchParams.get("code");
   const back = `${CONSOLE_ORIGIN}/setup/create`;
   if (!code) return Response.redirect(`${back}?lovable=error`, 302);
@@ -1261,6 +1271,7 @@ route("GET", "/api/lovable/oauth/callback", async (req) => {
 });
 
 route("POST", "/api/apps/create", async (req) => {
+  requireCreateApps();
   await requirePlanFeature("createApps");
   const valid = validateBuildRequest(await req.json().catch(() => null));
   if (!valid.ok) throw new HttpError(400, valid.reason);
@@ -1274,12 +1285,14 @@ route("POST", "/api/apps/create", async (req) => {
 });
 
 route("GET", "/api/lovable/builds/:bid", (_req, params) => {
+  requireCreateApps();
   const build = getBuild(lovableSetup(), params.bid!);
   if (!build) throw new HttpError(404, "No such build.");
   return json({ build });
 });
 
 route("POST", "/api/lovable/builds/:bid/answer", async (req, params) => {
+  requireCreateApps();
   const body = (await req.json().catch(() => ({}))) as { decision?: unknown };
   if (body.decision !== "approved" && body.decision !== "rejected") throw new HttpError(400, "decision must be approved or rejected.");
   try {
