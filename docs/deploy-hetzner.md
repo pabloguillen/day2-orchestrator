@@ -1,5 +1,7 @@
 # Running day2 in production (Hetzner, one server)
 
+The short version, as a checklist: [go-live-checklist.md](go-live-checklist.md).
+
 One small server runs everything with Docker Compose: Postgres, the
 orchestrator API, the console, Caddy (HTTPS) and nightly backups.
 
