@@ -33,6 +33,8 @@ services:
     environment:
       DATABASE_URL: postgres://day2:${POSTGRES_PASSWORD}@postgres:5432/day2
       DAY2_PUBLIC_URL: https://${DAY2_DOMAIN}
+      # Caddy is the only way in, so its X-Forwarded-For is trustworthy (rate limits).
+      DAY2_TRUST_PROXY: "on"
     volumes:
       - managed-repos:/app/managed-repos
       - data:/data

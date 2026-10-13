@@ -6,16 +6,18 @@ import { userCanAccessInstallation } from "./github-app";
 /**
  * Sign-in, sessions, customer accounts and members.
  *
- * People sign in with GitHub (day2's GitHub App, user authorization). On a
- * first sign-in day2 creates their account (or joins accounts they were
- * invited to by GitHub username). A session is a random 256-bit token in an
+ * People sign in with GitHub (day2's GitHub App), Google, or a one-time link
+ * sent by email — no day2 password. Each way in is an identity of one
+ * person; a verified email that matches joins the same person. On a first
+ * sign-in day2 creates their workspace, or joins the workspaces they were
+ * invited to (by GitHub username or email). A session is a random 256-bit token in an
  * HttpOnly, SameSite=Lax cookie; only its SHA-256 is stored, so a database
  * leak can't be replayed as a login.
  */
 
 export type Role = "owner" | "admin" | "member";
 
-export type SessionUser = { id: string; githubId: number; login: string; name: string | null; email: string | null; avatarUrl: string | null };
+export type SessionUser = { id: string; githubId: number | null; login: string | null; name: string | null; email: string | null; avatarUrl: string | null };
 export type SessionAccount = { id: string; name: string; role: Role; githubInstallationId: number | null };
 export type Session = { tokenHash: string; user: SessionUser; account: SessionAccount };
 
@@ -69,11 +71,11 @@ export function safeNextPath(next: string | null | undefined): string {
 // Sessions
 // ---------------------------------------------------------------------------
 
-type UserRow = { id: string; github_id: string | number; login: string; name: string | null; email: string | null; avatar_url: string | null };
+type UserRow = { id: string; github_id: string | number | null; login: string | null; name: string | null; email: string | null; avatar_url: string | null };
 
 const toUser = (r: UserRow): SessionUser => ({
   id: r.id,
-  githubId: Number(r.github_id),
+  githubId: r.github_id === null ? null : Number(r.github_id),
   login: r.login,
   name: r.name,
   email: r.email,
@@ -124,25 +126,42 @@ export async function switchAccount(sql: SQL, session: Session, accountId: strin
 }
 
 // ---------------------------------------------------------------------------
-// Sign-in with GitHub
+// OAuth round-trips (GitHub, Google)
 // ---------------------------------------------------------------------------
 
-export async function createOAuthState(sql: SQL, nextPath: string, accountId: string | null = null): Promise<string> {
+export type OAuthProvider = "github" | "google";
+export type OAuthState = { nextPath: string; provider: OAuthProvider; accountId: string | null; userId: string | null };
+
+/**
+ * A one-time `state` for an OAuth round-trip (login CSRF protection). For
+ * "Connect GitHub" it also records the workspace and the person who started
+ * it, so the return can only complete for that same signed-in person.
+ */
+export async function createOAuthState(
+  sql: SQL,
+  nextPath: string,
+  accountId: string | null = null,
+  opts: { provider?: OAuthProvider; userId?: string | null } = {},
+): Promise<string> {
   const state = newToken();
   await sql`DELETE FROM oauth_states WHERE created_at < now() - make_interval(mins => ${OAUTH_STATE_MINUTES})`;
-  await sql`INSERT INTO oauth_states (state, next_path, account_id) VALUES (${state}, ${safeNextPath(nextPath)}, ${accountId})`;
+  await sql`INSERT INTO oauth_states (state, next_path, account_id, provider, user_id)
+    VALUES (${state}, ${safeNextPath(nextPath)}, ${accountId}, ${opts.provider ?? "github"}, ${opts.userId ?? null})`;
   return state;
 }
 
 /** One-time use: what the state was created with, or null if unknown/expired. */
-export async function consumeOAuthState(sql: SQL, state: string | null): Promise<{ nextPath: string; accountId: string | null } | null> {
-  if (!state) return null;
-  const rows = (await sql`DELETE FROM oauth_states WHERE state = ${state} AND created_at > now() - make_interval(mins => ${OAUTH_STATE_MINUTES}) RETURNING next_path, account_id`) as Array<{
-    next_path: string;
-    account_id: string | null;
-  }>;
-  return rows[0] ? { nextPath: rows[0].next_path, accountId: rows[0].account_id } : null;
+export async function consumeOAuthState(sql: SQL, state: string | null): Promise<OAuthState | null> {
+  if (!state || state.length > 200) return null;
+  const rows = (await sql`DELETE FROM oauth_states WHERE state = ${state} AND created_at > now() - make_interval(mins => ${OAUTH_STATE_MINUTES})
+    RETURNING next_path, account_id, provider, user_id`) as Array<{ next_path: string; account_id: string | null; provider: OAuthProvider; user_id: string | null }>;
+  const r = rows[0];
+  return r ? { nextPath: r.next_path, accountId: r.account_id, provider: r.provider, userId: r.user_id } : null;
 }
+
+// ---------------------------------------------------------------------------
+// Sign-in with GitHub
+// ---------------------------------------------------------------------------
 
 export function githubAuthorizeUrl(state: string): string {
   const c = authConfig();
@@ -153,7 +172,7 @@ export function githubAuthorizeUrl(state: string): string {
   return u.toString();
 }
 
-export type GitHubProfile = { id: number; login: string; name: string | null; email: string | null; avatarUrl: string | null };
+export type GitHubProfile = { id: number; login: string; name: string | null; email: string | null; emailVerified?: boolean; avatarUrl: string | null };
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -178,12 +197,20 @@ export async function fetchGitHubProfile(
   const userRes = await fetchImpl("https://api.github.com/user", { headers });
   if (!userRes.ok) throw new Error(`GitHub sign-in failed: couldn't read the profile (${userRes.status}).`);
   const u = (await userRes.json()) as { id: number; login: string; name: string | null; email: string | null; avatar_url: string | null };
-  let email = u.email;
-  if (!email) {
-    const r = await fetchImpl("https://api.github.com/user/emails", { headers });
-    if (r.ok) email = ((await r.json()) as Array<{ email: string; primary: boolean; verified: boolean }>).find((e) => e.primary && e.verified)?.email ?? null;
+  // The primary, verified address — only a verified email may join this
+  // GitHub identity to a person who signed in another way.
+  let email: string | null = null;
+  let emailVerified = false;
+  const r = await fetchImpl("https://api.github.com/user/emails", { headers });
+  if (r.ok) {
+    const primary = ((await r.json()) as Array<{ email: string; primary: boolean; verified: boolean }>).find((e) => e.primary && e.verified);
+    if (primary) {
+      email = primary.email;
+      emailVerified = true;
+    }
   }
-  const profile: GitHubProfile & { installationVerified?: boolean } = { id: u.id, login: u.login, name: u.name, email, avatarUrl: u.avatar_url };
+  if (!email) email = u.email;
+  const profile: GitHubProfile & { installationVerified?: boolean } = { id: u.id, login: u.login, name: u.name, email, emailVerified, avatarUrl: u.avatar_url };
   if (opts.installationId !== undefined) profile.installationVerified = await userCanAccessInstallation(tok.access_token, opts.installationId, fetchImpl);
   return profile;
 }
@@ -198,30 +225,164 @@ export async function attachInstallation(sql: SQL, accountId: string, userId: st
   return { ok: true };
 }
 
+export type Identity = {
+  provider: "github" | "google" | "email";
+  /** The provider's stable id: GitHub user id, Google `sub`, or the email. */
+  subject: string;
+  email: string | null;
+  emailVerified: boolean;
+  name: string | null;
+  avatarUrl: string | null;
+  /** GitHub only. */
+  login?: string;
+  githubId?: number;
+};
+
+export type SignInResult = { userId: string; accountId: string; created: boolean };
+
+const normEmail = (e: string) => e.trim().toLowerCase();
+
 /**
- * The user for a GitHub profile, created or refreshed, plus the account to
- * open. Pending invites are accepted here; someone with no account and no
- * invite gets their own account (on the trial).
+ * The person behind an identity — found, joined by verified email, or
+ * created — plus the workspace to open. Pending invitations (by GitHub
+ * username or verified email) are accepted here; someone with no workspace
+ * and no invitation gets their own (on the trial).
  */
-export async function signInUser(sql: SQL, p: GitHubProfile): Promise<{ userId: string; accountId: string; created: boolean }> {
+export async function signInIdentity(sql: SQL, id: Identity): Promise<SignInResult> {
+  const email = id.email ? normEmail(id.email) : null;
+  const verified = Boolean(email && id.emailVerified);
   return sql.begin(async (tx) => {
-    const [user] = (await tx`
-      INSERT INTO users (github_id, login, name, email, avatar_url, last_login_at)
-      VALUES (${p.id}, ${p.login}, ${p.name}, ${p.email}, ${p.avatarUrl}, now())
-      ON CONFLICT (github_id) DO UPDATE SET login = EXCLUDED.login, name = EXCLUDED.name,
-        email = COALESCE(EXCLUDED.email, users.email), avatar_url = EXCLUDED.avatar_url, last_login_at = now()
-      RETURNING id`) as Array<{ id: string }>;
-    const userId = user!.id;
-    const invites = (await tx`DELETE FROM invites WHERE lower(github_login) = lower(${p.login}) AND expires_at > now() RETURNING account_id, role`) as Array<{ account_id: string; role: Role }>;
+    // Serialize sign-ins for the same identity / email, so two at once
+    // can't create the same person twice.
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${`identity:${id.provider}:${id.subject}`}))`;
+    if (verified) await tx`SELECT pg_advisory_xact_lock(hashtext(${`email:${email}`}))`;
+
+    let userId: string | undefined = (
+      (await tx`SELECT user_id FROM identities WHERE provider = ${id.provider} AND subject = ${id.subject}`) as Array<{ user_id: string }>
+    )[0]?.user_id;
+    if (!userId && verified) {
+      userId = ((await tx`SELECT id FROM users WHERE email_verified AND lower(email) = ${email}`) as Array<{ id: string }>)[0]?.id;
+    }
+    if (id.login) {
+      // GitHub usernames move when people rename; free it from a stale holder.
+      await tx`UPDATE users SET login = NULL WHERE lower(login) = lower(${id.login}) AND id IS DISTINCT FROM ${userId ?? null}`;
+    }
+    if (userId) {
+      await tx`UPDATE users SET
+          name = COALESCE(${id.name}, name),
+          avatar_url = COALESCE(${id.avatarUrl}, avatar_url),
+          login = COALESCE(${id.login ?? null}, login),
+          github_id = COALESCE(${id.githubId ?? null}, github_id),
+          email = CASE WHEN email_verified THEN email ELSE COALESCE(${email}, email) END,
+          email_verified = email_verified OR ${verified},
+          last_login_at = now()
+        WHERE id = ${userId}`;
+    } else {
+      const [u] = (await tx`
+        INSERT INTO users (github_id, login, name, email, email_verified, avatar_url, last_login_at)
+        VALUES (${id.githubId ?? null}, ${id.login ?? null}, ${id.name}, ${email}, ${verified}, ${id.avatarUrl}, now())
+        RETURNING id`) as Array<{ id: string }>;
+      userId = u!.id;
+    }
+    await tx`INSERT INTO identities (provider, subject, user_id, email) VALUES (${id.provider}, ${id.subject}, ${userId}, ${email})
+      ON CONFLICT (provider, subject) DO UPDATE SET last_used_at = now(), email = EXCLUDED.email`;
+
+    const invites = (await tx`
+      DELETE FROM invites
+      WHERE expires_at > now()
+        AND ((${id.login ?? null}::text IS NOT NULL AND lower(github_login) = lower(${id.login ?? null}))
+          OR (${verified} AND lower(invites.email) = ${email}))
+      RETURNING account_id, role`) as Array<{ account_id: string; role: Role }>;
     for (const inv of invites) {
       await tx`INSERT INTO memberships (account_id, user_id, role) VALUES (${inv.account_id}, ${userId}, ${inv.role}) ON CONFLICT DO NOTHING`;
     }
     const existing = (await tx`SELECT account_id FROM memberships WHERE user_id = ${userId} ORDER BY created_at LIMIT 1`) as Array<{ account_id: string }>;
     if (existing[0]) return { userId, accountId: existing[0].account_id, created: false };
-    const [account] = (await tx`INSERT INTO accounts (name) VALUES (${p.name ?? p.login}) RETURNING id`) as Array<{ id: string }>;
+    const workspaceName = id.name ?? id.login ?? (email ? email.split("@")[0] : null) ?? "My workspace";
+    const [account] = (await tx`INSERT INTO accounts (name) VALUES (${workspaceName}) RETURNING id`) as Array<{ id: string }>;
     await tx`INSERT INTO memberships (account_id, user_id, role) VALUES (${account!.id}, ${userId}, 'owner')`;
     return { userId, accountId: account!.id, created: true };
-  }) as Promise<{ userId: string; accountId: string; created: boolean }>;
+  }) as Promise<SignInResult>;
+}
+
+/** GitHub sign-in: the GitHub identity of a profile. */
+export function signInUser(sql: SQL, p: GitHubProfile): Promise<SignInResult> {
+  return signInIdentity(sql, {
+    provider: "github",
+    subject: String(p.id),
+    githubId: p.id,
+    login: p.login,
+    email: p.email,
+    emailVerified: p.emailVerified ?? false,
+    name: p.name,
+    avatarUrl: p.avatarUrl,
+  });
+}
+
+/**
+ * "Connect GitHub" by someone who signed in another way: remember their
+ * GitHub identity too (so "Continue with GitHub" works for them later),
+ * unless it already belongs to another person.
+ */
+export async function linkGitHubIdentity(sql: SQL, userId: string, p: GitHubProfile): Promise<boolean> {
+  return sql.begin(async (tx) => {
+    const owner = ((await tx`SELECT user_id FROM identities WHERE provider = 'github' AND subject = ${String(p.id)}`) as Array<{ user_id: string }>)[0];
+    if (owner && owner.user_id !== userId) return false;
+    const taken = await tx`SELECT 1 FROM users WHERE lower(login) = lower(${p.login}) AND id <> ${userId}`;
+    if (taken.length) return false;
+    await tx`INSERT INTO identities (provider, subject, user_id, email) VALUES ('github', ${String(p.id)}, ${userId}, ${p.email})
+      ON CONFLICT (provider, subject) DO UPDATE SET last_used_at = now()`;
+    await tx`UPDATE users SET github_id = COALESCE(github_id, ${p.id}), login = COALESCE(login, ${p.login}), avatar_url = COALESCE(avatar_url, ${p.avatarUrl}) WHERE id = ${userId}`;
+    return true;
+  }) as Promise<boolean>;
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in with a one-time link by email
+// ---------------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
+export const isEmail = (s: string) => s.length <= 320 && EMAIL_RE.test(s.trim());
+
+const EMAIL_LINK_MINUTES = 15;
+/** Per address and per network address, so nobody can flood an inbox or the mail server. */
+const EMAIL_LINKS_PER_ADDRESS = { count: 5, minutes: 15 };
+const EMAIL_LINKS_PER_IP = { count: 30, minutes: 60 };
+
+export type EmailLinkRequest =
+  | { ok: true; token: string | null } // token null: rate-limited for this address (the caller still says "check your email")
+  | { ok: false; status: number; reason: string };
+
+/** Creates a one-time sign-in token for an email address. */
+export async function createEmailSignIn(sql: SQL, rawEmail: string, nextPath: string, ip: string | null): Promise<EmailLinkRequest> {
+  if (!isEmail(rawEmail)) return { ok: false, status: 400, reason: "That doesn't look like an email address." };
+  const email = normEmail(rawEmail);
+  await sql`DELETE FROM email_sign_in WHERE created_at < now() - interval '1 day'`;
+  if (ip) {
+    const [byIp] = (await sql`SELECT count(*)::int AS n FROM email_sign_in WHERE ip = ${ip} AND created_at > now() - make_interval(mins => ${EMAIL_LINKS_PER_IP.minutes})`) as Array<{ n: number }>;
+    if (byIp!.n >= EMAIL_LINKS_PER_IP.count) return { ok: false, status: 429, reason: "Too many sign-in emails from here — try again in a while." };
+  }
+  const [byEmail] = (await sql`SELECT count(*)::int AS n FROM email_sign_in WHERE lower(email) = ${email} AND created_at > now() - make_interval(mins => ${EMAIL_LINKS_PER_ADDRESS.minutes})`) as Array<{ n: number }>;
+  if (byEmail!.n >= EMAIL_LINKS_PER_ADDRESS.count) return { ok: true, token: null };
+  const token = newToken();
+  await sql`INSERT INTO email_sign_in (token_hash, email, next_path, ip, expires_at)
+    VALUES (${hashToken(token)}, ${email}, ${safeNextPath(nextPath)}, ${ip}, now() + make_interval(mins => ${EMAIL_LINK_MINUTES}))`;
+  return { ok: true, token };
+}
+
+/** Uses a sign-in token (once): the address it proves, or null. */
+export async function consumeEmailSignIn(sql: SQL, token: string | null | undefined): Promise<{ email: string; nextPath: string } | null> {
+  if (!token || token.length > 200) return null;
+  const rows = (await sql`UPDATE email_sign_in SET used_at = now()
+    WHERE token_hash = ${hashToken(token)} AND used_at IS NULL AND expires_at > now()
+    RETURNING email, next_path`) as Array<{ email: string; next_path: string }>;
+  return rows[0] ? { email: rows[0].email, nextPath: rows[0].next_path } : null;
+}
+
+/** Email sign-in: the email identity (the address is proven by the link). */
+export function signInEmail(sql: SQL, email: string): Promise<SignInResult> {
+  const e = normEmail(email);
+  return signInIdentity(sql, { provider: "email", subject: e, email: e, emailVerified: true, name: null, avatarUrl: null });
 }
 
 // ---------------------------------------------------------------------------
@@ -240,19 +401,36 @@ export async function listAccounts(sql: SQL, userId: string) {
 
 export async function listMembers(sql: SQL, accountId: string) {
   const members = (await sql`
-    SELECT u.id, u.login, u.name, u.avatar_url, m.role, m.created_at
+    SELECT u.id, u.login, u.name, u.email, u.avatar_url, m.role, m.created_at
     FROM memberships m JOIN users u ON u.id = m.user_id
-    WHERE m.account_id = ${accountId} ORDER BY m.created_at`) as Array<{ id: string; login: string; name: string | null; avatar_url: string | null; role: Role; created_at: Date }>;
-  const invites = (await sql`SELECT id, github_login, role, created_at, expires_at FROM invites WHERE account_id = ${accountId} AND expires_at > now() ORDER BY created_at`) as Array<{
+    WHERE m.account_id = ${accountId} ORDER BY m.created_at`) as Array<{
     id: string;
-    github_login: string;
+    login: string | null;
+    name: string | null;
+    email: string | null;
+    avatar_url: string | null;
+    role: Role;
+    created_at: Date;
+  }>;
+  const invites = (await sql`SELECT id, github_login, email, role, created_at, expires_at FROM invites WHERE account_id = ${accountId} AND expires_at > now() ORDER BY created_at`) as Array<{
+    id: string;
+    github_login: string | null;
+    email: string | null;
     role: Role;
     created_at: Date;
     expires_at: Date;
   }>;
   return {
-    members: members.map((m) => ({ userId: m.id, login: m.login, name: m.name, avatarUrl: m.avatar_url, role: m.role, since: new Date(m.created_at).toISOString() })),
-    invites: invites.map((i) => ({ id: i.id, login: i.github_login, role: i.role, expiresAt: new Date(i.expires_at).toISOString() })),
+    members: members.map((m) => ({
+      userId: m.id,
+      login: m.login,
+      name: m.name,
+      email: m.email,
+      avatarUrl: m.avatar_url,
+      role: m.role,
+      since: new Date(m.created_at).toISOString(),
+    })),
+    invites: invites.map((i) => ({ id: i.id, login: i.github_login, email: i.email, role: i.role, expiresAt: new Date(i.expires_at).toISOString() })),
   };
 }
 
@@ -267,26 +445,42 @@ export async function seatUsage(sql: SQL, accountId: string): Promise<{ used: nu
 
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 
-export type MemberResult = { ok: true } | { ok: false; status: number; reason: string };
+export type MemberResult = { ok: true; invited?: { email: string } | { login: string } } | { ok: false; status: number; reason: string };
 
-export async function invite(sql: SQL, accountId: string, by: Session, login: string, role: Role): Promise<MemberResult> {
+/** Invites by GitHub username or by email address. Someone already on day2
+ * (that username, or that verified email) joins right away; anyone else on
+ * their next sign-in. */
+export async function invite(sql: SQL, accountId: string, by: Session, target: string, role: Role): Promise<MemberResult> {
   if (!canManage(by.account.role)) return { ok: false, status: 403, reason: "Only owners and admins can invite people." };
-  if (!LOGIN_RE.test(login)) return { ok: false, status: 400, reason: "That isn't a GitHub username." };
+  const raw = target.trim().replace(/^@/, "");
+  const byEmail = raw.includes("@");
+  if (byEmail ? !isEmail(raw) : !LOGIN_RE.test(raw)) return { ok: false, status: 400, reason: "Enter a GitHub username or an email address." };
   if (role !== "admin" && role !== "member") return { ok: false, status: 400, reason: "role must be admin or member." };
-  const already = await sql`SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.account_id = ${accountId} AND lower(u.login) = lower(${login})`;
-  if (already.length) return { ok: false, status: 409, reason: `${login} is already a member.` };
+  const email = byEmail ? normEmail(raw) : null;
+  const login = byEmail ? null : raw;
+  const users = (byEmail
+    ? await sql`SELECT id FROM users WHERE email_verified AND lower(email) = ${email}`
+    : await sql`SELECT id FROM users WHERE lower(login) = lower(${login})`) as Array<{ id: string }>;
+  if (users[0]) {
+    const already = await sql`SELECT 1 FROM memberships WHERE account_id = ${accountId} AND user_id = ${users[0].id}`;
+    if (already.length) return { ok: false, status: 409, reason: `${raw} is already a member.` };
+  }
   const seats = await seatUsage(sql, accountId);
   if (seats.used >= seats.limit) return { ok: false, status: 402, reason: `Your plan includes ${seats.limit} seat${seats.limit === 1 ? "" : "s"} — switch plans to add more people.` };
-  // An existing user joins right away; anyone else on their next sign-in.
-  const users = (await sql`SELECT id FROM users WHERE lower(login) = lower(${login})`) as Array<{ id: string }>;
   if (users[0]) {
     await sql`INSERT INTO memberships (account_id, user_id, role) VALUES (${accountId}, ${users[0].id}, ${role}) ON CONFLICT DO NOTHING`;
     return { ok: true };
   }
-  await sql`INSERT INTO invites (account_id, github_login, role, invited_by, expires_at)
-    VALUES (${accountId}, ${login}, ${role}, ${by.user.id}, now() + make_interval(days => ${INVITE_DAYS}))
-    ON CONFLICT (account_id, lower(github_login)) DO UPDATE SET role = EXCLUDED.role, expires_at = EXCLUDED.expires_at`;
-  return { ok: true };
+  if (byEmail) {
+    await sql`INSERT INTO invites (account_id, email, role, invited_by, expires_at)
+      VALUES (${accountId}, ${email}, ${role}, ${by.user.id}, now() + make_interval(days => ${INVITE_DAYS}))
+      ON CONFLICT (account_id, lower(email)) WHERE email IS NOT NULL DO UPDATE SET role = EXCLUDED.role, expires_at = EXCLUDED.expires_at`;
+  } else {
+    await sql`INSERT INTO invites (account_id, github_login, role, invited_by, expires_at)
+      VALUES (${accountId}, ${login}, ${role}, ${by.user.id}, now() + make_interval(days => ${INVITE_DAYS}))
+      ON CONFLICT (account_id, lower(github_login)) DO UPDATE SET role = EXCLUDED.role, expires_at = EXCLUDED.expires_at`;
+  }
+  return { ok: true, invited: email ? { email } : { login: login! } };
 }
 
 export async function revokeInvite(sql: SQL, accountId: string, by: Session, inviteId: string): Promise<MemberResult> {

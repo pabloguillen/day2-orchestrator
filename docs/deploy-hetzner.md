@@ -41,9 +41,50 @@ sysctl --system
 adduser --disabled-password --gecos "" day2 && usermod -aG docker day2
 ```
 
-## 3. Create day2's GitHub App
+## 3. Ways to sign in
 
-Sign-in and repo access both go through one GitHub App. On GitHub:
+People sign in to day2 without a day2 password, in any of three ways. Set up
+the ones you want; the login page shows only those. Whichever they use, the
+same verified email address leads to the same person and workspace.
+
+| Way in | Who it's for | Needs |
+|---|---|---|
+| **Email link** | Anyone. A one-time link, valid 15 minutes | An SMTP account (step 3a) |
+| **Google** | People with a Google or Workspace account | A Google OAuth client (step 3b) |
+| **GitHub** | Developers. Also how repos get connected | day2's GitHub App (step 3c) |
+
+Connecting repositories always goes through GitHub. Someone in the workspace
+with a GitHub account does it once, and nobody else needs GitHub.
+
+### 3a. Email (SMTP)
+
+Use any transactional email service, for example Postmark, Amazon SES, Brevo
+or Mailgun. Verify your sending domain there (SPF and DKIM) so the links don't
+land in spam. Then set:
+
+- `SMTP_URL=smtp://USER:PASSWORD@smtp.provider.com:587` (use `smtps://…:465` for TLS on connect)
+- `MAIL_FROM="day2 <hello@yourdomain.com>"`
+
+Sign-in links are rate-limited (5 per address per 15 minutes, 30 per network
+address per hour). The link opens a page with a **Continue** button, so mail
+scanners that open links can't use them up.
+
+### 3b. Google
+
+In Google Cloud console:
+
+1. **APIs & Services → OAuth consent screen**: External. Add app name, support
+   email and your domain. The scopes are `openid`, `email` and `profile`, which
+   need no Google review.
+2. **Credentials → Create credentials → OAuth client ID**: type **Web
+   application**. Authorized redirect URI:
+   `https://app.example.com/api/auth/google/callback`.
+3. Copy the client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+4. Publish the consent screen (it starts in "Testing", which allows only listed test users).
+
+### 3c. day2's GitHub App
+
+GitHub sign-in and repo access both go through one GitHub App. On GitHub:
 **Settings → Developer settings → GitHub Apps → New GitHub App** (under the
 organization that will own day2).
 
@@ -82,7 +123,8 @@ Fill in `.env`:
   **Keep a copy of `DAY2_SECRETS_KEY` somewhere safe.** Without it, stored JIRA and
   Linear connections can't be read.
 - `ANTHROPIC_API_KEY`.
-- The GitHub App values. Put the private key on one line:
+- The sign-in settings from step 3: `SMTP_URL` and `MAIL_FROM`, `GOOGLE_CLIENT_ID`
+  and `GOOGLE_CLIENT_SECRET`, and the GitHub App values. Put the GitHub App's private key on one line:
 
   ```sh
   awk 'NF {sub(/\r/, ""); printf "%s\\n",$0;}' day2.private-key.pem
@@ -102,7 +144,8 @@ certificate on the first request.
 
 ## 5. Check it works
 
-1. Open `https://app.example.com`. You should be sent to **Sign in**. Continue with GitHub.
+1. Open `https://app.example.com`. You should be sent to **Sign in**. Try
+   each way you set up. Email yourself a link, and check it arrives (not in spam).
 2. **Add an app → GitHub → Connect GitHub**. Install the App on your account
    or organization and pick a repository. GitHub returns you to day2, and the
    repository list appears.
@@ -118,13 +161,17 @@ certificate on the first request.
 ## How it behaves in production
 
 - **Accounts.** The first sign-in creates a workspace on the 14-day trial.
-  Owners and admins invite people by GitHub username, and invitations are accepted
-  on that person's next sign-in. Seats are limited by the plan. Only owners and
+  Owners and admins invite people by email address or GitHub username.
+  Invitations by email are sent as an email, and every invitation is accepted on
+  that person's next sign-in. Seats are limited by the plan. Only owners and
   admins can change billing, people, connections or remove apps.
 - **Isolation.** Every request is scoped to the signed-in workspace:
   - Apps, credits and tracker connections are separate per workspace.
   - Each workspace's GitHub access uses its own short-lived App token.
   - Folders on the server can't be connected.
+- **One person, several ways in.** Google, GitHub and email sign-ins with the
+  same *verified* email address are the same person. An unverified address
+  never joins anyone.
 - **Sessions.** A random 256-bit token sits in an HttpOnly, Secure, SameSite=Lax
   cookie, and only its SHA-256 is stored. Sessions last 30 days, renewed on use.
   State-changing requests must come from day2's own origin.

@@ -64,7 +64,7 @@ describe("GitHub profile", () => {
         { email: "octo@x.com", primary: true, verified: true },
       ]);
     };
-    expect(await fetchGitHubProfile("code", fake)).toEqual({ id: 7, login: "octo", name: "Octo", email: "octo@x.com", avatarUrl: "https://a" });
+    expect(await fetchGitHubProfile("code", fake)).toEqual({ id: 7, login: "octo", name: "Octo", email: "octo@x.com", emailVerified: true, avatarUrl: "https://a" });
     expect(calls).toHaveLength(3);
   });
   test("a bad code fails cleanly", async () => {
@@ -76,7 +76,7 @@ describe("GitHub profile", () => {
 describe("OAuth state", () => {
   test("is single-use and keeps a safe next path", async () => {
     const s = await createOAuthState(t.sql, "//evil.com");
-    expect(await consumeOAuthState(t.sql, s)).toEqual({ nextPath: "/", accountId: null });
+    expect(await consumeOAuthState(t.sql, s)).toEqual({ nextPath: "/", accountId: null, provider: "github", userId: null });
     expect(await consumeOAuthState(t.sql, s)).toBeNull();
     expect(await consumeOAuthState(t.sql, "made-up")).toBeNull();
   });
@@ -119,7 +119,7 @@ describe("members", () => {
     await setPlan({ db: t.sql, accountId: acct }, "growth", "monthly");
     expect(await seatUsage(t.sql, acct)).toEqual({ used: 1, limit: 3 });
     expect(await invite(t.sql, acct, owner.session, "not a login!", "member")).toMatchObject({ ok: false, status: 400 });
-    expect(await invite(t.sql, acct, owner.session, "Newbie", "member")).toEqual({ ok: true });
+    expect(await invite(t.sql, acct, owner.session, "Newbie", "member")).toMatchObject({ ok: true });
     expect((await listMembers(t.sql, acct)).invites.map((i) => i.login)).toEqual(["Newbie"]);
     expect(await seatUsage(t.sql, acct)).toEqual({ used: 2, limit: 3 });
 
@@ -138,7 +138,7 @@ describe("members", () => {
 
     // An existing user is added directly.
     const other = await signedIn(profile(12, "other"));
-    expect(await invite(t.sql, acct, owner.session, "other", "member")).toEqual({ ok: true });
+    expect(await invite(t.sql, acct, owner.session, "other", "member")).toMatchObject({ ok: true });
     expect((await listAccounts(t.sql, other.session.user.id)).map((a) => a.id)).toContain(acct);
     expect(await switchAccount(t.sql, other.session, acct)).toBe(true);
     expect((await resolveSession(t.sql, other.token))!.account.id).toBe(acct);

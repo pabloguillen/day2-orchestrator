@@ -46,8 +46,13 @@ export function serverMode(): Mode {
 
 export function assertProductionReady(): void {
   if (process.env.NODE_ENV !== "production") return;
-  const missing = ["DATABASE_URL", "DAY2_PUBLIC_URL", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "DAY2_SECRETS_KEY"].filter((k) => !process.env[k]);
+  const missing = ["DATABASE_URL", "DAY2_PUBLIC_URL", "DAY2_SECRETS_KEY"].filter((k) => !process.env[k]);
   if (missing.length) throw new Error(`Production needs ${missing.join(", ")} — see docs/deploy-hetzner.md.`);
+  // At least one way to sign in.
+  const github = Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);
+  const google = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  const email = Boolean(process.env.SMTP_URL);
+  if (!github && !google && !email) throw new Error("Production needs a way to sign in: GitHub, Google or email (SMTP_URL) — see docs/deploy-hetzner.md.");
 }
 
 export const LOCAL_ACCOUNT_ID = "local";

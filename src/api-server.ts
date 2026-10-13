@@ -12,6 +12,12 @@ import {
 import {
   attachInstallation,
   authConfig,
+  consumeEmailSignIn,
+  createEmailSignIn,
+  linkGitHubIdentity,
+  signInEmail,
+  signInIdentity,
+  type SignInResult,
   canManage,
   clearedSessionCookie,
   consumeOAuthState,
@@ -39,6 +45,8 @@ import {
   type Role,
 } from "./auth";
 import { db, migrate } from "./db";
+import { fetchGoogleProfile, googleAuthorizeUrl, hasGoogle } from "./google";
+import { emailSignInAvailable, inviteMail, sendMail, signInLinkMail } from "./mail";
 import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, listInstallationRepos, type InstallationRepo } from "./github-app";
 import {
   assertProductionReady,
@@ -213,7 +221,7 @@ function requireManager(t: Tenant): void {
 
 /** Who to name on tickets and comments. */
 async function actorName(t: Tenant): Promise<string | undefined> {
-  if (t.session) return t.session.user.name ?? t.session.user.login;
+  if (t.session) return t.session.user.name ?? t.session.user.login ?? t.session.user.email ?? undefined;
   return (await localOperatorName()) || undefined;
 }
 
@@ -503,10 +511,12 @@ route("GET", "/api/github/repos", async (_req, _params, t) => {
 
 /** Starts "Connect GitHub": GitHub's install page, where the person picks
  * which repos day2 may use. GitHub returns to /api/auth/github/callback. */
-route("POST", "/api/github/install", async (_req, _params, t) => {
+route("POST", "/api/github/install", async (req, _params, t) => {
   requireManager(t);
   if (t.mode !== "accounts" || !hasGitHubApp()) throw new HttpError(409, "day2's GitHub App isn't set up on this server.");
-  const state = await createOAuthState(db(), "/setup", t.accountId);
+  const body = (await req.json().catch(() => ({}))) as { next?: unknown };
+  const next = typeof body.next === "string" ? body.next : "/account";
+  const state = await createOAuthState(db(), next, t.accountId, { userId: t.session!.user.id });
   return json({ url: installUrl(state) });
 });
 
@@ -1334,7 +1344,7 @@ route(
     json({
       ...features(),
       mode: serverMode(),
-      signIn: serverMode() === "accounts" ? { github: Boolean(authConfig().githubClientId), dev: authConfig().devLogin } : null,
+      signIn: serverMode() === "accounts" ? signInOptions() : null,
     }),
   { public: true },
 );
@@ -1345,7 +1355,7 @@ route(
 function requireOperator(t: Tenant): void {
   if (t.mode === "local") return;
   const ops = (process.env.DAY2_OPERATOR_LOGINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (!t.session || !ops.includes(t.session.user.login.toLowerCase())) throw new HttpError(403, "Only day2's operators can do this.");
+  if (!t.session?.user.login || !ops.includes(t.session.user.login.toLowerCase())) throw new HttpError(403, "Only day2's operators can do this.");
 }
 
 function lovableSetup(): LovableSetup {
@@ -1447,6 +1457,33 @@ function requireAccounts(t?: Tenant): void {
   if ((t?.mode ?? serverMode()) !== "accounts") throw new HttpError(404, "Sign-in isn't used when day2 runs locally.");
 }
 
+/** The caller's network address, for rate limits. Behind Caddy (production)
+ * that's the first X-Forwarded-For entry Caddy set. */
+function clientIp(req: Request): string | null {
+  if (process.env.DAY2_TRUST_PROXY !== "on") return null;
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+}
+
+/** Back to the login page with a message. */
+const loginError = (reason: string) => redirect(`${consoleOrigin()}/login?error=${encodeURIComponent(reason)}`);
+
+async function startSession(req: Request, signedIn: SignInResult, nextPath: string): Promise<Response> {
+  const token = await createSession(db(), signedIn.userId, signedIn.accountId, req.headers.get("user-agent"));
+  return redirect(`${consoleOrigin()}${safeNextPath(nextPath)}`, sessionCookie(token));
+}
+
+/** Which ways in this server offers (shown on the login page). */
+function signInOptions() {
+  return {
+    github: Boolean(authConfig().githubClientId),
+    google: hasGoogle(),
+    email: emailSignInAvailable(),
+    dev: authConfig().devLogin,
+  };
+}
+
+// -- GitHub --
+
 /** Start GitHub sign-in. `?next=/apps/x` returns there afterwards. */
 route(
   "GET",
@@ -1463,9 +1500,14 @@ route(
 /**
  * GitHub sends people back here after signing in — and after installing
  * day2's GitHub App ("Connect GitHub"), with `installation_id`, because the
- * App asks for user authorization during installation. Either way: who is
- * this, open a session, and (for an install) link the installation to the
- * account that started it, once GitHub confirms this person can see it.
+ * App asks for user authorization during installation.
+ *
+ * Sign-in: who is this → their day2 user → a session.
+ * Connect GitHub: only for the signed-in person who started it (their
+ * session cookie comes along on this top-level navigation). The installation
+ * is linked to their workspace once GitHub confirms this GitHub user can see
+ * it; their GitHub identity is remembered too. No new session is created, so
+ * someone who signed in with Google or email stays who they are.
  */
 route(
   "GET",
@@ -1474,35 +1516,125 @@ route(
     requireAccounts();
     const url = new URL(req.url);
     const sql = db();
-    const fail = (reason: string) => redirect(`${consoleOrigin()}/login?error=${encodeURIComponent(reason)}`);
     const state = await consumeOAuthState(sql, url.searchParams.get("state"));
     const code = url.searchParams.get("code");
-    if (!state || !code) return fail("That sign-in link expired — please try again.");
+    if (!state || state.provider !== "github" || !code) return loginError("That sign-in link expired — please try again.");
     const installationParam = url.searchParams.get("installation_id");
     const installationId = installationParam && /^\d+$/.test(installationParam) ? Number(installationParam) : undefined;
+
+    if (state.accountId) {
+      // Connect GitHub.
+      const session = await resolveSession(sql, readCookie(req, SESSION_COOKIE));
+      if (!session || session.user.id !== state.userId) return loginError("Sign in again, then connect GitHub from the same browser.");
+      const next = safeNextPath(state.nextPath);
+      const back = (msg: string) => redirect(`${consoleOrigin()}${next}${next.includes("?") ? "&" : "?"}github=${encodeURIComponent(msg)}`);
+      if (installationId === undefined) return back("GitHub didn't say which installation to connect.");
+      let profile;
+      try {
+        profile = await fetchGitHubProfile(code, fetch, { installationId });
+      } catch (err) {
+        console.error("[day2-auth] Connect GitHub failed:", (err as Error).message);
+        return back("GitHub didn't confirm the connection — please try again.");
+      }
+      if (!profile.installationVerified) return back("GitHub didn't confirm you can use that installation.");
+      const linked = await attachInstallation(sql, state.accountId, session.user.id, installationId);
+      if (!linked.ok) return back(linked.reason);
+      await linkGitHubIdentity(sql, session.user.id, profile);
+      return back("connected");
+    }
+
     let profile;
     try {
-      profile = await fetchGitHubProfile(code, fetch, installationId !== undefined ? { installationId } : {});
+      profile = await fetchGitHubProfile(code);
     } catch (err) {
       console.error("[day2-auth] GitHub sign-in failed:", (err as Error).message);
-      return fail("GitHub sign-in didn't work — please try again.");
+      return loginError("GitHub sign-in didn't work — please try again.");
     }
-    const signedIn = await signInUser(sql, profile);
-    let accountId = signedIn.accountId;
-    let next = state.nextPath;
-    if (installationId !== undefined) {
-      const target = state.accountId ?? signedIn.accountId;
-      const linked = profile.installationVerified
-        ? await attachInstallation(sql, target, signedIn.userId, installationId)
-        : { ok: false as const, status: 403, reason: "GitHub didn't confirm you can use that installation." };
-      if (linked.ok) accountId = target;
-      next = `${safeNextPath(next)}${next.includes("?") ? "&" : "?"}github=${linked.ok ? "connected" : encodeURIComponent(linked.reason)}`;
-    } else if (state.accountId) {
-      const member = await sql`SELECT 1 FROM memberships WHERE account_id = ${state.accountId} AND user_id = ${signedIn.userId}`;
-      if (member.length) accountId = state.accountId;
+    return startSession(req, await signInUser(sql, profile), state.nextPath);
+  },
+  { public: true },
+);
+
+// -- Google --
+
+route(
+  "GET",
+  "/api/auth/google",
+  async (req) => {
+    requireAccounts();
+    if (!hasGoogle()) throw new HttpError(503, "Google sign-in isn't configured on this server.");
+    const state = await createOAuthState(db(), new URL(req.url).searchParams.get("next") ?? "/", null, { provider: "google" });
+    return redirect(googleAuthorizeUrl(state));
+  },
+  { public: true },
+);
+
+route(
+  "GET",
+  "/api/auth/google/callback",
+  async (req) => {
+    requireAccounts();
+    const url = new URL(req.url);
+    const sql = db();
+    const state = await consumeOAuthState(sql, url.searchParams.get("state"));
+    const code = url.searchParams.get("code");
+    if (!state || state.provider !== "google" || !code) return loginError("That sign-in link expired — please try again.");
+    let p;
+    try {
+      p = await fetchGoogleProfile(code);
+    } catch (err) {
+      console.error("[day2-auth] Google sign-in failed:", (err as Error).message);
+      return loginError("Google sign-in didn't work — please try again.");
     }
-    const token = await createSession(sql, signedIn.userId, accountId, req.headers.get("user-agent"));
-    return redirect(`${consoleOrigin()}${safeNextPath(next)}`, sessionCookie(token));
+    const signedIn = await signInIdentity(sql, { provider: "google", subject: p.sub, email: p.email, emailVerified: p.emailVerified, name: p.name, avatarUrl: p.picture });
+    return startSession(req, signedIn, state.nextPath);
+  },
+  { public: true },
+);
+
+// -- One-time link by email --
+
+/**
+ * Sends a sign-in link. Always answers the same way whether or not the
+ * address has an account, so this can't be used to find out who uses day2.
+ */
+route(
+  "POST",
+  "/api/auth/email",
+  async (req) => {
+    requireAccounts();
+    if (!emailSignInAvailable()) throw new HttpError(503, "Email sign-in isn't set up on this server.");
+    const body = (await req.json().catch(() => ({}))) as { email?: unknown; next?: unknown };
+    const email = typeof body.email === "string" ? body.email : "";
+    const r = await createEmailSignIn(db(), email, typeof body.next === "string" ? body.next : "/", clientIp(req));
+    if (!r.ok) throw new HttpError(r.status, r.reason);
+    if (r.token) {
+      // The link opens a confirm page (not a sign-in by itself), so mail
+      // scanners that open links can't use it up or sign anyone in.
+      const link = `${authConfig().publicUrl}/login/link?token=${encodeURIComponent(r.token)}`;
+      try {
+        await sendMail(signInLinkMail(email.trim(), link, 15));
+      } catch (err) {
+        console.error("[day2-mail] sign-in link not sent:", (err as Error).message);
+        throw new HttpError(502, "We couldn't send the email just now — please try again in a minute.");
+      }
+    }
+    return json({ ok: true });
+  },
+  { public: true },
+);
+
+route(
+  "POST",
+  "/api/auth/email/verify",
+  async (req) => {
+    requireAccounts();
+    const body = (await req.json().catch(() => ({}))) as { token?: unknown };
+    const used = await consumeEmailSignIn(db(), typeof body.token === "string" ? body.token : null);
+    if (!used) throw new HttpError(400, "That sign-in link has expired or was already used — ask for a new one.", "link_expired");
+    const signedIn = await signInEmail(db(), used.email);
+    const token = await createSession(db(), signedIn.userId, signedIn.accountId, req.headers.get("user-agent"));
+    return json({ ok: true, next: safeNextPath(used.nextPath) }, { headers: { "set-cookie": sessionCookie(token) } });
   },
   { public: true },
 );
@@ -1538,16 +1670,16 @@ route("GET", "/api/me", async (_req, _params, t) => {
     const name = await localOperatorName();
     return json({
       mode: "local",
-      user: { login: name, name, avatarUrl: null },
+      user: { login: name, name, email: null, avatarUrl: null },
       account: { id: t.accountId, name, role: "owner" },
       accounts: [],
-      github: { connected: true, canConnect: false },
+      github: { connected: true, canConnect: false, available: false },
     });
   }
   const s = t.session!;
   return json({
     mode: "accounts",
-    user: { id: s.user.id, login: s.user.login, name: s.user.name, avatarUrl: s.user.avatarUrl },
+    user: { id: s.user.id, login: s.user.login, name: s.user.name, email: s.user.email, avatarUrl: s.user.avatarUrl },
     account: { id: s.account.id, name: s.account.name, role: s.account.role },
     accounts: await listAccounts(db(), s.user.id),
     github: { connected: s.account.githubInstallationId !== null, canConnect: hasGitHubApp() && canManage(s.account.role), available: hasGitHubApp() },
@@ -1590,10 +1722,25 @@ route("GET", "/api/account/members", async (_req, _params, t) => {
 
 route("POST", "/api/account/invites", async (req, _params, t) => {
   requireAccounts(t);
-  const body = (await req.json().catch(() => ({}))) as { login?: unknown; role?: unknown };
-  const login = typeof body.login === "string" ? body.login.trim().replace(/^@/, "") : "";
-  memberResult(await invite(db(), t.accountId, t.session!, login, (body.role ?? "member") as Role));
-  return json(await membersResponse(t), { status: 201 });
+  const body = (await req.json().catch(() => ({}))) as { login?: unknown; email?: unknown; role?: unknown };
+  // One field in the console: a GitHub username or an email address.
+  const target = typeof body.email === "string" ? body.email : typeof body.login === "string" ? body.login : "";
+  const r = await invite(db(), t.accountId, t.session!, target, (body.role ?? "member") as Role);
+  memberResult(r);
+  let emailed: boolean | undefined;
+  if (r.ok && r.invited && "email" in r.invited) {
+    // Tell them. The invitation stands even if the email can't go out —
+    // the inviter sees that and can share the link themselves.
+    try {
+      const inviter = t.session!.user.name ?? t.session!.user.login ?? t.session!.user.email ?? "A teammate";
+      await sendMail(inviteMail(r.invited.email, inviter, t.session!.account.name, `${authConfig().publicUrl}/login`, 14));
+      emailed = true;
+    } catch (err) {
+      console.error("[day2-mail] invitation not sent:", (err as Error).message);
+      emailed = false;
+    }
+  }
+  return json({ ...(await membersResponse(t)), ...(emailed !== undefined ? { emailed } : {}) }, { status: 201 });
 });
 
 route("DELETE", "/api/account/invites/:inviteId", async (_req, params, t) => {

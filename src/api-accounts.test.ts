@@ -6,6 +6,8 @@ import { createTestDatabase } from "./db/test-db";
 import { handleRequest } from "./api-server";
 import { dbIntegrations } from "./integrations-store";
 import { clearTokenCache } from "./github-app";
+import { setMailSender, type Mail } from "./mail";
+import { generateKeyPairSync } from "node:crypto";
 
 /**
  * The API in accounts mode (production): sign-in, sessions, account
@@ -25,6 +27,11 @@ const ENV = {
   GITHUB_CLIENT_ID: "Iv1.test",
   GITHUB_CLIENT_SECRET: "secret",
   DAY2_BACKLOG_TICK_MINUTES: "0",
+  GOOGLE_CLIENT_ID: "google-client",
+  GOOGLE_CLIENT_SECRET: "google-secret",
+  GITHUB_APP_ID: "12345",
+  GITHUB_APP_SLUG: "day2-test",
+  GITHUB_APP_PRIVATE_KEY: generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
 };
 
 beforeAll(async () => {
@@ -191,15 +198,18 @@ describe("GitHub sign-in and Connect GitHub", () => {
     clearTokenCache();
   });
 
-  function fakeGitHub(user: { id: number; login: string }, installations: number[]) {
+  function fakeGitHub(user: { id: number; login: string; email?: string }, installations: number[]) {
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.endsWith("/login/oauth/access_token")) return Response.json({ access_token: "ghu_user" });
-      if (url.endsWith("/user")) return Response.json({ ...user, name: null, email: "x@example.com", avatar_url: null });
+      if (url.endsWith("/user")) return Response.json({ id: user.id, login: user.login, name: null, email: null, avatar_url: null });
+      if (url.endsWith("/user/emails")) return Response.json(user.email ? [{ email: user.email, primary: true, verified: true }] : []);
       if (url.includes("/user/installations")) return Response.json({ installations: installations.map((id) => ({ id })) });
       return new Response("not found", { status: 404 });
     }) as typeof fetch;
   }
+
+  const stateFrom = (location: string | null) => new URL(location!).searchParams.get("state")!;
 
   test("sign-in round trip: state is checked, a session cookie is set", async () => {
     const start = await call("GET", "/api/auth/github?next=/apps");
@@ -223,23 +233,176 @@ describe("GitHub sign-in and Connect GitHub", () => {
     expect((await call("GET", `/api/auth/github/callback?code=c&state=${state}`)).headers.get("location")).toContain("/login?error=");
   });
 
-  test("an installation is linked only when GitHub confirms the person can see it", async () => {
+  test("Connect GitHub: only for the person who started it, and only an installation GitHub confirms", async () => {
     fakeGitHub({ id: 502, login: "frank" }, [777]);
-    const s1 = new URL((await call("GET", "/api/auth/github")).headers.get("location")!).searchParams.get("state")!;
-    const first = await call("GET", `/api/auth/github/callback?code=c&state=${s1}`);
-    const frank = cookieFrom(first.headers);
+    const frank = cookieFrom((await call("GET", `/api/auth/github/callback?code=c&state=${stateFrom((await call("GET", "/api/auth/github")).headers.get("location"))}`)).headers);
+
+    const startInstall = async () => {
+      const r = await call("POST", "/api/github/install", { cookie: frank, body: { next: "/setup" } });
+      expect(r.status).toBe(200);
+      expect(r.body!.url).toStartWith("https://github.com/apps/day2-test/installations/new?state=");
+      return new URL(r.body!.url).searchParams.get("state")!;
+    };
+
+    // Without frank's session (another browser / someone else): refused.
+    const s1 = await startInstall();
+    const noSession = await call("GET", `/api/auth/github/callback?code=c&state=${s1}&installation_id=777&setup_action=install`);
+    expect(noSession.headers.get("location")).toContain("/login?error=");
 
     // Someone else's installation id: refused.
-    const s2 = new URL((await call("GET", "/api/auth/github")).headers.get("location")!).searchParams.get("state")!;
-    const refused = await call("GET", `/api/auth/github/callback?code=c&state=${s2}&installation_id=999&setup_action=install`);
-    expect(refused.headers.get("location")).toContain("github=");
+    const s2 = await startInstall();
+    const refused = await call("GET", `/api/auth/github/callback?code=c&state=${s2}&installation_id=999&setup_action=install`, { cookie: frank });
+    expect(refused.headers.get("location")).toStartWith(`${ORIGIN}/setup?github=`);
     expect(refused.headers.get("location")).not.toContain("github=connected");
     expect((await call("GET", "/api/me", { cookie: frank })).body!.github.connected).toBe(false);
 
-    // Their own: linked to their account.
-    const s3 = new URL((await call("GET", "/api/auth/github")).headers.get("location")!).searchParams.get("state")!;
-    const linked = await call("GET", `/api/auth/github/callback?code=c&state=${s3}&installation_id=777&setup_action=install`);
-    expect(linked.headers.get("location")).toContain("github=connected");
-    expect((await call("GET", "/api/me", { cookie: cookieFrom(linked.headers) })).body!.github.connected).toBe(true);
+    // Their own: linked; no new session needed.
+    const s3 = await startInstall();
+    const linked = await call("GET", `/api/auth/github/callback?code=c&state=${s3}&installation_id=777&setup_action=install`, { cookie: frank });
+    expect(linked.headers.get("location")).toBe(`${ORIGIN}/setup?github=connected`);
+    expect(linked.headers.get("set-cookie")).toBeNull();
+    expect((await call("GET", "/api/me", { cookie: frank })).body!.github.connected).toBe(true);
+  });
+
+  test("someone who signed in by email can connect GitHub, and later sign in with it", async () => {
+    const mail: Mail[] = [];
+    setMailSender(async (m) => void mail.push(m));
+    try {
+      expect((await call("POST", "/api/auth/email", { body: { email: "Gina@Example.com", next: "/apps" } })).status).toBe(200);
+      const token = new URL(/https:\/\/\S+/.exec(mail.at(-1)!.text)![0]).searchParams.get("token")!;
+      const gina = cookieFrom((await call("POST", "/api/auth/email/verify", { body: { token } })).headers);
+
+      fakeGitHub({ id: 503, login: "gina-gh", email: "other@example.com" }, [888]);
+      const r = await call("POST", "/api/github/install", { cookie: gina, body: {} });
+      const state = new URL(r.body!.url).searchParams.get("state")!;
+      const linked = await call("GET", `/api/auth/github/callback?code=c&state=${state}&installation_id=888`, { cookie: gina });
+      expect(linked.headers.get("location")).toContain("github=connected");
+
+      // "Continue with GitHub" now opens the same person and workspace.
+      const before = (await call("GET", "/api/me", { cookie: gina })).body!;
+      const s = stateFrom((await call("GET", "/api/auth/github")).headers.get("location"));
+      const viaGitHub = cookieFrom((await call("GET", `/api/auth/github/callback?code=c&state=${s}`)).headers);
+      const after = (await call("GET", "/api/me", { cookie: viaGitHub })).body!;
+      expect(after.user.id).toBe(before.user.id);
+      expect(after.account.id).toBe(before.account.id);
+      expect(after.user.login).toBe("gina-gh");
+    } finally {
+      setMailSender(null);
+    }
+  });
+});
+
+describe("sign-in without GitHub", () => {
+  const realFetch = globalThis.fetch;
+  let mail: Mail[] = [];
+  beforeAll(() => setMailSender(async (m) => void mail.push(m)));
+  afterAll(() => {
+    setMailSender(null);
+    globalThis.fetch = realFetch;
+  });
+
+  const linkToken = () => {
+    const url = /https:\/\/\S+/.exec(mail.at(-1)!.text)![0];
+    expect(url).toStartWith(`${ORIGIN}/login/link?token=`);
+    return new URL(url).searchParams.get("token")!;
+  };
+
+  test("the login page knows which ways in exist", async () => {
+    expect((await call("GET", "/api/features")).body!.signIn).toEqual({ github: true, google: true, email: true, dev: true });
+  });
+
+  test("email link: one use, the right person, the same answer for any address", async () => {
+    mail = [];
+    expect((await call("POST", "/api/auth/email", { body: { email: "not-an-email" } })).status).toBe(400);
+    const r = await call("POST", "/api/auth/email", { body: { email: "hana@example.com", next: "/credits" } });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true });
+    expect(mail).toHaveLength(1);
+    expect(mail[0]!.to).toBe("hana@example.com");
+    const token = linkToken();
+    // Only the token's hash is stored.
+    expect(await t.sql`SELECT 1 FROM email_sign_in WHERE token_hash = ${token}`).toHaveLength(0);
+
+    const ok = await call("POST", "/api/auth/email/verify", { body: { token } });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ok: true, next: "/credits" });
+    const me = await call("GET", "/api/me", { cookie: cookieFrom(ok.headers) });
+    expect(me.body).toMatchObject({ user: { login: null, email: "hana@example.com" }, account: { role: "owner" } });
+
+    const again = await call("POST", "/api/auth/email/verify", { body: { token } });
+    expect(again.status).toBe(400);
+    expect(again.body).toMatchObject({ code: "link_expired" });
+    expect((await call("POST", "/api/auth/email/verify", { body: { token: "made-up" } })).status).toBe(400);
+  });
+
+  test("an expired link doesn't work", async () => {
+    mail = [];
+    await call("POST", "/api/auth/email", { body: { email: "ivan@example.com" } });
+    const token = linkToken();
+    await t.sql`UPDATE email_sign_in SET expires_at = now() - interval '1 minute' WHERE lower(email) = 'ivan@example.com'`;
+    expect((await call("POST", "/api/auth/email/verify", { body: { token } })).status).toBe(400);
+  });
+
+  test("too many links for one address: still 'check your email', but no more mail", async () => {
+    mail = [];
+    for (let i = 0; i < 7; i++) expect((await call("POST", "/api/auth/email", { body: { email: "flood@example.com" } })).status).toBe(200);
+    expect(mail).toHaveLength(5);
+  });
+
+  test("Google: verified email joins the person who used an email link; unverified doesn't", async () => {
+    mail = [];
+    await call("POST", "/api/auth/email", { body: { email: "jo@example.com" } });
+    const jo = cookieFrom((await call("POST", "/api/auth/email/verify", { body: { token: linkToken() } })).headers);
+    const joMe = (await call("GET", "/api/me", { cookie: jo })).body!;
+
+    const googleAs = async (profile: Record<string, unknown>) => {
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === "https://oauth2.googleapis.com/token") return Response.json({ access_token: "ya29.x" });
+        if (url === "https://openidconnect.googleapis.com/v1/userinfo") return Response.json(profile);
+        return new Response("nope", { status: 404 });
+      }) as typeof fetch;
+      const start = await call("GET", "/api/auth/google?next=/apps");
+      const to = new URL(start.headers.get("location")!);
+      expect(to.origin).toBe("https://accounts.google.com");
+      expect(to.searchParams.get("redirect_uri")).toBe(`${ORIGIN}/api/auth/google/callback`);
+      const back = await call("GET", `/api/auth/google/callback?code=c&state=${to.searchParams.get("state")}`);
+      expect(back.headers.get("location")).toBe(`${ORIGIN}/apps`);
+      return (await call("GET", "/api/me", { cookie: cookieFrom(back.headers) })).body!;
+    };
+
+    const viaGoogle = await googleAs({ sub: "g-1", email: "JO@example.com", email_verified: true, name: "Jo Park", picture: "https://p/jo" });
+    expect(viaGoogle.user.id).toBe(joMe.user.id);
+    expect(viaGoogle.account.id).toBe(joMe.account.id);
+    expect(viaGoogle.user.name).toBe("Jo Park");
+
+    const unverified = await googleAs({ sub: "g-2", email: "jo@example.com", email_verified: false, name: "Not Jo" });
+    expect(unverified.user.id).not.toBe(joMe.user.id);
+
+    // A Google state can't be replayed on the GitHub callback.
+    const s = new URL((await call("GET", "/api/auth/google")).headers.get("location")!).searchParams.get("state");
+    expect((await call("GET", `/api/auth/github/callback?code=c&state=${s}`)).headers.get("location")).toContain("/login?error=");
+  });
+
+  test("invite by email: they get an email, and join when they sign in with that address", async () => {
+    mail = [];
+    await call("POST", "/api/auth/email", { body: { email: "kai@example.com" } });
+    const kai = cookieFrom((await call("POST", "/api/auth/email/verify", { body: { token: linkToken() } })).headers);
+    expect((await call("PUT", "/api/credits/plan", { cookie: kai, body: { plan: "growth" } })).status).toBe(200);
+
+    mail = [];
+    const inv = await call("POST", "/api/account/invites", { cookie: kai, body: { email: "Lee@Example.com", role: "admin" } });
+    expect(inv.status).toBe(201);
+    expect(inv.body!.emailed).toBe(true);
+    expect(inv.body!.invites).toEqual([expect.objectContaining({ email: "lee@example.com", login: null, role: "admin" })]);
+    expect(mail[0]).toMatchObject({ to: "lee@example.com" });
+    expect(mail[0]!.subject).toContain("invited you");
+
+    await call("POST", "/api/auth/email", { body: { email: "lee@example.com" } });
+    const lee = cookieFrom((await call("POST", "/api/auth/email/verify", { body: { token: linkToken() } })).headers);
+    const leeMe = (await call("GET", "/api/me", { cookie: lee })).body!;
+    const kaiMe = (await call("GET", "/api/me", { cookie: kai })).body!;
+    expect(leeMe.account).toMatchObject({ id: kaiMe.account.id, role: "admin" });
+    expect((await call("POST", "/api/account/invites", { cookie: kai, body: { email: "nope@" } })).status).toBe(400);
   });
 });
