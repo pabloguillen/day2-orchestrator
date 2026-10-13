@@ -24,3 +24,21 @@ day2-proposals.jsonl
 day2-release-results.jsonl
 day2-autonomy-audit.jsonl
 worktrees-tmp-check/
+
+# Account-wide credits (credits.ts) — the operator's balance and ledger,
+# machine/account data, not source.
+.day2-credits-account.json
+.day2-credits-ledger.jsonl
+.day2-credits.lock/
+
+# JIRA / Linear connections per app (backlog-trackers.ts) — customer API
+# tokens, never committed.
+.day2-integrations.json
+
+# day2's own Lovable account (lovable.ts): OAuth tokens and build records.
+.day2-lovable.json
+.day2-lovable-builds.json
+
+# Production settings and local backups (deploy/).
+deploy/.env
+deploy/backups/

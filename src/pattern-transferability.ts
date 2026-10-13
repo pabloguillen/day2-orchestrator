@@ -1,5 +1,7 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { AppStage } from "./growth-strategy";
+
+const query = meteredQuery("content_generation", "Growth research");
 
 /**
  * Tier 0 epistemic core (docs/distribution-intelligence.md, "The Tier 0

@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { McpServerConfig, McpServerToolPolicy } from "@anthropic-ai/claude-agent-sdk";
 import type { GrowthChannel, GrowthStrategy } from "./growth-strategy";
+
+const query = meteredQuery("content_generation", "Tool research");
 
 /**
  * Step 4 (self-distributing), Component 4 — config-driven MCP/tool-selection

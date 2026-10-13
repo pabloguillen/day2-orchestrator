@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +10,8 @@ import {
   FALSE_POSITIVE_PATTERNS,
 } from "./false-positive-patterns";
 import type { PersonaResult } from "./swarm";
+
+const query = meteredQuery("agent_work", "Fix review");
 
 /**
  * Step 3 (self-evolving), Component 1 — swarm calibration loop

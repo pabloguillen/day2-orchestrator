@@ -1,5 +1,5 @@
 import type { AuditEntry } from "./owner-feed";
-import type { SpendBreakdown } from "./spend-governance";
+import type { AppCreditUsage } from "./credits";
 
 /**
  * Per-app headline numbers for the console's "Your apps" grid. Pure — the
@@ -14,8 +14,11 @@ export type AppOverview = {
   pendingApprovals: number | null;
   /** Changes the autonomy model auto-shipped since the first of `now`'s month (UTC). */
   autoShippedThisMonth: number;
-  spentUsd: number;
-  monthlyBudgetUsd: number;
+  /** Credits this app used this calendar month (UTC). */
+  creditsUsedThisMonth: number;
+  /** The app's own monthly credit cap; null when it has none and can draw
+   * on the whole account balance. */
+  monthlyCreditCap: number | null;
   killSwitch: boolean;
 };
 
@@ -24,7 +27,8 @@ export function summarizeApp(input: {
   hasGitRemote: boolean;
   pendingApprovals: number | null;
   audit: AuditEntry[];
-  spend: SpendBreakdown;
+  credits: AppCreditUsage;
+  killSwitch: boolean;
   now?: Date;
 }): AppOverview {
   const now = input.now ?? new Date();
@@ -37,8 +41,8 @@ export function summarizeApp(input: {
     hasGitRemote: input.hasGitRemote,
     pendingApprovals: input.hasGitRemote ? input.pendingApprovals : null,
     autoShippedThisMonth,
-    spentUsd: input.spend.spentUsd,
-    monthlyBudgetUsd: input.spend.monthlyBudgetUsd,
-    killSwitch: input.spend.killSwitch,
+    creditsUsedThisMonth: input.credits.usedThisMonth,
+    monthlyCreditCap: input.credits.caps.monthlyCredits ?? null,
+    killSwitch: input.killSwitch,
   };
 }

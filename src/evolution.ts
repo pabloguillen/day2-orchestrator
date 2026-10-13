@@ -1,6 +1,8 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { sandboxConfig } from "./agent-sandbox";
 import type { CompetitorInsight } from "./competitor-feed";
+
+const query = meteredQuery("agent_work", "Feature proposal research");
 
 /**
  * Evolution engine — proposal generation only, not autonomous shipping

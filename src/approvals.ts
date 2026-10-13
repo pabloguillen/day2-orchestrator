@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { gitEnv } from "./tenant";
 import { DEFAULT_AUTONOMY_CONFIG, evaluateAutonomy } from "./autonomy";
 import type { ChangeForAutonomy } from "./types";
 
@@ -121,13 +122,14 @@ type RawPr = {
 export async function fetchPendingChangeCards(repoPath: string): Promise<ChangeCard[]> {
   const listJson = await $`gh pr list --state open --json number,title,headRefName,url,body --limit 100`
     .cwd(repoPath)
+    .env(await gitEnv())
     .text();
   const allOpen = JSON.parse(listJson) as RawPr[];
   const dayFixPrs = allOpen.filter((pr) => pr.headRefName.startsWith("day2-fix-"));
 
   const cards: ChangeCard[] = [];
   for (const pr of dayFixPrs) {
-    const filesJson = await $`gh pr view ${pr.number} --json files`.cwd(repoPath).text();
+    const filesJson = await $`gh pr view ${pr.number} --json files`.cwd(repoPath).env(await gitEnv()).text();
     const { files } = JSON.parse(filesJson) as { files: Array<{ path: string }> };
     const filesChanged = files.map((f) => f.path);
     const { whatHappened, whatChanged, evidence } = parsePrBody(pr.body);
@@ -177,19 +179,19 @@ export function renderChangeCard(card: ChangeCard): string {
  * caller explicitly asks for it (the CLI's `--apply` flag) — never as a
  * side effect of listing or rendering cards. */
 export async function applyChange(repoPath: string, prNumber: number): Promise<void> {
-  await $`gh pr merge ${prNumber} --squash`.cwd(repoPath).text();
+  await $`gh pr merge ${prNumber} --squash`.cwd(repoPath).env(await gitEnv()).text();
 }
 
 /** Closes the PR without merging — "Undo" for a still-pending change.
  * Deliberately does not delete the branch or force-push anything; a closed,
  * unmerged PR is fully recoverable (reopenable) if that turns out wrong. */
 export async function undoChange(repoPath: string, prNumber: number): Promise<void> {
-  await $`gh pr close ${prNumber}`.cwd(repoPath).text();
+  await $`gh pr close ${prNumber}`.cwd(repoPath).env(await gitEnv()).text();
 }
 
 /** "Ask a question" — takes no action on the change itself, just posts the
  * question as a PR comment so it's visible wherever the change is actually
  * reviewed (GitHub, in developer mode, per the source doc). */
 export async function askQuestion(repoPath: string, prNumber: number, question: string): Promise<void> {
-  await $`gh pr comment ${prNumber} --body ${question}`.cwd(repoPath).text();
+  await $`gh pr comment ${prNumber} --body ${question}`.cwd(repoPath).env(await gitEnv()).text();
 }

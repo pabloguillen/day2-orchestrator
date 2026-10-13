@@ -1,0 +1,99 @@
+# day2 on one server: Postgres, the orchestrator API, the console, Caddy
+# (HTTPS) and nightly backups. Step by step: docs/deploy-hetzner.md.
+#
+#   cd deploy && cp .env.example .env   # fill it in
+#   docker compose up -d --build
+#
+# Expects the console repo next to this one (../../console), or set
+# CONSOLE_DIR in .env.
+
+name: day2
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: day2
+      POSTGRES_USER: day2
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U day2 -d day2"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Never published: only the api and backup containers reach it.
+
+  api:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://day2:${POSTGRES_PASSWORD}@postgres:5432/day2
+      DAY2_PUBLIC_URL: https://${DAY2_DOMAIN}
+      # Caddy is the only way in, so its X-Forwarded-For is trustworthy (rate limits).
+      DAY2_TRUST_PROXY: "on"
+    volumes:
+      - managed-repos:/app/managed-repos
+      - data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The agent sandbox (bubblewrap) needs user namespaces inside the
+    # container; Docker's default seccomp/AppArmor profiles block them.
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    # Agents run builds and tests: keep them from starving the database.
+    mem_limit: 3g
+
+  console:
+    build: ${CONSOLE_DIR:-../../console}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DAY2_DOMAIN: ${DAY2_DOMAIN:?set DAY2_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - console
+
+  backup:
+    image: postgres:16
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    environment:
+      DATABASE_URL: postgres://day2:${POSTGRES_PASSWORD}@postgres:5432/day2
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-03}
+    volumes:
+      - ./backup.sh:/backup.sh:ro
+      - ./backups:/backups
+      - managed-repos:/managed-repos:ro
+      - data:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  managed-repos:
+  data:
+  caddy-data:
+  caddy-config:

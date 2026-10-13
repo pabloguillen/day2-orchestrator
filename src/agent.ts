@@ -1,6 +1,8 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { sandboxConfig } from "./agent-sandbox";
 import type { BugReport } from "./types";
+
+const query = meteredQuery("agent_work", "Fix");
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 const MAX_TURNS = 60;

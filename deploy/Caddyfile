@@ -1,0 +1,34 @@
+# One origin for everything: the console, and /api for the orchestrator.
+# Caddy gets and renews the HTTPS certificate on its own.
+{$DAY2_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	handle /api/* {
+		# Agent-backed requests (scans, answers, Tell day2) can take minutes.
+		reverse_proxy api:4700 {
+			flush_interval -1
+			transport http {
+				read_timeout 15m
+				write_timeout 15m
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy console:3000
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

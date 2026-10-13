@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { sandboxConfig } from "./agent-sandbox";
 import type { ChangeCard } from "./approvals";
@@ -8,6 +8,8 @@ import type { AuditEntry } from "./owner-feed";
 import type { RecordedProposal } from "./proposals";
 import type { RecordedReleaseResult } from "./release";
 import type { SpendBreakdown } from "./spend-governance";
+
+const query = meteredQuery("scan_answer", "Answer");
 
 /**
  * "Ask day2" — the console Home screen's question bar. Answers an owner's
@@ -28,7 +30,8 @@ import type { SpendBreakdown } from "./spend-governance";
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 const MAX_TURNS = 12;
-const MAX_BUDGET_USD = 0.5;
+export const ASK_MAX_BUDGET_USD = 0.5;
+const MAX_BUDGET_USD = ASK_MAX_BUDGET_USD;
 export const MAX_QUESTION_LENGTH = 2000;
 export const ASK_LOG_FILENAME = "day2-ask-log.jsonl";
 
@@ -163,7 +166,9 @@ export type AskResult =
   | { ok: true; answer: string; costUsd: number; askedAt: string }
   | { ok: false; reason: string };
 
-export type AskLogEntry = { askedAt: string; question: string; answer: string; costUsd: number };
+/** What the console sees: credits, never day2's own cost (the log lives in
+ * the app's repo, which the owner can read). */
+export type AskLogEntry = { askedAt: string; question: string; answer: string; credits?: number };
 
 export function validateQuestion(raw: unknown): { ok: true; question: string } | { ok: false; reason: string } {
   if (typeof raw !== "string" || !raw.trim()) return { ok: false, reason: "question is required." };
@@ -223,7 +228,10 @@ export function loadAskLog(logFile: string, limit = 10): AskLogEntry[] {
   if (!existsSync(logFile)) return [];
   const lines = readFileSync(logFile, "utf-8").trim().split("\n").filter(Boolean);
   return lines
-    .map((l) => JSON.parse(l) as AskLogEntry)
+    .map((l) => {
+      const e = JSON.parse(l) as AskLogEntry & { costUsd?: number };
+      return { askedAt: e.askedAt, question: e.question, answer: e.answer, ...(e.credits !== undefined ? { credits: e.credits } : {}) };
+    })
     .sort((a, b) => b.askedAt.localeCompare(a.askedAt))
     .slice(0, limit);
 }

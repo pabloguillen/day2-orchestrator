@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { AppProfile } from "./onboarding";
+
+const query = meteredQuery("scan_answer", "App rescan");
 
 /**
  * Step 4 (self-distributing) extension — drift-detecting app-profile

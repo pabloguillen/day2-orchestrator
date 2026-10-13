@@ -97,8 +97,8 @@ describe("ask log", () => {
   test("is append-only and read back newest first", () => {
     const file = join(mkdtempSync(join(tmpdir(), "day2-ask-")), "log.jsonl");
     expect(loadAskLog(file)).toEqual([]);
-    recordAsk(file, { askedAt: "2026-10-01T00:00:00Z", question: "a", answer: "A", costUsd: 0.01 });
-    recordAsk(file, { askedAt: "2026-10-02T00:00:00Z", question: "b", answer: "B", costUsd: 0.02 });
+    recordAsk(file, { askedAt: "2026-10-01T00:00:00Z", question: "a", answer: "A", credits: 3 });
+    recordAsk(file, { askedAt: "2026-10-02T00:00:00Z", question: "b", answer: "B", credits: 6 });
     expect(loadAskLog(file).map((e) => e.question)).toEqual(["b", "a"]);
     expect(loadAskLog(file, 1)).toHaveLength(1);
   });

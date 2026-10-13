@@ -1,0 +1,12 @@
+node_modules
+managed-repos
+test-reports
+worktrees-tmp-check
+.git
+.env
+deploy/.env
+.day2-*.json
+.day2-*.jsonl
+.day2-credits.lock
+*.log
+tsconfig.check.json

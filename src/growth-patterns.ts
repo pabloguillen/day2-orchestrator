@@ -1,7 +1,9 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { AppStage } from "./growth-strategy";
 import { isValidMechanismDependsOn } from "./pattern-transferability";
 import type { ContextDimension } from "./pattern-transferability";
+
+const query = meteredQuery("content_generation", "Growth research");
 
 /**
  * Step 4 (self-distributing) extension — category/stage-aware proven-

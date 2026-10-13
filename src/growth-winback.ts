@@ -1,5 +1,7 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import { sandboxConfig } from "./agent-sandbox";
+
+const query = meteredQuery("content_generation", "Win-back message");
 
 /**
  * Step 4 (self-distributing) extension — retention/win-back segment

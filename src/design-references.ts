@@ -1,7 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { ToolBinding } from "./growth-tools-config";
+
+const query = meteredQuery("content_generation", "Design reference");
 
 /**
  * Step 4 (self-distributing) extension — owner-supplied design references

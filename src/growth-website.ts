@@ -1,8 +1,11 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { FigmaDesignContext, UploadedAsset } from "./design-references";
 import type { AppProfile } from "./onboarding";
+import { renderBrandBrief } from "./brand-dna";
 import type { WebsiteConfig } from "./spend-governance";
 import type { ToolBinding } from "./growth-tools-config";
+
+const query = meteredQuery("content_generation", "Website content");
 
 /**
  * Step 4 (self-distributing), Component 7 — optional marketing website
@@ -116,7 +119,7 @@ capability not implied by this):
 - Real features: ${appProfile.featureMap.join(", ")}
 - Tone of voice: ${appProfile.toneOfVoice}
 - Visual style: ${styleGuide!.framework}, color palette ${styleGuide!.colors.join(", ")}${assetLine}
-${figmaBlock}
+${appProfile.brand ? `\n${renderBrandBrief(appProfile.brand)}\n` : ""}${figmaBlock}
 
 ${templateNote}
 

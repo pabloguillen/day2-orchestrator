@@ -1,5 +1,7 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { meteredQuery } from "./metered-query";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+
+const query = meteredQuery("scan_answer", "Competitor check");
 
 /**
  * Step 3 (self-evolving), Component 4 — competitor feed

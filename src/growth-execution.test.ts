@@ -110,6 +110,15 @@ describe("executeChannelAction — ordering and gates", () => {
     }
   });
 
+  test("blocks with blocked_by_credits when the account's credits can't cover it, after the budget passes", async () => {
+    const result = await executeChannelAction(
+      baseOptions({ creditCheck: { ok: false, code: "balance", reason: "Not enough credits", maxCredits: 500 } }),
+    );
+    expect(result).toEqual({ status: "blocked_by_credits", reason: "Not enough credits" });
+    const passing = await executeChannelAction(baseOptions({ creditCheck: { ok: true, maxCredits: 10 } }));
+    expect(passing.status).not.toBe("blocked_by_credits");
+  });
+
   test("real, already-committed spend in the ledger correctly reduces what a later action can spend", async () => {
     const ledger: SpendLedgerEntry[] = [
       {

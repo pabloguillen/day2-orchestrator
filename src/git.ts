@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { gitEnv } from "./tenant";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,7 @@ export async function cloneIsolatedWorkspace(sourceRepoPath: string): Promise<st
     await $`git -C ${sourceRepoPath} remote get-url origin`.quiet().text()
   ).trim();
   const workDir = mkdtempSync(join(tmpdir(), "day2-work-"));
-  await $`git clone ${remoteUrl} ${workDir}`.quiet();
+  await $`git clone ${remoteUrl} ${workDir}`.env(await gitEnv()).quiet();
   return workDir;
 }
 
@@ -24,7 +25,7 @@ export async function cloneIsolatedWorkspace(sourceRepoPath: string): Promise<st
  * used by the canary release path, which deploys a specific merged SHA
  * rather than whatever's currently at `origin/main`'s tip. */
 export async function checkoutSha(cwd: string, sha: string) {
-  await $`git -C ${cwd} fetch origin`.quiet();
+  await $`git -C ${cwd} fetch origin`.env(await gitEnv()).quiet();
   await $`git -C ${cwd} checkout ${sha}`.quiet();
 }
 
@@ -45,7 +46,7 @@ function slugify(title: string): string {
  */
 export async function createFixBranch(cwd: string, sourceId: string, title: string) {
   const branch = `day2-fix-${slugify(title)}-${sourceId.slice(0, 8)}`;
-  await $`git -C ${cwd} fetch origin`.quiet();
+  await $`git -C ${cwd} fetch origin`.env(await gitEnv()).quiet();
   await $`git -C ${cwd} checkout -B ${branch} origin/main`.quiet();
   return branch;
 }
@@ -61,7 +62,7 @@ export async function commitAll(cwd: string, message: string) {
 }
 
 export async function pushBranch(cwd: string, branch: string) {
-  await $`git -C ${cwd} push -u origin ${branch}`.quiet();
+  await $`git -C ${cwd} push -u origin ${branch}`.env(await gitEnv()).quiet();
 }
 
 export async function diffStat(cwd: string): Promise<string> {
