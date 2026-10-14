@@ -48,7 +48,9 @@ export function serverMode(): Mode {
 
 export function assertProductionReady(): void {
   if (process.env.NODE_ENV !== "production") return;
-  const missing = ["DATABASE_URL", "DAY2_PUBLIC_URL", "DAY2_SECRETS_KEY"].filter((k) => !process.env[k]);
+  // An API key, not a Claude subscription login: Anthropic doesn't allow a
+  // subscription to power a product other people use.
+  const missing = ["DATABASE_URL", "DAY2_PUBLIC_URL", "DAY2_SECRETS_KEY", "ANTHROPIC_API_KEY"].filter((k) => !process.env[k]);
   if (missing.length) throw new Error(`Production needs ${missing.join(", ")} — see docs/deploy-hetzner.md.`);
   // At least one way to sign in.
   const github = Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);

@@ -2207,6 +2207,9 @@ if (import.meta.main) {
     },
   });
   console.log(`[day2-api] ${serverMode()} mode, listening on http://${hostname}:${server.port}`);
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log("[day2-api] No ANTHROPIC_API_KEY — agents use this computer's Claude Code login (your subscription). Fine for trying day2 yourself; production needs an API key.");
+  }
   startBacklogTimer();
 }
 
