@@ -7,10 +7,11 @@ import { join } from "node:path";
  * exercises exactly the metering around it — no real agent run. */
 let fakeCost = 0.2;
 let started = 0;
+let toolUses: string[] = [];
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: async function* () {
     started++;
-    yield { type: "assistant" };
+    yield { type: "assistant", message: { content: toolUses.map((name) => ({ type: "tool_use", name, input: {} })) } };
     yield { type: "result", result: "done", is_error: false, total_cost_usd: fakeCost, num_turns: 1 };
   },
 }));
@@ -86,5 +87,23 @@ describe("meteredQuery", () => {
     await drain(meteredQuery("agent_work")({ prompt: "x", options: { cwd: REPO, maxBudgetUsd: 1000 } }) as AsyncGenerator<unknown>);
     delete process.env.DAY2_CREDITS;
     expect((await getSummary(store())).balance.usedThisMonth).toBe(before);
+  });
+
+  test("calls to day2's own tools are billed per call, on top of the model's cost", async () => {
+    const before = (await getSummary(store())).balance.usedThisMonth;
+    toolUses = ["mcp__foreplay__search_ads", "mcp__foreplay__get_brand", "mcp__runway__whoami", "mcp__runway__generate_video", "WebSearch"];
+    try {
+      const ctx: { appId: string; appName: string; service: "scan_answer"; description: string; charged?: number } = { appId: "app1", appName: "buddy", service: "scan_answer", description: "Market research" };
+      await withCreditContext(ctx, () => drain(meteredQuery("scan_answer")({ prompt: "x", options: { maxBudgetUsd: 1 } }) as AsyncGenerator<unknown>));
+      const s = await getSummary(store());
+      const model = Math.ceil((fakeCost * MARKUP.scan_answer) / 0.01 - 1e-9);
+      const foreplay = Math.ceil((2 * 0.02 * MARKUP.scan_answer) / 0.01 - 1e-9);
+      const runway = Math.ceil((1 * 0.5 * MARKUP.content_generation) / 0.01 - 1e-9);
+      expect(s.balance.usedThisMonth - before).toBe(model + foreplay + runway);
+      expect(s.recent.map((r) => r.description)).toEqual(expect.arrayContaining(["Foreplay × 2 (Market research)", "Runway × 1 (Market research)"]));
+      expect(ctx.charged).toBe(model + foreplay + runway);
+    } finally {
+      toolUses = [];
+    }
   });
 });

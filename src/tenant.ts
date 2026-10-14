@@ -9,6 +9,7 @@ import type { CreditStore } from "./credits";
 import { appsRegistryPath, creditStore, dataDir } from "./day2-paths";
 import { CONNECTORS_FILENAME, dbConnectors, fileConnectors, type ConnectorStore } from "./connectors";
 import { db, hasDatabase } from "./db";
+import { AD_IDENTITIES_FILENAME, dbAdIdentities, fileAdIdentities, type AdIdentityStore } from "./ad-identities";
 import { githubEnv } from "./github-app";
 import { dbIntegrations, fileIntegrations, type IntegrationsStore } from "./integrations-store";
 
@@ -36,8 +37,6 @@ export type Tenant = {
   apps: AppsStore;
   credits: CreditStore;
   integrations: IntegrationsStore;
-  /** Connected tools (Foreplay, Runway, Meta Ads…) — connectors.ts. */
-  connectors: ConnectorStore;
   /** day2's GitHub App installation on this account (production), or null
    * — then git/gh use the machine's own GitHub login (local mode). */
   githubInstallationId: number | null;
@@ -69,7 +68,6 @@ export function localTenant(): Tenant {
     apps: fileApps(appsRegistryPath()),
     credits: creditStore(),
     integrations: fileIntegrations(resolve(dirname(appsRegistryPath()), INTEGRATIONS_FILENAME)),
-    connectors: fileConnectors(join(dataDir(), CONNECTORS_FILENAME)),
     githubInstallationId: null,
   };
 }
@@ -84,9 +82,18 @@ export function accountTenant(accountId: string, githubInstallationId: number | 
     apps: dbApps(sql, accountId),
     credits: { db: sql, accountId },
     integrations: dbIntegrations(sql, accountId),
-    connectors: dbConnectors(sql, accountId),
     githubInstallationId,
   };
+}
+
+/** The tools day2 runs for every customer, on day2's own accounts
+ * (connectors.ts) — one store for the whole platform. */
+export function platformTools(): ConnectorStore {
+  return serverMode() === "accounts" ? dbConnectors(db()) : fileConnectors(join(dataDir(), CONNECTORS_FILENAME));
+}
+
+export function adIdentities(): AdIdentityStore {
+  return serverMode() === "accounts" ? dbAdIdentities(db()) : fileAdIdentities(join(dataDir(), AD_IDENTITIES_FILENAME));
 }
 
 export function sessionTenant(session: Session): Tenant {

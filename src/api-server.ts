@@ -48,14 +48,19 @@ import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { fetchAppEvents } from "./app-events";
+import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
 import { auditLoops, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
 import { loadResearch, MARKET_RESEARCH_FILENAME, recordResearch, researchTopic } from "./market-research";
 import { researchCompetitorDistributionAngles } from "./competitor-feed";
 import { fetchGoogleProfile, googleAuthorizeUrl, hasGoogle } from "./google";
 import { emailSignInAvailable, inviteMail, sendMail, signInLinkMail } from "./mail";
 import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, listInstallationRepos, type InstallationRepo } from "./github-app";
+import { isMetaPageId } from "./ad-identities";
+import { allApps } from "./apps-store";
 import {
+  adIdentities,
   assertProductionReady,
+  platformTools,
   localOperatorName,
   localTenant,
   runAsTenant,
@@ -162,6 +167,7 @@ import {
 import { linearClient, publicIntegrations, type AppIntegrations } from "./backlog-trackers";
 import { gatherSignalsForApp } from "./health-scout-cli";
 import { tickAll } from "./backlog-cli";
+import { autopilotAll } from "./growth-autopilot-run";
 import { features } from "./features";
 import {
   answerBuild,
@@ -1374,8 +1380,19 @@ async function betsResponse(app: AppEntry) {
   const since = live.map((b) => b.liveAt!).sort()[0];
   const events = since ? await fetchAppEvents(app.appBaseUrl, since) : null;
   return {
-    bets: bets.map((b) => ({
+    bets: bets.map(({ campaign, ...b }) => ({
       ...b,
+      // Ad money is shown in credits only, never day2's dollar cost.
+      ads: campaign
+        ? {
+            status: campaign.status,
+            launchedAt: campaign.launchedAt,
+            clicks: campaign.clicks,
+            impressions: campaign.impressions,
+            spentCredits: creditsForCost(campaign.billedSpendUsd, "paid_ads"),
+            dailyCredits: creditsForCost(campaign.dailyBudgetUsd, "paid_ads"),
+          }
+        : null,
       link: betLink(b, app.appBaseUrl),
       ticket: b.ticketId ? (findTicket(backlog, b.ticketId) ? { id: b.ticketId, state: findTicket(backlog, b.ticketId)!.state } : null) : null,
       verdict: measureBet(b, events),
@@ -1412,16 +1429,47 @@ route("POST", "/api/apps/:id/growth/bets/:betId/stop", async (_req, params, t) =
   const bet = file.bets.find((b) => b.id === params.betId);
   if (!bet) throw new HttpError(404, "No such experiment.");
   if (bet.status !== "stopped") {
-    saveBets(path, { ...file, bets: file.bets.map((b) => (b.id === bet.id ? { ...b, status: "stopped" as const, stoppedAt: new Date().toISOString() } : b)) });
+    saveBets(path, { ...file, bets: file.bets.map((b) => (b.id === bet.id ? { ...b, status: "stopped" as const, stoppedAt: new Date().toISOString(), stopReason: "Stopped by you." } : b)) });
   }
   return json(await betsResponse(app));
+});
+
+// ---- Growth autopilot (status, log, on/off) ----
+
+route("GET", "/api/apps/:id/growth/autopilot", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const settings = loadAutopilot(appFile(app, AUTOPILOT_FILENAME));
+  const tools = await connectorStatuses(platformTools());
+  const page = await adIdentities().get(app.id);
+  const monthly = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME)).budget.monthlyBudgetUsd;
+  return json({
+    settings,
+    log: loadAutopilotLog(appFile(app, AUTOPILOT_LOG_FILENAME)).slice(0, 50),
+    paidAds: {
+      // Credits only — never day2's dollar cost.
+      monthlyAdCredits: creditsForListUsd(monthlyAdBudgetUsd(monthly)),
+      metaConnected: Boolean(tools.find((x) => x.id === "meta_ads")?.connected) && Boolean(process.env.DAY2_META_AD_ACCOUNT_ID),
+      pageAssigned: Boolean(page),
+    },
+  });
+});
+
+route("PUT", "/api/apps/:id/growth/autopilot", async (req, params, t) => {
+  requireManager(t);
+  const app = await requireApp(t, params.id!);
+  const body = (await req.json().catch(() => ({}))) as { enabled?: unknown };
+  if (typeof body.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false.");
+  const path = appFile(app, AUTOPILOT_FILENAME);
+  const settings = { ...loadAutopilot(path), enabled: body.enabled };
+  saveAutopilot(path, settings);
+  return json({ settings });
 });
 
 // ---- Market research: what's working for competitors ----
 
 route("GET", "/api/apps/:id/growth/research", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
-  const foreplay = (await connectorStatuses(t.connectors)).find((c) => c.id === "foreplay");
+  const foreplay = (await connectorStatuses(platformTools())).find((c) => c.id === "foreplay");
   return json({ runs: loadResearch(appFile(app, MARKET_RESEARCH_FILENAME)).runs, researchToolConnected: Boolean(foreplay?.connected) });
 });
 
@@ -1429,7 +1477,7 @@ route("POST", "/api/apps/:id/growth/research", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   const profile = loadAppProfile(appFile(app, APP_PROFILE_FILENAME));
   if (!profile) throw new HttpError(409, `"${app.name}" hasn't been scanned yet — day2 needs to know what the app does before researching its market.`);
-  const servers = await connectorMcpServers(t.connectors, ["competitor_research"], connectorCallbackUrl());
+  const servers = await connectorMcpServers(platformTools(), ["competitor_research"], connectorCallbackUrl());
   const toolNames = Object.keys(servers).map((id) => findConnector(id)?.name ?? id);
   const topic = researchTopic(profile);
   const { result, credits } = await runWithCredits(t, app, "scan_answer", "Market research", RESEARCH_MAX_BUDGET_USD, () =>
@@ -1441,35 +1489,51 @@ route("POST", "/api/apps/:id/growth/research", async (_req, params, t) => {
 
 const RESEARCH_MAX_BUDGET_USD = 1;
 
-// ---- Connected tools (MCP: Foreplay, Runway, Meta Ads…) ----
+// ---- The tools day2 runs for every customer (Foreplay, Runway, Meta Ads) ----
 
 const connectorCallbackUrl = () => `${authConfig().publicUrl}/api/connectors/callback`;
 
-route("GET", "/api/connectors", async (_req, _params, t) => json({ connectors: await connectorStatuses(t.connectors) }));
+/** Customers see which tools day2 runs for them — never tokens, never a
+ * "connect" step: these are day2's own accounts. */
+route("GET", "/api/connectors", async () => {
+  const statuses = await connectorStatuses(platformTools());
+  return json({ tools: statuses.map((c) => ({ id: c.id, name: c.name, useFor: c.useFor, uses: c.uses, active: c.connected })) });
+});
 
-route("POST", "/api/connectors/:id/connect", async (_req, params, t) => {
-  requireManager(t);
+function isOperator(t: Tenant | null): boolean {
+  if (!t) return false;
+  if (t.mode === "local") return true;
+  const ops = (process.env.DAY2_OPERATOR_LOGINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return Boolean(t.session?.user.login && ops.includes(t.session.user.login.toLowerCase()));
+}
+
+route("GET", "/api/platform/tools", async (_req, _params, t) => {
+  requireOperator(t);
+  return json({ tools: await connectorStatuses(platformTools()) });
+});
+
+route("POST", "/api/platform/tools/:id/connect", async (_req, params, t) => {
+  requireOperator(t);
   const connector = findConnector(params.id!);
   if (!connector) throw new HttpError(404, "Unknown tool.");
   try {
-    return json(await beginConnector(t.connectors, connector, connectorCallbackUrl(), t.session?.user.id ?? null));
+    return json(await beginConnector(platformTools(), connector, connectorCallbackUrl(), t.session?.user.id ?? null));
   } catch (err) {
     throw new HttpError(502, (err as Error).message);
   }
 });
 
-/** The tool's sign-in returns here (a browser navigation, so it answers
- * with redirects back to the console, never JSON). */
+/** The tool's sign-in returns here (a browser navigation: redirects, not JSON). */
 route(
   "GET",
   "/api/connectors/callback",
   async (req, _params, t) => {
-    const back = (q: string) => redirect(`${consoleOrigin()}/connections?${q}`);
-    if (!t) return redirect(`${consoleOrigin()}/login?next=${encodeURIComponent("/connections")}`);
+    const back = (q: string) => redirect(`${consoleOrigin()}/operator?${q}`);
+    if (!isOperator(t)) return redirect(`${consoleOrigin()}/login?next=${encodeURIComponent("/operator")}`);
     const url = new URL(req.url);
     if (url.searchParams.get("error")) return back(`error=${encodeURIComponent(url.searchParams.get("error_description") ?? "The sign-in was cancelled.")}`);
     try {
-      const c = await finishConnector(t.connectors, url.searchParams.get("state"), url.searchParams.get("code"), connectorCallbackUrl());
+      const c = await finishConnector(platformTools(), url.searchParams.get("state"), url.searchParams.get("code"), connectorCallbackUrl());
       return back(`connected=${c.id}`);
     } catch (err) {
       return back(`error=${encodeURIComponent((err as Error).message)}`);
@@ -1478,12 +1542,44 @@ route(
   { public: true },
 );
 
-route("DELETE", "/api/connectors/:id", async (_req, params, t) => {
-  requireManager(t);
+route("DELETE", "/api/platform/tools/:id", async (_req, params, t) => {
+  requireOperator(t);
   const connector = findConnector(params.id!);
   if (!connector) throw new HttpError(404, "Unknown tool.");
-  await disconnectConnector(t.connectors, connector.id);
-  return json({ connectors: await connectorStatuses(t.connectors) });
+  await disconnectConnector(platformTools(), connector.id);
+  return json({ tools: await connectorStatuses(platformTools()) });
+});
+
+/** Every app on day2 and the Facebook Page its ads run under. */
+route("GET", "/api/platform/apps", async (_req, _params, t) => {
+  requireOperator(t);
+  const ids = adIdentities();
+  const identities = new Map((await ids.all()).map((i) => [i.appId, i]));
+  const rows: Array<{ accountId: string; accountName: string; app: AppEntry }> = [];
+  if (t.mode === "local") {
+    for (const app of await t.apps.list()) rows.push({ accountId: t.accountId, accountName: "This machine", app });
+  } else {
+    const names = new Map(((await db()`SELECT id, name FROM accounts`) as Array<{ id: string; name: string }>).map((r) => [r.id, r.name]));
+    for (const r of await allApps(db())) rows.push({ accountId: r.accountId, accountName: names.get(r.accountId) ?? "", app: r.app });
+  }
+  return json({
+    apps: rows.map((r) => ({ id: r.app.id, name: r.app.name, accountName: r.accountName, metaPageId: identities.get(r.app.id)?.metaPageId ?? null })),
+  });
+});
+
+route("PUT", "/api/platform/apps/:appId/ad-identity", async (req, params, t) => {
+  requireOperator(t);
+  const body = (await req.json().catch(() => ({}))) as { metaPageId?: unknown };
+  const pageId = typeof body.metaPageId === "string" ? body.metaPageId.trim() : "";
+  if (!isMetaPageId(pageId)) throw new HttpError(400, "A Facebook Page id is a number (Page → About → Page transparency → Page ID).");
+  await adIdentities().set(params.appId!, pageId, t.session?.user.login ?? "operator");
+  return json({ ok: true });
+});
+
+route("DELETE", "/api/platform/apps/:appId/ad-identity", async (_req, params, t) => {
+  requireOperator(t);
+  await adIdentities().remove(params.appId!);
+  return json({ ok: true });
 });
 
 // ---- Create an app with Lovable (day2's own Lovable account) ----
@@ -1830,6 +1926,7 @@ route("GET", "/api/me", async (_req, _params, t) => {
       account: { id: t.accountId, name, role: "owner" },
       accounts: [],
       github: { connected: true, canConnect: false, available: false },
+      operator: true,
     });
   }
   const s = t.session!;
@@ -1840,6 +1937,7 @@ route("GET", "/api/me", async (_req, _params, t) => {
     accounts: await listAccounts(db(), s.user.id),
     github: { connected: s.account.githubInstallationId !== null, canConnect: hasGitHubApp() && canManage(s.account.role), available: hasGitHubApp() },
     devLogin: authConfig().devLogin,
+    operator: isOperator(t),
   });
 });
 
@@ -2036,8 +2134,10 @@ if (import.meta.main) {
 }
 
 /**
- * Keeps every backlog moving (import findings, re-rank, settle PRs, sync
- * JIRA/Linear, start allowed work) every DAY2_BACKLOG_TICK_MINUTES (default
+ * Keeps every app growing and every backlog moving — the growth autopilot
+ * (growth-autopilot.ts), then the backlog pass (import findings, re-rank,
+ * settle PRs, sync JIRA/Linear, start allowed work) — every
+ * DAY2_BACKLOG_TICK_MINUTES (default
  * 15; 0 turns it off). With several servers on one database, a Postgres
  * advisory lock lets only one of them run each pass.
  */
@@ -2052,9 +2152,13 @@ function startBacklogTimer(): void {
       if (serverMode() === "accounts") {
         await db().begin(async (tx) => {
           const [got] = (await tx`SELECT pg_try_advisory_xact_lock(${BACKLOG_TICK_LOCK}) AS ok`) as Array<{ ok: boolean }>;
-          if (got?.ok) await tickAll({ startWork: true });
+          if (got?.ok) {
+            await autopilotAll();
+            await tickAll({ startWork: true });
+          }
         });
       } else {
+        await autopilotAll();
         await tickAll({ startWork: true });
       }
     } catch (err) {

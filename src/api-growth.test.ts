@@ -97,10 +97,11 @@ describe("market research and connected tools", () => {
     expect(g.body).toEqual({ runs: [], researchToolConnected: false });
   });
 
-  test("the catalog lists official MCP tools; tokens are never returned", async () => {
+  test("customers see the tools day2 runs; only the operator connects them (locally: the one operator)", async () => {
     const c = await call("GET", "/api/connectors");
-    expect(c.body.connectors.map((x: { id: string }) => x.id)).toEqual(["foreplay", "runway", "meta_ads"]);
-    expect(c.body.connectors[0]).toMatchObject({ connected: false, uses: ["competitor_research"] });
-    expect((await call("POST", "/api/connectors/nope/connect")).status).toBe(404);
+    expect(c.body.tools.map((x: { id: string }) => x.id)).toEqual(["foreplay", "runway", "meta_ads"]);
+    expect(c.body.tools[0]).toMatchObject({ active: false, uses: ["competitor_research"] });
+    expect((await call("GET", "/api/platform/tools")).body.tools).toHaveLength(3);
+    expect((await call("POST", "/api/platform/tools/nope/connect")).status).toBe(404);
   });
 });

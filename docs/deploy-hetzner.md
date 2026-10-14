@@ -133,6 +133,8 @@ Fill in `.env`:
   ```
 
 - `DAY2_OPERATOR_LOGINS`: your GitHub username.
+- `DAY2_META_AD_ACCOUNT_ID`: day2's Meta ad account (`act_…`), when you're ready
+  to run paid ads. Leave it empty until then; everything else still runs.
 
 Then start it:
 
@@ -159,6 +161,33 @@ certificate on the first request.
    ```
 
    If that fails, step 2's sysctl is missing. day2 refuses to run agents without the sandbox.
+5. Open **Platform** in the sidebar (only operators see it) and connect day2's
+   tool accounts — Foreplay, Runway, Meta Ads. Each opens that tool's own
+   sign-in: sign in with day2's account there, not a customer's. Customers
+   never connect anything; day2 uses these for everyone and bills the use in
+   credits.
+6. For paid ads, each app needs a Facebook Page (Meta shows every ad under
+   one, and Pages can't be created through Meta's API). In day2's Meta
+   Business account create a Page per app, then enter its Page ID on
+   **Platform → Facebook Pages for ads**. Until then that app gets everything
+   except paid ads, and its Growth page says so.
+
+## The growth autopilot
+
+Every 15 minutes (`DAY2_BACKLOG_TICK_MINUTES`) day2 goes through every app,
+without anyone clicking anything:
+
+- adds missing growth features (link previews, invites, search pages…) to the
+  backlog, where they're built like any ticket, under the app's autonomy level;
+- researches competitors every 7 days (Foreplay plus the web);
+- starts up to 2 experiments at a time from the research;
+- once an experiment's page is live, and the app's stage allows paid ads,
+  launches a Meta ad behind it within 40% of the app's monthly budget, reads
+  results every 6 hours, bills the spend in credits, stops what brings people
+  who don't stay and raises the budget on what works.
+
+The app's kill switch pauses all of it, including running ads. Owners can turn
+the autopilot off per app on its Growth page; everything it did is listed there.
 
 ## How it behaves in production
 

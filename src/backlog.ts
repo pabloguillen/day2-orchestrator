@@ -140,7 +140,14 @@ export type BacklogRule =
    * re-plans the backlog (Tell), shown alongside the built-in ones. */
   | { id: string; kind: "custom"; text: string; enabled: boolean };
 
-export type AutoStart = { bugs: boolean; tasks: boolean; improvements: boolean; features: boolean };
+/** `growth`: work the growth autopilot created (built-in growth features,
+ * experiment pages) — on by default; that's the autopilot's promise. */
+export type AutoStart = { bugs: boolean; tasks: boolean; improvements: boolean; features: boolean; growth: boolean };
+
+/** Tickets the growth autopilot created (growth-autopilot.ts). */
+export function isGrowthTicket(t: Pick<Ticket, "source">): boolean {
+  return t.source.kind === "day2_proposal" && typeof t.source.key === "string" && /^(loop|bet):/.test(t.source.key);
+}
 
 export type BacklogSettings = {
   weights: { usage: Weight; errors: Weight; goals: Weight; competition: Weight; quickWins: Weight };
@@ -182,7 +189,7 @@ export function defaultSettings(): BacklogSettings {
     weights: { usage: 2, errors: 2, goals: 1, competition: 1, quickWins: 1 },
     rules: DEFAULT_RULES.map((r) => ({ ...r })),
     wipLimit: 2,
-    autoStart: { bugs: true, tasks: true, improvements: false, features: false },
+    autoStart: { bugs: true, tasks: true, improvements: false, features: false, growth: true },
     sentry: null,
   };
 }
@@ -331,6 +338,7 @@ export function nextToStart(backlog: Backlog): Ticket[] {
   const securityRule = ruleOn(settings, "security_now");
   const urgent = securityRule ? todo.filter((t) => t.signals.security) : [];
   const allowed = (t: Ticket) =>
+    (isGrowthTicket(t) && settings.autoStart.growth) ||
     (t.type === "bug" && settings.autoStart.bugs && t.priority <= 2) ||
     (t.type === "task" && settings.autoStart.tasks) ||
     (t.type === "improvement" && settings.autoStart.improvements) ||
@@ -342,6 +350,9 @@ export function nextToStart(backlog: Backlog): Ticket[] {
 
 /** Features wait for an OK on their plan when the owner's rule says so. */
 export function needsPlanApproval(backlog: Backlog, t: Ticket): boolean {
+  // The growth autopilot's own work is already agreed to by having it on;
+  // what ships still follows the app's autonomy level (PR approval).
+  if (isGrowthTicket(t) && backlog.settings.autoStart.growth) return false;
   return t.type === "feature" && Boolean(ruleOn(backlog.settings, "features_wait"));
 }
 

@@ -45,3 +45,4 @@ deploy/backups/
 
 # Connected tools (connectors.ts) — OAuth tokens, local mode only.
 .day2-connectors.json
+.day2-ad-identities.json

@@ -8,16 +8,16 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import { decryptSecret, encryptSecret } from "./secrets";
 
 /**
- * Connected tools: specialist products a workspace connects so day2's
- * agents can use them through their official MCP servers — competitor ad
- * research, video generation, ad accounts. day2 decides *what* to make and
- * judges *whether it worked* in the product; these tools do what they're
- * best at.
+ * The specialist tools day2 runs for every customer — competitor ad research
+ * (Foreplay), video generation (Runway), ads (Meta) — through their official
+ * MCP servers. day2 decides *what* to make and judges *whether it worked* in
+ * the product; these tools do what they're best at.
  *
- * Each connection belongs to one workspace. The person signs in with the
- * tool's own OAuth (day2 never sees their password), the tokens are stored
- * encrypted (secrets.ts) and refreshed when they near expiry, and an agent
- * run gets the connection as an HTTP MCP server with a bearer token.
+ * They are day2's own accounts: the day2 operator connects each one once
+ * (the tool's own OAuth sign-in), customers never do. Every use is billed to
+ * the customer's credits (tool-pricing.ts). Tokens are stored encrypted
+ * (secrets.ts), refreshed when they near expiry, and an agent run gets a
+ * connection as an HTTP MCP server with a bearer token.
  *
  * Tools that don't support dynamic client registration can be given a
  * pre-registered OAuth client via DAY2_CONNECTOR_<ID>_CLIENT_ID (and
@@ -52,7 +52,7 @@ export const CONNECTORS: Connector[] = [
     uses: ["competitor_research"],
     mcpUrl: "https://public.api.foreplay.co/mcp",
     docsUrl: "https://feedback.foreplay.co/changelog/foreplay-mcp-connect-200m-ads-to-claude-chatgpt-and-any",
-    note: "Needs a Foreplay account. Research uses your Foreplay plan's API credits.",
+    note: "day2's Foreplay account. Uses Foreplay API credits, billed per research call.",
   },
   {
     id: "runway",
@@ -61,16 +61,16 @@ export const CONNECTORS: Connector[] = [
     uses: ["video_generation"],
     mcpUrl: "https://mcp.runwayml.com",
     docsUrl: "https://docs.dev.runwayml.com/guides/mcp/",
-    note: "Needs a Runway account. Generations use your Runway credits.",
+    note: "day2's Runway developer account. Billed per generation.",
   },
   {
     id: "meta_ads",
     name: "Meta Ads",
-    useFor: "Your Facebook and Instagram ad account: day2 reads what each ad costs and brings, and — only with your approval — prepares campaigns.",
+    useFor: "Facebook and Instagram ads, run from day2's ad account: day2 launches experiments, reads what each ad costs and brings, stops what doesn't work.",
     uses: ["ad_platform"],
     mcpUrl: "https://mcp.facebook.com/ads",
     docsUrl: "https://ppc.io/blog/ads-mcp-google-vs-meta",
-    note: "Sign in with the Meta Business account that owns your ad account. Ad spend stays on your Meta account; day2 never launches or changes a campaign without your OK.",
+    note: "day2's Meta Business account. Every app needs a Facebook Page assigned once by the operator; ad spend is billed in credits.",
   },
 ];
 
@@ -131,32 +131,32 @@ export function fileConnectors(path: string): ConnectorStore {
   };
 }
 
-const ctx = (accountId: string, id: string) => `connector:${accountId}:${id}`;
+const ctx = (id: string) => `platform-connector:${id}`;
 
-/** Production: one encrypted row per workspace + tool. */
-export function dbConnectors(sql: SQL, accountId: string): ConnectorStore {
+/** Production: one encrypted row per tool, for the whole platform. */
+export function dbConnectors(sql: SQL): ConnectorStore {
   const read = async (q: SQL, id: ConnectorId, lock: boolean): Promise<ConnectionRecord | undefined> => {
     const rows = (lock
-      ? await q`SELECT data_enc FROM account_connectors WHERE account_id = ${accountId} AND connector_id = ${id} FOR UPDATE`
-      : await q`SELECT data_enc FROM account_connectors WHERE account_id = ${accountId} AND connector_id = ${id}`) as Array<{ data_enc: string }>;
-    return rows[0] ? (JSON.parse(decryptSecret(rows[0].data_enc, ctx(accountId, id))) as ConnectionRecord) : undefined;
+      ? await q`SELECT data_enc FROM platform_connectors WHERE connector_id = ${id} FOR UPDATE`
+      : await q`SELECT data_enc FROM platform_connectors WHERE connector_id = ${id}`) as Array<{ data_enc: string }>;
+    return rows[0] ? (JSON.parse(decryptSecret(rows[0].data_enc, ctx(id))) as ConnectionRecord) : undefined;
   };
   return {
     get: (id) => read(sql, id, false),
     async all() {
-      const rows = (await sql`SELECT connector_id, data_enc FROM account_connectors WHERE account_id = ${accountId}`) as Array<{ connector_id: ConnectorId; data_enc: string }>;
-      return Object.fromEntries(rows.map((r) => [r.connector_id, JSON.parse(decryptSecret(r.data_enc, ctx(accountId, r.connector_id))) as ConnectionRecord]));
+      const rows = (await sql`SELECT connector_id, data_enc FROM platform_connectors`) as Array<{ connector_id: ConnectorId; data_enc: string }>;
+      return Object.fromEntries(rows.map((r) => [r.connector_id, JSON.parse(decryptSecret(r.data_enc, ctx(r.connector_id))) as ConnectionRecord]));
     },
     async update(id, fn) {
       return (await sql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(hashtext(${ctx(accountId, id)}))`;
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${ctx(id)}))`;
         const next = fn((await read(tx, id, true)) ?? {});
         if (next === undefined) {
-          await tx`DELETE FROM account_connectors WHERE account_id = ${accountId} AND connector_id = ${id}`;
+          await tx`DELETE FROM platform_connectors WHERE connector_id = ${id}`;
         } else {
-          const enc = encryptSecret(JSON.stringify(next), ctx(accountId, id));
-          await tx`INSERT INTO account_connectors (account_id, connector_id, data_enc) VALUES (${accountId}, ${id}, ${enc})
-            ON CONFLICT (account_id, connector_id) DO UPDATE SET data_enc = EXCLUDED.data_enc, updated_at = now()`;
+          const enc = encryptSecret(JSON.stringify(next), ctx(id));
+          await tx`INSERT INTO platform_connectors (connector_id, data_enc) VALUES (${id}, ${enc})
+            ON CONFLICT (connector_id) DO UPDATE SET data_enc = EXCLUDED.data_enc, updated_at = now()`;
         }
         return next;
       })) as ConnectionRecord | undefined;

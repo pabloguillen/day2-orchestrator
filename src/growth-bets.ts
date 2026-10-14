@@ -43,6 +43,26 @@ export type Bet = {
   createdAt: string;
   liveAt: string | null;
   stoppedAt: string | null;
+  /** Why it stopped, in plain words (autopilot or owner). */
+  stopReason?: string | null;
+  /** Who started it: the owner, or day2's growth autopilot. */
+  createdBy?: "owner" | "autopilot";
+  /** Paid traffic, when day2 runs ads for it (ads.ts). */
+  campaign?: Campaign | null;
+};
+
+export type Campaign = {
+  platform: "meta";
+  campaignId: string;
+  status: "active" | "paused";
+  dailyBudgetUsd: number;
+  launchedAt: string;
+  spendUsd: number;
+  billedSpendUsd: number;
+  clicks: number;
+  impressions: number;
+  lastSyncAt: string | null;
+  lastScaledAt: string | null;
 };
 
 export type BetsFile = { nextNumber: number; bets: Bet[] };
@@ -74,6 +94,7 @@ export type NewBet = {
   channel: string;
   metric?: BetMetric;
   source?: Bet["source"];
+  createdBy?: Bet["createdBy"];
 };
 
 export function validateNewBet(raw: unknown): { ok: true; bet: NewBet } | { ok: false; reason: string } {
@@ -117,6 +138,9 @@ export function addBet(file: BetsFile, input: NewBet, now: Date): { file: BetsFi
     createdAt: now.toISOString(),
     liveAt: null,
     stoppedAt: null,
+    stopReason: null,
+    createdBy: input.createdBy ?? "owner",
+    campaign: null,
   };
   return { file: { nextNumber: file.nextNumber + 1, bets: [bet, ...file.bets] }, bet };
 }

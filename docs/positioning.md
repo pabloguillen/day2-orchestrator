@@ -19,12 +19,15 @@ can't:
    to the product: its page in the app, a tracked link, and a verdict from
    real sign-ups and activation (`growth-bets.ts`, docs/growth-events.md).
 4. **Use the best tools instead of rebuilding them.** Foreplay (competitor
-   ads), Runway (video) and Meta Ads connect through their official MCP
-   servers (`connectors.ts`, Connected tools). day2 decides what to make and
+   ads), Runway (video) and Meta Ads, through their official MCP servers, on
+   day2's own accounts (`connectors.ts`, Tools). Customers connect nothing;
+   use is billed in credits (`tool-pricing.ts`). day2 decides what to make and
    judges whether it worked.
-5. **Hands-off, not out of control.** Spend caps per app, the owner's OK
-   before code ships or ads launch, a kill switch, and every action logged in
-   plain words.
+5. **It runs itself.** The growth autopilot (`growth-autopilot.ts`) builds,
+   researches, experiments and runs ads on a timer — no one has to click.
+6. **Hands-off, not out of control.** Spend caps per app, a kill switch that
+   pauses ads too, the app's autonomy level for shipping code, an off switch
+   for the autopilot, and every action logged in plain words.
 
 Customer: people who built an app (often with Lovable, Bolt, Replit or by
 hand) and have no growth team.

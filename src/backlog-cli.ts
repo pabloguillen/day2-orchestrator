@@ -18,7 +18,7 @@ import { loadAccountTenant, localTenant, runAsTenant, serverMode, type Tenant } 
  * "Start on its own" and in-progress limit — starts work. All agent work is
  * paid from the account's credits like everything else.
  */
-async function work(): Promise<Array<{ tenant: Tenant; app: AppEntry }>> {
+export async function work(): Promise<Array<{ tenant: Tenant; app: AppEntry }>> {
   if (serverMode() === "local") {
     const t = localTenant();
     return (await t.apps.list()).map((app) => ({ tenant: t, app }));

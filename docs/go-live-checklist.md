@@ -50,3 +50,6 @@ and [5](deploy-hetzner.md#5-check-it-works) of the guide.
 - [ ] Open your address and sign in by email link, Google and GitHub
 - [ ] Connect a repo
 - [ ] Run the one-line sandbox check from the guide
+- [ ] On **Platform**, connect day2's Foreplay, Runway and Meta Ads accounts
+- [ ] Later, for paid ads: set `DAY2_META_AD_ACCOUNT_ID` and give each app a
+      Facebook Page ID on **Platform**

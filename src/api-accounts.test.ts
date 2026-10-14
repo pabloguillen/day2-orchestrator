@@ -408,17 +408,38 @@ describe("sign-in without GitHub", () => {
   });
 });
 
-describe("connected tools in production", () => {
-  test("stored encrypted per workspace; another workspace can't see them", async () => {
-    const [a] = (await t.sql`INSERT INTO accounts (name) VALUES ('Tools A') RETURNING id`) as Array<{ id: string }>;
-    const [b] = (await t.sql`INSERT INTO accounts (name) VALUES ('Tools B') RETURNING id`) as Array<{ id: string }>;
-    const storeA = dbConnectors(t.sql, a!.id);
-    await storeA.update("foreplay", () => ({ tokens: { access_token: "fp_SECRET_TOKEN", token_type: "Bearer" }, connectedAt: "2026-10-14T00:00:00Z" }));
-    expect((await connectorStatuses(storeA)).find((c) => c.id === "foreplay")!.connected).toBe(true);
-    const [row] = (await t.sql`SELECT data_enc FROM account_connectors WHERE account_id = ${a!.id}`) as Array<{ data_enc: string }>;
+describe("the tools day2 runs for everyone", () => {
+  test("day2's own accounts: stored encrypted, connected by operators only, shown to customers without tokens", async () => {
+    const store = dbConnectors(t.sql);
+    await store.update("foreplay", () => ({ tokens: { access_token: "fp_SECRET_TOKEN", token_type: "Bearer" }, connectedAt: "2026-10-14T00:00:00Z" }));
+    const [row] = (await t.sql`SELECT data_enc FROM platform_connectors WHERE connector_id = 'foreplay'`) as Array<{ data_enc: string }>;
     expect(row!.data_enc).not.toContain("SECRET");
-    expect((await connectorStatuses(dbConnectors(t.sql, b!.id))).find((c) => c.id === "foreplay")!.connected).toBe(false);
-    const servers = await connectorMcpServers(storeA, ["competitor_research"], "https://day2.test/api/connectors/callback");
+    const servers = await connectorMcpServers(store, ["competitor_research"], "https://day2.test/api/connectors/callback");
     expect(servers.foreplay).toMatchObject({ type: "http", headers: { Authorization: "Bearer fp_SECRET_TOKEN" } });
+
+    const customer = await devLogin("cust1");
+    const tools = await call("GET", "/api/connectors", { cookie: customer });
+    expect(tools.body!.tools.find((x: { id: string }) => x.id === "foreplay")).toMatchObject({ active: true });
+    expect(JSON.stringify(tools.body)).not.toContain("SECRET");
+    expect((await call("GET", "/api/platform/tools", { cookie: customer })).status).toBe(403);
+    expect((await call("POST", "/api/platform/tools/foreplay/connect", { cookie: customer })).status).toBe(403);
+    expect((await call("GET", "/api/me", { cookie: customer })).body!.operator).toBe(false);
+
+    process.env.DAY2_OPERATOR_LOGINS = "opsperson";
+    try {
+      const op = await devLogin("opsperson");
+      expect((await call("GET", "/api/me", { cookie: op })).body!.operator).toBe(true);
+      expect((await call("GET", "/api/platform/tools", { cookie: op })).body!.tools[0]).toMatchObject({ id: "foreplay", connected: true });
+      // Every app, across workspaces, with its Facebook Page.
+      const apps = await call("GET", "/api/platform/apps", { cookie: op });
+      const anApp = apps.body!.apps[0];
+      expect(anApp).toMatchObject({ metaPageId: null });
+      expect((await call("PUT", `/api/platform/apps/${anApp.id}/ad-identity`, { cookie: op, body: { metaPageId: "not a page" } })).status).toBe(400);
+      expect((await call("PUT", `/api/platform/apps/${anApp.id}/ad-identity`, { cookie: op, body: { metaPageId: "123456789" } })).status).toBe(200);
+      const after = await call("GET", "/api/platform/apps", { cookie: op });
+      expect(after.body!.apps.find((a: { id: string }) => a.id === anApp.id).metaPageId).toBe("123456789");
+    } finally {
+      delete process.env.DAY2_OPERATOR_LOGINS;
+    }
   });
 });

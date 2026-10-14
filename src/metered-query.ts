@@ -4,6 +4,8 @@ import { query as sdkQuery, type SDKMessage } from "@anthropic-ai/claude-agent-s
 import { authorize, CreditsError, recordCharge, type CreditService, type CreditStore } from "./credits";
 import { creditStore } from "./day2-paths";
 import { currentTenant, serverMode, tenantForPath } from "./tenant";
+import { countToolCalls, toolCostUsd, toolService } from "./tool-pricing";
+import { findConnector, type ConnectorId } from "./connectors";
 
 /**
  * Every Claude agent run in day2 goes through here, so every run is paid
@@ -93,12 +95,27 @@ export function meteredQuery(defaultService: CreditService, label = "Agent run")
     if (!check.ok) throw new CreditsError(check);
 
     let costUsd: number | null = null;
+    const assistantMessages: Array<{ type: string; message?: { content?: unknown } }> = [];
     try {
       for await (const message of sdkQuery(params)) {
         if (message.type === "result") costUsd = message.total_cost_usd ?? 0;
+        if (message.type === "assistant") assistantMessages.push(message as { type: string; message?: { content?: unknown } });
         yield message;
       }
     } finally {
+      // Calls to day2's own tools (Foreplay, Runway…) are billed on top of
+      // the model's cost, per call (tool-pricing.ts).
+      const calls = countToolCalls(assistantMessages);
+      for (const [tool, n] of Object.entries(calls) as Array<[ConnectorId, number]>) {
+        const charge = await recordCharge(store, {
+          id: `tool:${tool}:${crypto.randomUUID()}`,
+          appId,
+          service: toolService(tool),
+          costUsd: n * toolCostUsd(tool),
+          description: `${findConnector(tool)?.name ?? tool} × ${n} (${ctx?.description ?? label})`,
+        });
+        if (ctx && charge) ctx.charged = (ctx.charged ?? 0) + charge.credits;
+      }
       if (costUsd !== null && costUsd > 0) {
         const charge = await recordCharge(store, {
           id: `${service}:${crypto.randomUUID()}`,
