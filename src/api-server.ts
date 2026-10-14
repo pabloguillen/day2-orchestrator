@@ -45,6 +45,12 @@ import {
   type Role,
 } from "./auth";
 import { db, migrate } from "./db";
+import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
+import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
+import { fetchAppEvents } from "./app-events";
+import { auditLoops, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
+import { loadResearch, MARKET_RESEARCH_FILENAME, recordResearch, researchTopic } from "./market-research";
+import { researchCompetitorDistributionAngles } from "./competitor-feed";
 import { fetchGoogleProfile, googleAuthorizeUrl, hasGoogle } from "./google";
 import { emailSignInAvailable, inviteMail, sendMail, signInLinkMail } from "./mail";
 import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, listInstallationRepos, type InstallationRepo } from "./github-app";
@@ -1330,6 +1336,156 @@ route("POST", "/api/apps/:id/backlog/sync", async (_req, params, t) => {
   return json({ sync, ...(await backlogResponse(t, app, await loadBacklogFor(app))) });
 });
 
+// ---- Growth built into the app (share previews, invites, SEO, AI findability) ----
+
+route("GET", "/api/apps/:id/growth/loops", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json({ loops: auditLoops(app.repoPath, await loadBacklogFor(app)) });
+});
+
+/** Turn a missing loop into a backlog ticket (or return the one already open). */
+route("POST", "/api/apps/:id/growth/loops/:loopId/build", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const loopId = params.loopId as LoopId;
+  if (!LOOPS.some((l) => l.id === loopId)) throw new HttpError(404, "Unknown growth check.");
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const existing = b.tickets.find((x) => x.source.kind === "day2_proposal" && x.source.key === loopSourceKey(loopId) && x.state !== "done");
+    if (existing) return { backlog: b, result: existing };
+    const r = createTicket(b, loopTicket(loopId), new Date());
+    return { backlog: rankBacklog(r.backlog, new Date()).backlog, result: r.ticket };
+  });
+  return json({ ticket, loops: auditLoops(app.repoPath, await loadBacklogFor(app)) }, { status: 201 });
+});
+
+// ---- Experiments from ad to product ("bets") ----
+
+async function betsResponse(app: AppEntry) {
+  const path = appFile(app, BETS_FILENAME);
+  const file = loadBets(path);
+  const backlog = await loadBacklogFor(app);
+  let changed = false;
+  const bets = file.bets.map((b) => {
+    const next = syncBetStatus(b, b.ticketId ? findTicket(backlog, b.ticketId) : undefined);
+    if (next !== b) changed = true;
+    return next;
+  });
+  if (changed) saveBets(path, { ...file, bets });
+  const live = bets.filter((b) => b.liveAt);
+  const since = live.map((b) => b.liveAt!).sort()[0];
+  const events = since ? await fetchAppEvents(app.appBaseUrl, since) : null;
+  return {
+    bets: bets.map((b) => ({
+      ...b,
+      link: betLink(b, app.appBaseUrl),
+      ticket: b.ticketId ? (findTicket(backlog, b.ticketId) ? { id: b.ticketId, state: findTicket(backlog, b.ticketId)!.state } : null) : null,
+      verdict: measureBet(b, events),
+    })),
+    measuring: events !== null,
+  };
+}
+
+route("GET", "/api/apps/:id/growth/bets", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json(await betsResponse(app));
+});
+
+/** A new experiment: the idea, its page in the app (a ticket day2 builds),
+ * and later the tracked link and the verdict. */
+route("POST", "/api/apps/:id/growth/bets", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const valid = validateNewBet(await req.json().catch(() => null));
+  if (!valid.ok) throw new HttpError(400, valid.reason);
+  const path = appFile(app, BETS_FILENAME);
+  const { file, bet } = addBet(loadBets(path), valid.bet, new Date());
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const r = createTicket(b, betTicket(bet), new Date());
+    return { backlog: rankBacklog(r.backlog, new Date()).backlog, result: r.ticket };
+  });
+  saveBets(path, { ...file, bets: file.bets.map((b) => (b.id === bet.id ? { ...b, ticketId: ticket.id } : b)) });
+  return json({ bet: { ...bet, ticketId: ticket.id }, ...(await betsResponse(app)) }, { status: 201 });
+});
+
+route("POST", "/api/apps/:id/growth/bets/:betId/stop", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const path = appFile(app, BETS_FILENAME);
+  const file = loadBets(path);
+  const bet = file.bets.find((b) => b.id === params.betId);
+  if (!bet) throw new HttpError(404, "No such experiment.");
+  if (bet.status !== "stopped") {
+    saveBets(path, { ...file, bets: file.bets.map((b) => (b.id === bet.id ? { ...b, status: "stopped" as const, stoppedAt: new Date().toISOString() } : b)) });
+  }
+  return json(await betsResponse(app));
+});
+
+// ---- Market research: what's working for competitors ----
+
+route("GET", "/api/apps/:id/growth/research", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const foreplay = (await connectorStatuses(t.connectors)).find((c) => c.id === "foreplay");
+  return json({ runs: loadResearch(appFile(app, MARKET_RESEARCH_FILENAME)).runs, researchToolConnected: Boolean(foreplay?.connected) });
+});
+
+route("POST", "/api/apps/:id/growth/research", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const profile = loadAppProfile(appFile(app, APP_PROFILE_FILENAME));
+  if (!profile) throw new HttpError(409, `"${app.name}" hasn't been scanned yet — day2 needs to know what the app does before researching its market.`);
+  const servers = await connectorMcpServers(t.connectors, ["competitor_research"], connectorCallbackUrl());
+  const toolNames = Object.keys(servers).map((id) => findConnector(id)?.name ?? id);
+  const topic = researchTopic(profile);
+  const { result, credits } = await runWithCredits(t, app, "scan_answer", "Market research", RESEARCH_MAX_BUDGET_USD, () =>
+    researchCompetitorDistributionAngles(topic, Object.keys(servers).length ? servers : undefined, toolNames),
+  );
+  const run = recordResearch(appFile(app, MARKET_RESEARCH_FILENAME), { at: new Date().toISOString(), topic, usedTools: toolNames, findings: result, credits });
+  return json({ run }, { status: 201 });
+});
+
+const RESEARCH_MAX_BUDGET_USD = 1;
+
+// ---- Connected tools (MCP: Foreplay, Runway, Meta Ads…) ----
+
+const connectorCallbackUrl = () => `${authConfig().publicUrl}/api/connectors/callback`;
+
+route("GET", "/api/connectors", async (_req, _params, t) => json({ connectors: await connectorStatuses(t.connectors) }));
+
+route("POST", "/api/connectors/:id/connect", async (_req, params, t) => {
+  requireManager(t);
+  const connector = findConnector(params.id!);
+  if (!connector) throw new HttpError(404, "Unknown tool.");
+  try {
+    return json(await beginConnector(t.connectors, connector, connectorCallbackUrl(), t.session?.user.id ?? null));
+  } catch (err) {
+    throw new HttpError(502, (err as Error).message);
+  }
+});
+
+/** The tool's sign-in returns here (a browser navigation, so it answers
+ * with redirects back to the console, never JSON). */
+route(
+  "GET",
+  "/api/connectors/callback",
+  async (req, _params, t) => {
+    const back = (q: string) => redirect(`${consoleOrigin()}/connections?${q}`);
+    if (!t) return redirect(`${consoleOrigin()}/login?next=${encodeURIComponent("/connections")}`);
+    const url = new URL(req.url);
+    if (url.searchParams.get("error")) return back(`error=${encodeURIComponent(url.searchParams.get("error_description") ?? "The sign-in was cancelled.")}`);
+    try {
+      const c = await finishConnector(t.connectors, url.searchParams.get("state"), url.searchParams.get("code"), connectorCallbackUrl());
+      return back(`connected=${c.id}`);
+    } catch (err) {
+      return back(`error=${encodeURIComponent((err as Error).message)}`);
+    }
+  },
+  { public: true },
+);
+
+route("DELETE", "/api/connectors/:id", async (_req, params, t) => {
+  requireManager(t);
+  const connector = findConnector(params.id!);
+  if (!connector) throw new HttpError(404, "Unknown tool.");
+  await disconnectConnector(t.connectors, connector.id);
+  return json({ connectors: await connectorStatuses(t.connectors) });
+});
+
 // ---- Create an app with Lovable (day2's own Lovable account) ----
 
 function requireCreateApps(): void {
@@ -1801,7 +1957,7 @@ function sameOrigin(req: Request): boolean {
 
 /** Routes whose handler waits on a Claude agent run (tens of seconds+). */
 export function isAgentBackedPath(pathname: string): boolean {
-  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname) || pathname === "/api/apps";
+  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|growth\/research|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname) || pathname === "/api/apps";
 }
 
 const SIGNED_OUT = () => json({ error: "Sign in to continue.", code: "signed_out" }, { status: 401 });

@@ -177,12 +177,20 @@ export type CompetitorAngleInsight = {
 
 const ANGLE_RESULT_MARKER = "COMPETITOR_ANGLES_JSON:";
 
-function buildAngleResearchPrompt(category: string): string {
+function buildAngleResearchPrompt(category: string, toolNames: string[] = []): string {
+  const tools = toolNames.length
+    ? `\nYou also have these connected tools: ${toolNames.join(", ")}. Use them FIRST:
+search their ad data for competitors' ads, and prefer ads that have been
+running a long time (advertisers keep paying only for ads that work). Cite
+the ad's link or the tool's ad id as the source. Fall back to web search
+only for what the tools don't cover.\n`
+    : "";
   return `You are researching real competing products for a "${category}" app,
 to inform how a growth strategy positions and markets against them (you are
 not proposing anything yourself — just gathering real, verifiable
 information about how they actually go to market).
 
+${tools}
 Using web search, find 3-5 real, currently-existing, named products in this
 category. For each one, note ONE concrete, specific DISTRIBUTION or
 MARKETING angle they use — not a product feature, but how they position
@@ -250,13 +258,14 @@ export function parseCompetitorAngleInsights(finalText: string): CompetitorAngle
 export async function researchCompetitorDistributionAngles(
   category: string,
   mcpServers?: Record<string, McpServerConfig>,
+  toolNames: string[] = [],
 ): Promise<CompetitorAngleInsight[]> {
   let finalText = "";
   let isError = false;
 
   try {
     for await (const message of query({
-      prompt: buildAngleResearchPrompt(category),
+      prompt: buildAngleResearchPrompt(category, toolNames),
       options: {
         model: MODEL,
         permissionMode: "bypassPermissions",

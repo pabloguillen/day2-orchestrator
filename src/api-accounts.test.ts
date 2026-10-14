@@ -7,6 +7,7 @@ import { handleRequest } from "./api-server";
 import { dbIntegrations } from "./integrations-store";
 import { clearTokenCache } from "./github-app";
 import { setMailSender, type Mail } from "./mail";
+import { connectorMcpServers, connectorStatuses, dbConnectors } from "./connectors";
 import { generateKeyPairSync } from "node:crypto";
 
 /**
@@ -404,5 +405,20 @@ describe("sign-in without GitHub", () => {
     const kaiMe = (await call("GET", "/api/me", { cookie: kai })).body!;
     expect(leeMe.account).toMatchObject({ id: kaiMe.account.id, role: "admin" });
     expect((await call("POST", "/api/account/invites", { cookie: kai, body: { email: "nope@" } })).status).toBe(400);
+  });
+});
+
+describe("connected tools in production", () => {
+  test("stored encrypted per workspace; another workspace can't see them", async () => {
+    const [a] = (await t.sql`INSERT INTO accounts (name) VALUES ('Tools A') RETURNING id`) as Array<{ id: string }>;
+    const [b] = (await t.sql`INSERT INTO accounts (name) VALUES ('Tools B') RETURNING id`) as Array<{ id: string }>;
+    const storeA = dbConnectors(t.sql, a!.id);
+    await storeA.update("foreplay", () => ({ tokens: { access_token: "fp_SECRET_TOKEN", token_type: "Bearer" }, connectedAt: "2026-10-14T00:00:00Z" }));
+    expect((await connectorStatuses(storeA)).find((c) => c.id === "foreplay")!.connected).toBe(true);
+    const [row] = (await t.sql`SELECT data_enc FROM account_connectors WHERE account_id = ${a!.id}`) as Array<{ data_enc: string }>;
+    expect(row!.data_enc).not.toContain("SECRET");
+    expect((await connectorStatuses(dbConnectors(t.sql, b!.id))).find((c) => c.id === "foreplay")!.connected).toBe(false);
+    const servers = await connectorMcpServers(storeA, ["competitor_research"], "https://day2.test/api/connectors/callback");
+    expect(servers.foreplay).toMatchObject({ type: "http", headers: { Authorization: "Bearer fp_SECRET_TOKEN" } });
   });
 });

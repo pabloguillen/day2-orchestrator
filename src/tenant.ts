@@ -1,12 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { $ } from "bun";
 import type { AppEntry } from "./apps-registry";
 import { allApps, dbApps, fileApps, type AppsStore } from "./apps-store";
 import type { Role, Session } from "./auth";
 import { INTEGRATIONS_FILENAME } from "./backlog-trackers";
 import type { CreditStore } from "./credits";
-import { appsRegistryPath, creditStore } from "./day2-paths";
+import { appsRegistryPath, creditStore, dataDir } from "./day2-paths";
+import { CONNECTORS_FILENAME, dbConnectors, fileConnectors, type ConnectorStore } from "./connectors";
 import { db, hasDatabase } from "./db";
 import { githubEnv } from "./github-app";
 import { dbIntegrations, fileIntegrations, type IntegrationsStore } from "./integrations-store";
@@ -35,6 +36,8 @@ export type Tenant = {
   apps: AppsStore;
   credits: CreditStore;
   integrations: IntegrationsStore;
+  /** Connected tools (Foreplay, Runway, Meta Ads…) — connectors.ts. */
+  connectors: ConnectorStore;
   /** day2's GitHub App installation on this account (production), or null
    * — then git/gh use the machine's own GitHub login (local mode). */
   githubInstallationId: number | null;
@@ -66,6 +69,7 @@ export function localTenant(): Tenant {
     apps: fileApps(appsRegistryPath()),
     credits: creditStore(),
     integrations: fileIntegrations(resolve(dirname(appsRegistryPath()), INTEGRATIONS_FILENAME)),
+    connectors: fileConnectors(join(dataDir(), CONNECTORS_FILENAME)),
     githubInstallationId: null,
   };
 }
@@ -80,6 +84,7 @@ export function accountTenant(accountId: string, githubInstallationId: number | 
     apps: dbApps(sql, accountId),
     credits: { db: sql, accountId },
     integrations: dbIntegrations(sql, accountId),
+    connectors: dbConnectors(sql, accountId),
     githubInstallationId,
   };
 }

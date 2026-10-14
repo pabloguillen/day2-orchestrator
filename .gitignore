@@ -42,3 +42,6 @@ worktrees-tmp-check/
 # Production settings and local backups (deploy/).
 deploy/.env
 deploy/backups/
+
+# Connected tools (connectors.ts) — OAuth tokens, local mode only.
+.day2-connectors.json
