@@ -209,7 +209,7 @@ export const SIGNUP_EVENT = "signup";
 
 /** Deterministic RNG (mulberry32) seeded by the bet id — the same data
  * always gives the same verdict. */
-function seeded(seedText: string): () => number {
+export function seeded(seedText: string): () => number {
   let a = 0;
   for (const ch of seedText) a = (Math.imul(a ^ ch.charCodeAt(0), 2654435761) >>> 0) || 1;
   return () => {

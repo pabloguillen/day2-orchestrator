@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { autopilotPass, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot, AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, DEFAULT_AUTOPILOT, type AutopilotDeps } from "./growth-autopilot";
 import { loadBets, saveBets, BETS_FILENAME } from "./growth-bets";
 import { loadBacklog, BACKLOG_FILENAME, saveBacklog, updateTicket } from "./backlog";
+import { loadOptimizations, OPTIMIZATIONS_FILENAME } from "./growth-optimizer";
 import { saveAppProfile, APP_PROFILE_FILENAME, type AppProfile } from "./onboarding";
 import { loadGrowthConfig, saveGrowthConfig, GROWTH_CONFIG_FILENAME, setKillSwitch, setMonthlyBudget } from "./growth-config";
 
@@ -19,6 +20,7 @@ let app: AppEntry;
 let credits: CreditStore;
 let adCalls: string[];
 let adSpend: number;
+let benchmarks: number;
 
 const PROFILE: AppProfile = {
   purpose: "Splits shared bills between friends",
@@ -65,6 +67,40 @@ function deps(over: Partial<AutopilotDeps> = {}): AutopilotDeps {
       usedTools: ["Foreplay"],
       credits: 120,
     }),
+    benchmark: async (input) => {
+      benchmarks++;
+      return {
+        credits: 140,
+        result: {
+          category: "bill-splitting apps",
+          leaders: ["Splitwise", "Tricount"],
+          practices: input.present.some((p) => p.id === "share_preview")
+            ? [
+                {
+                  id: "share_preview-show-who-owes-what",
+                  loopId: "share_preview",
+                  practice: "Show who owes what in the link preview.",
+                  status: "missing",
+                  current: "One generic preview for every page.",
+                  change: "Give each shared group its own preview with the balance.",
+                  impact: "high",
+                  leaders: [{ app: "Splitwise", example: "Group links preview the balance", source: "https://example.com/splitwise" }],
+                },
+                {
+                  id: "share_preview-preview-image",
+                  loopId: "share_preview",
+                  practice: "Use a 1200×630 preview image.",
+                  status: "matches",
+                  current: "",
+                  change: "",
+                  impact: "medium",
+                  leaders: [{ app: "Tricount", example: "1200×630 image", source: "https://example.com/tricount" }],
+                },
+              ]
+            : [],
+        },
+      };
+    },
     paidGate: async () => ({ unlocked: true, reason: "" }),
     ads: fakeAds(),
     adAccountId: "act_123",
@@ -89,6 +125,7 @@ beforeEach(async () => {
   await setPlan(credits, "scale", "monthly");
   adCalls = [];
   adSpend = 0;
+  benchmarks = 0;
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -124,6 +161,39 @@ describe("the growth autopilot", () => {
     // Second pass: no duplicates, research not due again.
     const again = await autopilotPass(app, deps());
     expect(again).toMatchObject({ ticketsCreated: [], researched: false, experimentsCreated: [] });
+  });
+
+  test("growth features it already has are made as good as the leading apps', then checked before/after", async () => {
+    const r = await autopilotPass(app, deps());
+    expect(r.benchmarked).toBe(true);
+    expect(r.improvementsCreated).toHaveLength(1);
+    const backlog = loadBacklog(repoFile(BACKLOG_FILENAME));
+    const t = backlog.tickets.find((x) => x.id === r.improvementsCreated[0])!;
+    expect(t.source.key).toBe("loop:share_preview:opt:share_preview-show-who-owes-what");
+    expect(t.title).toBe("Improve link previews: Show who owes what in the link preview");
+    const log = loadAutopilotLog(repoFile(AUTOPILOT_LOG_FILENAME)).map((e) => e.text);
+    expect(log).toContain("Compared your growth features with leading bill-splitting apps (Splitwise, Tricount): 1 done as well as they do, 1 to improve.");
+    expect(log).toContain(`Splitwise show who owes what in the link preview — added ${t.id} to do the same here.`);
+
+    // Not again next pass: not due, and the gap is already being built.
+    const again = await autopilotPass(app, deps());
+    expect(again).toMatchObject({ benchmarked: false, improvementsCreated: [] });
+    expect(benchmarks).toBe(1);
+
+    // It ships; 14 days on, more new visitors come from shared links than before.
+    const shippedAt = "2026-10-15T00:00:00.000Z";
+    saveBacklog(repoFile(BACKLOG_FILENAME), updateTicket(loadBacklog(repoFile(BACKLOG_FILENAME)), t.id, { state: "done" }, new Date(shippedAt), { kind: "user" }).backlog);
+    const events: EventLike[] = [];
+    for (let i = 0; i < 80; i++) {
+      events.push({ type: "visit", at: `2026-10-0${1 + (i % 9)}T10:00:00Z`, deviceId: `b${i}`, acquisition: i < 4 ? { channel: "shared_link" } : {} });
+      events.push({ type: "visit", at: `2026-10-${16 + (i % 9)}T10:00:00Z`, deviceId: `a${i}`, acquisition: i < 24 ? { channel: "shared_link" } : {} });
+    }
+    await autopilotPass(app, deps({ now: new Date("2026-10-30T00:00:00Z"), events: async () => events }));
+    const imp = loadOptimizations(repoFile(OPTIMIZATIONS_FILENAME)).improvements[0]!;
+    expect(imp).toMatchObject({ shippedAt, result: { state: "better" } });
+    expect(loadAutopilotLog(repoFile(AUTOPILOT_LOG_FILENAME)).map((e) => e.text)).toContain(
+      `Checked ${t.id} ("Show who owes what in the link preview."): New visitors arriving from shared links: 5% before, 30% after (before/after, not a controlled test).`,
+    );
   });
 
   test("once a page is live: launches the ad within the budget, bills spend in credits, stops a loser", async () => {

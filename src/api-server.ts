@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { $ } from "bun";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -49,7 +50,20 @@ import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConne
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { fetchAppEvents } from "./app-events";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
-import { auditLoops, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
+import { auditLoops, indexRepo, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
+import {
+  addImprovement,
+  benchmarkGrowthFeatures,
+  codeExcerpts,
+  findPractice,
+  improvementKey,
+  improvementTicket,
+  loadOptimizations,
+  markShipped,
+  optimizationView,
+  OPTIMIZATIONS_FILENAME,
+  saveOptimizations,
+} from "./growth-optimizer";
 import { loadResearch, MARKET_RESEARCH_FILENAME, recordResearch, researchTopic } from "./market-research";
 import { researchCompetitorDistributionAngles } from "./competitor-feed";
 import { fetchGoogleProfile, googleAuthorizeUrl, hasGoogle } from "./google";
@@ -1344,9 +1358,72 @@ route("POST", "/api/apps/:id/backlog/sync", async (_req, params, t) => {
 
 // ---- Growth built into the app (share previews, invites, SEO, AI findability) ----
 
+/** Each growth feature: whether the app has it, and — for those it has —
+ * how it compares with the leading apps in its category and what day2 is
+ * improving. */
+async function loopsResponse(app: AppEntry) {
+  const backlog = await loadBacklogFor(app);
+  const file = markShipped(loadOptimizations(appFile(app, OPTIMIZATIONS_FILENAME)), backlog.tickets);
+  const view = optimizationView(file, backlog);
+  const empty = { matches: [], gaps: [], improvements: [] };
+  return {
+    loops: auditLoops(app.repoPath, backlog).map((l) => ({ ...l, optimization: l.status === "present" ? (view.byLoop[l.id] ?? empty) : null })),
+    benchmark: view.benchmark,
+  };
+}
+
 route("GET", "/api/apps/:id/growth/loops", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
-  return json({ loops: auditLoops(app.repoPath, await loadBacklogFor(app)) });
+  return json(await loopsResponse(app));
+});
+
+/** Compare the app's growth features with the leading apps now (the
+ * autopilot does this monthly on its own). */
+route("POST", "/api/apps/:id/growth/loops/benchmark", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const profile = loadAppProfile(appFile(app, APP_PROFILE_FILENAME));
+  if (!profile) throw new HttpError(409, `"${app.name}" hasn't been scanned yet — day2 needs to know what the app does first.`);
+  const present = auditLoops(app.repoPath, await loadBacklogFor(app)).filter((l) => l.status === "present");
+  if (!present.length) throw new HttpError(409, "The app has none of the growth features yet — day2 builds them first, then compares.");
+  const competitors = [...new Set((loadResearch(appFile(app, MARKET_RESEARCH_FILENAME)).runs[0]?.findings ?? []).map((f) => f.competitor))].slice(0, 6);
+  const { result, credits } = await runWithCredits(t, app, "scan_answer", "Growth features vs. leading apps", BENCHMARK_MAX_BUDGET_USD, () =>
+    benchmarkGrowthFeatures({
+      appName: app.name,
+      purpose: profile.purpose,
+      targetUsers: profile.targetUsers,
+      competitors,
+      present: present.map((l) => ({ id: l.id, name: l.name, evidence: l.evidence })),
+      excerpts: codeExcerpts(indexRepo(app.repoPath), present),
+    }),
+  );
+  if (!result) throw new HttpError(502, "day2 couldn't verify how leading apps do it this time — nothing was changed. Try again later.");
+  const path = appFile(app, OPTIMIZATIONS_FILENAME);
+  const file = loadOptimizations(path);
+  const at = new Date().toISOString();
+  saveOptimizations(path, { ...file, benchmarks: [{ id: `bm-${randomUUID().slice(0, 8)}`, at, loops: present.map((l) => l.id), credits, ...result }, ...file.benchmarks] });
+  return json(await loopsResponse(app), { status: 201 });
+});
+
+const BENCHMARK_MAX_BUDGET_USD = 1.5;
+
+/** Turn one gap from the latest comparison into a backlog ticket. */
+route("POST", "/api/apps/:id/growth/loops/improve/:practiceId", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const path = appFile(app, OPTIMIZATIONS_FILENAME);
+  const file = loadOptimizations(path);
+  const found = findPractice(file, params.practiceId!);
+  if (!found || found.practice.status === "matches") throw new HttpError(404, "No such improvement in the latest comparison.");
+  const { practice, benchmarkId } = found;
+  const category = file.benchmarks[0]!.category;
+  const now = new Date();
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const existing = b.tickets.find((x) => x.source.key === improvementKey(practice.loopId, practice.id));
+    if (existing) return { backlog: b, result: existing };
+    const r = createTicket(b, improvementTicket(practice, category), now);
+    return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+  });
+  if (!file.improvements.some((i) => i.key === improvementKey(practice.loopId, practice.id))) saveOptimizations(path, addImprovement(file, practice, benchmarkId, ticket.id, now));
+  return json({ ticket, ...(await loopsResponse(app)) }, { status: 201 });
 });
 
 /** Turn a missing loop into a backlog ticket (or return the one already open). */
@@ -1360,7 +1437,7 @@ route("POST", "/api/apps/:id/growth/loops/:loopId/build", async (_req, params, t
     const r = createTicket(b, loopTicket(loopId), new Date());
     return { backlog: rankBacklog(r.backlog, new Date()).backlog, result: r.ticket };
   });
-  return json({ ticket, loops: auditLoops(app.repoPath, await loadBacklogFor(app)) }, { status: 201 });
+  return json({ ticket, ...(await loopsResponse(app)) }, { status: 201 });
 });
 
 // ---- Experiments from ad to product ("bets") ----

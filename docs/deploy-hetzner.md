@@ -179,6 +179,11 @@ without anyone clicking anything:
 
 - adds missing growth features (link previews, invites, search pages…) to the
   backlog, where they're built like any ticket, under the app's autonomy level;
+- compares the growth features the app already has with the leading apps in
+  its category every 30 days (and when a new one ships), turns the most
+  impactful gaps into tickets (two at a time), and 14 days after each ships
+  compares that feature's number before and after; a change that made it
+  worse gets a ticket to undo it;
 - researches competitors every 7 days (Foreplay plus the web);
 - starts up to 2 experiments at a time from the research;
 - once an experiment's page is live, and the app's stage allows paid ads,

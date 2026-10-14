@@ -3,7 +3,23 @@ import { resolve } from "node:path";
 import type { AppEntry } from "./apps-registry";
 import { createTicket, findTicket, rankBacklog, withBacklog } from "./backlog";
 import { backlogFile } from "./backlog-work";
-import { auditLoops, loopSourceKey, loopTicket } from "./distribution-loops";
+import { auditLoops, indexRepo, loopSourceKey, loopTicket } from "./distribution-loops";
+import {
+  addImprovement,
+  benchmarkDue,
+  codeExcerpts,
+  improvementTicket,
+  loadOptimizations,
+  markShipped,
+  needsEvents,
+  nextImprovements,
+  OPTIMIZATIONS_FILENAME,
+  saveOptimizations,
+  updateImprovements,
+  type BenchmarkInput,
+  type Practice,
+} from "./growth-optimizer";
+import { randomUUID } from "node:crypto";
 import { addBet, betLink, betTicket, BETS_FILENAME, loadBets, measureBet, saveBets, syncBetStatus, type Bet, type BetsFile } from "./growth-bets";
 import { loadResearch, MARKET_RESEARCH_FILENAME, recordResearch, researchTopic } from "./market-research";
 import { APP_PROFILE_FILENAME, loadAppProfile, type AppProfile } from "./onboarding";
@@ -19,7 +35,10 @@ import type { EventLike } from "./metrics/types";
  *
  *  1. Built into the app — every growth feature the app's code is missing
  *     becomes a ticket; the backlog autopilot builds it (autoStart.growth),
- *     and what ships follows the app's autonomy level.
+ *     and what ships follows the app's autonomy level. Features it already
+ *     has are compared with the leading apps in its category and improved
+ *     where they fall short, each change checked before/after
+ *     (growth-optimizer.ts).
  *  2. Research — what's working for competitors, on a schedule.
  *  3. Experiments — the best untested idea becomes an experiment, with its
  *     page in the app built like any ticket (at most a few at once).
@@ -109,6 +128,8 @@ export type AutopilotDeps = {
   credits: CreditStore;
   /** Research with whatever tools day2 has connected; returns cited findings. */
   research: (topic: string) => Promise<{ findings: CompetitorAngleInsight[]; usedTools: string[]; credits: number }>;
+  /** Compares the app's growth features with leading apps in its category. */
+  benchmark: (input: BenchmarkInput) => Promise<{ result: { category: string; leaders: string[]; practices: Practice[] } | null; credits: number }>;
   /** Whether paid ads make sense for the app's stage right now, and why. */
   paidGate: (app: AppEntry, profile: AppProfile) => Promise<{ unlocked: boolean; reason: string }>;
   /** day2's Meta ads, when connected and an ad account is configured. */
@@ -120,14 +141,19 @@ export type AutopilotDeps = {
   now?: Date;
 };
 
-export type AutopilotReport = { ticketsCreated: string[]; researched: boolean; experimentsCreated: string[]; launched: string[]; paused: string[]; scaled: string[]; skipped: string[] };
+export type AutopilotReport = {
+  ticketsCreated: string[];
+  benchmarked: boolean;
+  improvementsCreated: string[];
+  undone: string[];
+  researched: boolean; experimentsCreated: string[]; launched: string[]; paused: string[]; scaled: string[]; skipped: string[] };
 
 export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise<AutopilotReport> {
   const now = deps.now ?? new Date();
   const at = now.toISOString();
   const file = (f: string) => resolve(app.repoPath, f);
   const logPath = file(AUTOPILOT_LOG_FILENAME);
-  const report: AutopilotReport = { ticketsCreated: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
+  const report: AutopilotReport = { ticketsCreated: [], benchmarked: false, improvementsCreated: [], undone: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
   const settings = loadAutopilot(file(AUTOPILOT_FILENAME));
   const killSwitch = loadGrowthConfig(file(GROWTH_CONFIG_FILENAME)).budget.killSwitch;
 
@@ -164,6 +190,9 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
     report.skipped.push("No app profile yet — research and experiments start after the app scan.");
     return report;
   }
+
+  // 1b. Make what's there as good as the leading apps in the category.
+  await improveBuiltIn(app, profile, deps, logPath, at, now, report);
 
   // 2. Research, on a schedule.
   const researchPath = file(MARKET_RESEARCH_FILENAME);
@@ -220,6 +249,77 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
   // 4. Paid traffic.
   await runAds(app, profile, deps, logPath, at, now, report);
   return report;
+}
+
+async function improveBuiltIn(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, logPath: string, at: string, now: Date, report: AutopilotReport) {
+  const path = resolve(app.repoPath, OPTIMIZATIONS_FILENAME);
+  const backlog = await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }));
+  let file = markShipped(loadOptimizations(path), backlog.tickets);
+  const present = auditLoops(app.repoPath, backlog).filter((l) => l.status === "present");
+
+  // Measure what shipped; undo what made things worse.
+  const since = needsEvents(file, now);
+  const events = since ? await deps.events(app, since) : null;
+  const upd = updateImprovements(file, backlog.tickets, events, now);
+  file = upd.file;
+  for (const d of upd.decided) {
+    log(logPath, { at, step: "built_in", text: `Checked ${d.ticketId} ("${d.practice}"): ${d.result.note}` });
+  }
+  for (const u of upd.undo) {
+    const t = await withBacklog(backlogFile(app), (b) => {
+      const r = createTicket(b, u.ticket, now);
+      return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+    });
+    file = { ...file, improvements: file.improvements.map((i) => (i.key === u.improvement.key ? { ...i, undoTicketId: t.id } : i)) };
+    report.undone.push(t.id);
+    log(logPath, { at, step: "built_in", text: `${u.improvement.ticketId} made things worse — added ${t.id} to undo it.` });
+  }
+
+  // Compare with the leading apps (monthly, or when a feature appears).
+  if (benchmarkDue(file, present.map((l) => l.id), now)) {
+    const competitors = [...new Set((loadResearch(resolve(app.repoPath, MARKET_RESEARCH_FILENAME)).runs[0]?.findings ?? []).map((f) => f.competitor))].slice(0, 6);
+    try {
+      const r = await deps.benchmark({
+        appName: app.name,
+        purpose: profile.purpose,
+        targetUsers: profile.targetUsers,
+        competitors,
+        present: present.map((l) => ({ id: l.id, name: l.name, evidence: l.evidence })),
+        excerpts: codeExcerpts(indexRepo(app.repoPath), present),
+      });
+      if (r.result) {
+        file = { ...file, benchmarks: [{ id: `bm-${randomUUID().slice(0, 8)}`, at, loops: present.map((l) => l.id), credits: r.credits, ...r.result }, ...file.benchmarks] };
+        const gaps = r.result.practices.filter((p) => p.status !== "matches").length;
+        log(logPath, {
+          at,
+          step: "built_in",
+          text: `Compared your growth features with leading ${r.result.category} (${r.result.leaders.join(", ")}): ${r.result.practices.length - gaps} done as well as they do, ${gaps} to improve.`,
+          credits: r.credits,
+        });
+        report.benchmarked = true;
+      } else {
+        log(logPath, { at, step: "skipped", text: "Couldn't verify how leading apps do it this time — day2 changes nothing rather than guess.", credits: r.credits });
+      }
+    } catch (err) {
+      const why = err instanceof CreditsError ? err.message : (err as Error).message;
+      log(logPath, { at, step: "skipped", text: `Comparison with leading apps skipped: ${why}` });
+      report.skipped.push(`benchmark: ${why}`);
+    }
+  }
+
+  // The most impactful gaps become tickets, a couple at a time.
+  const latest = file.benchmarks[0];
+  const next = latest ? nextImprovements(file, await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }))) : [];
+  for (const p of next) {
+    const t = await withBacklog(backlogFile(app), (b) => {
+      const r = createTicket(b, improvementTicket(p, latest!.category), now);
+      return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+    });
+    file = addImprovement(file, p, latest!.id, t.id, now);
+    report.improvementsCreated.push(t.id);
+    log(logPath, { at, step: "built_in", text: `${p.leaders.map((l) => l.app).join(" and ")} ${p.practice.charAt(0).toLowerCase()}${p.practice.slice(1).replace(/\.$/, "")} — added ${t.id} to do the same here.` });
+  }
+  saveOptimizations(path, file);
 }
 
 function syncAll(file: BetsFile, tickets: Parameters<typeof findTicket>[0]["tickets"]): BetsFile {

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleRequest } from "./api-server";
+import { OPTIMIZATIONS_FILENAME } from "./growth-optimizer";
 
 /**
  * The growth endpoints that make day2's edge concrete, through the real
@@ -66,6 +67,46 @@ describe("growth built into the app", () => {
     const backlog = await call("GET", `/api/apps/${appId}/backlog`);
     expect(backlog.body.tickets.filter((t: { source: { key?: string } }) => t.source.key === "loop:referral")).toHaveLength(1);
     expect((await call("POST", `/api/apps/${appId}/growth/loops/nope/build`)).status).toBe(404);
+  });
+});
+
+describe("growth features made as good as the leading apps'", () => {
+  test("the comparison shows per feature; a gap becomes a ticket (once)", async () => {
+    writeFileSync(
+      join(REPO, OPTIMIZATIONS_FILENAME),
+      JSON.stringify({
+        benchmarks: [
+          {
+            id: "bm-1",
+            at: "2026-10-10T00:00:00Z",
+            category: "bill-splitting apps",
+            leaders: ["Splitwise"],
+            loops: ["share_preview"],
+            credits: 120,
+            practices: [
+              { id: "share_preview-balance", loopId: "share_preview", practice: "Preview shows the balance.", status: "missing", current: "Generic.", change: "Per-group preview.", impact: "high", leaders: [{ app: "Splitwise", example: "x", source: "https://example.com/s" }] },
+              { id: "share_preview-image", loopId: "share_preview", practice: "1200×630 image.", status: "matches", current: "", change: "", impact: "low", leaders: [{ app: "Splitwise", example: "y", source: "https://example.com/s" }] },
+            ],
+          },
+        ],
+        improvements: [],
+      }),
+    );
+    const audit = await call("GET", `/api/apps/${appId}/growth/loops`);
+    expect(audit.body.benchmark).toMatchObject({ category: "bill-splitting apps", leaders: ["Splitwise"] });
+    const byId = Object.fromEntries((audit.body.loops as Array<{ id: string; optimization: unknown }>).map((l) => [l.id, l]));
+    expect(byId.share_preview?.optimization).toMatchObject({ matches: [{ practice: "1200×630 image." }], gaps: [{ id: "share_preview-balance", impact: "high" }], improvements: [] });
+    expect(byId.referral?.optimization).toBeNull();
+
+    const r = await call("POST", `/api/apps/${appId}/growth/loops/improve/share_preview-balance`);
+    expect(r.status).toBe(201);
+    expect(r.body.ticket).toMatchObject({ type: "improvement", source: { key: "loop:share_preview:opt:share_preview-balance" } });
+    const again = await call("POST", `/api/apps/${appId}/growth/loops/improve/share_preview-balance`);
+    expect(again.body.ticket.id).toBe(r.body.ticket.id);
+    const sp = (again.body.loops as Array<{ id: string; optimization: { gaps: unknown[]; improvements: Array<{ ticket: { id: string } }> } }>).find((l) => l.id === "share_preview")!;
+    expect(sp.optimization.gaps).toEqual([]);
+    expect(sp.optimization.improvements).toHaveLength(1);
+    expect((await call("POST", `/api/apps/${appId}/growth/loops/improve/share_preview-image`)).status).toBe(404);
   });
 });
 

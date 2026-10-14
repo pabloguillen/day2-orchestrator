@@ -7,6 +7,7 @@ import { authConfig } from "./auth";
 import { connectorMcpServers, findConnector } from "./connectors";
 import { authorize, CreditsError } from "./credits";
 import { autopilotPass, type AutopilotDeps } from "./growth-autopilot";
+import { benchmarkGrowthFeatures } from "./growth-optimizer";
 import { GROWTH_CONFIG_FILENAME, loadGrowthConfig } from "./growth-config";
 import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
 import { withCreditContext, type CreditContext } from "./metered-query";
@@ -21,6 +22,7 @@ import { resolve } from "node:path";
  */
 
 const RESEARCH_MAX_USD = 1;
+const BENCHMARK_MAX_USD = 1.5;
 const callbackUrl = () => `${authConfig().publicUrl}/api/connectors/callback`;
 
 export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<AutopilotDeps> {
@@ -36,6 +38,13 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
       const ctx: CreditContext = { appId: app.id, appName: app.name, service: "scan_answer", description: "Market research (autopilot)" };
       const findings = await withCreditContext(ctx, () => researchCompetitorDistributionAngles(topic, Object.keys(servers).length ? servers : undefined, names));
       return { findings, usedTools: names, credits: ctx.charged ?? 0 };
+    },
+    async benchmark(input) {
+      const check = await authorize(tenant.credits, { appId: app.id, appName: app.name, service: "scan_answer", maxCostUsd: BENCHMARK_MAX_USD });
+      if (!check.ok) throw new CreditsError(check);
+      const ctx: CreditContext = { appId: app.id, appName: app.name, service: "scan_answer", description: "Growth features vs. leading apps (autopilot)" };
+      const result = await withCreditContext(ctx, () => benchmarkGrowthFeatures(input));
+      return { result, credits: ctx.charged ?? 0 };
     },
     async paidGate(a: AppEntry, profile: AppProfile) {
       if (!a.appBaseUrl) return { unlocked: false, reason: "the app's live address isn't set, so day2 can't see whether people stick around" };
@@ -61,6 +70,9 @@ export async function autopilotAll(): Promise<void> {
         const r = await autopilotPass(app, await autopilotDeps(tenant, app));
         const did = [
           r.ticketsCreated.length && `${r.ticketsCreated.length} growth tickets`,
+          r.benchmarked && "compared with leading apps",
+          r.improvementsCreated.length && `${r.improvementsCreated.length} improvements`,
+          r.undone.length && `${r.undone.length} changes to undo`,
           r.researched && "research",
           r.experimentsCreated.length && `${r.experimentsCreated.length} experiments`,
           r.launched.length && `${r.launched.length} ads launched`,

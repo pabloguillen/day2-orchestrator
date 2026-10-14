@@ -12,8 +12,10 @@ can't:
    an app that loses them is wasted money. (Backlog, health checks, PRs.)
 2. **Build what spreads.** Link previews, share and invite flows, pages people
    search for, and findability by AI assistants all live in the code. day2
-   checks the app for each and builds what's missing as a PR.
-   (`distribution-loops.ts`, Growth → Built into your app.)
+   checks the app for each and builds what's missing as a PR, then makes the
+   ones it has as good as the leading apps in its category do them, and
+   checks each change before/after. (`distribution-loops.ts`,
+   `growth-optimizer.ts`, Growth → Built into your app.)
 3. **Pay only for what works.** Paid ads stay off until people stick around
    (stage gate, `growth-strategy.ts`). Every idea is an experiment from the ad
    to the product: its page in the app, a tracked link, and a verdict from
