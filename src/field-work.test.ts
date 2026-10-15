@@ -88,6 +88,7 @@ describe("field contracts in day2's loops", () => {
       failures: 3,
       rejected: 0,
       devices: 2,
+      simulated: 0,
       firstFailureAt: null,
       lastFailureAt: null,
       sample: { contract, at: "", route: "/checkout", expected, actual, steps: [], deviceId: "d", release: null, device: { id: "d", platform: "web" } },
@@ -105,7 +106,21 @@ describe("field contracts in day2's loops", () => {
     expect(item).toMatchObject({ source: { kind: "day2_proposal", key: INSTALL_KEY }, type: "task", title: "Install day2 field checks" });
     expect(item.description).toContain('startDay2({ key: "d2k_testtesttesttesttest", endpoint: "https://day2.example"');
     expect(item.description).toContain('src/Cart.tsx:2 "Orders" → data-day2-action="cart.orders"');
-    expect(installItem({ ...app, repoPath: ROOT }, { key: "k", endpoint: "e", candidates: [] })).toBeNull(); // not a web app
+    expect(installItem({ ...app, repoPath: ROOT }, { key: "k", endpoint: "e", candidates: [] })).toBeNull(); // neither web nor React Native
+
+    // React Native / Expo: the native build, navigation and wrapped presses.
+    const rn = join(ROOT, "rn");
+    mkdirSync(rn, { recursive: true });
+    writeFileSync(join(rn, "package.json"), '{"dependencies":{"expo":"52","react-native":"0.76"}}');
+    const rnItem = installItem({ ...app, repoPath: rn }, { key: "d2k_testtesttesttesttest", endpoint: "https://day2.example", candidates: [{ name: "cart.help", origin: "src/Cart.tsx:5", label: "Help", expect: [{ screen: "Help" }] }] })!;
+    expect(rnItem.description).toContain('import { startDay2, useDay2Mark } from "./day2/native.js";');
+    expect(rnItem.description).toContain("day2.trackNavigation(navigationRef)");
+    expect(rnItem.description).toContain('src/Cart.tsx:5 "Help" → day2.action("cart.help", …)');
+    expect(rnItem.description).toContain("6. Add a test");
+    const nativeDir = await placeLibrary(join(ROOT, "rncopy"), "react-native");
+    const nativeJs = readFileSync(join(nativeDir, "native.js"), "utf-8");
+    expect(nativeJs).toContain('from"react-native"');
+    expect(readFileSync(join(nativeDir, "native.d.ts"), "utf-8")).toContain("useDay2Mark");
 
     const dir = await placeLibrary(join(ROOT, "copy"));
     expect(readFileSync(join(dir, "sensors.js"), "utf-8")).toContain("startDay2");

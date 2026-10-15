@@ -152,8 +152,11 @@ function deviceLine(s: StoredFailure | null): string {
 /** The bug report: expected, actual, steps to reproduce, evidence, where in the code. */
 function reportText(h: ContractHealth, contract: Contract | undefined, rate: number): string {
   const s = h.sample;
+  const real = h.failures - h.simulated;
   const lines = [
-    `day2's field check "${h.contract}" broke ${h.failures} time${h.failures === 1 ? "" : "s"} on ${h.devices} device${h.devices === 1 ? "" : "s"} in the last ${FIELD_WINDOW_DAYS} days (${Math.round(rate * 100)}% of checks).`,
+    real > 0
+      ? `day2's field check "${h.contract}" broke ${h.failures} time${h.failures === 1 ? "" : "s"} on ${h.devices} device${h.devices === 1 ? "" : "s"} in the last ${FIELD_WINDOW_DAYS} days (${Math.round(rate * 100)}% of checks)${h.simulated ? `, ${h.simulated} of them in day2's simulation` : ""}.`
+      : `day2's simulation broke the check "${h.contract}" and reproduced it on a second try (${h.simulated} time${h.simulated === 1 ? "" : "s"} in the last ${FIELD_WINDOW_DAYS} days). Real users may not have hit it yet.`,
     "",
     `Expected: ${fmt(s?.expected)}`,
     `Actual: ${fmt(s?.actual)}`,
@@ -175,7 +178,8 @@ export function contractSignals(appId: string, health: ContractHealth[], file: C
   for (const h of health) {
     if (h.failures === 0) continue;
     const crash = kindOf(h.contract) === BUILTIN.crash;
-    if (!crash && h.failures < MIN_FAILURES && h.devices < MIN_DEVICES) continue;
+    // Reproduced by day2's own simulation (twice, same steps): confirmed at once.
+    if (!crash && h.simulated === 0 && h.failures < MIN_FAILURES && h.devices < MIN_DEVICES) continue;
     const contract = byId.get(h.contract);
     const rate = h.failures / Math.max(1, h.failures + h.passes);
     out.push({
@@ -221,9 +225,38 @@ export function appKind(repoPath: string): AppKind {
 }
 
 export function installItem(app: AppEntry, opts: { key: string; endpoint: string; candidates: Candidate[] }): IncomingItem | null {
-  if (appKind(app.repoPath) !== "web") return null;
+  const kind = appKind(app.repoPath);
+  if (kind !== "web" && kind !== "react-native") return null;
+  const native = kind === "react-native";
   const dir = existsSync(join(app.repoPath, "src")) ? `src/${VENDOR_DIR}` : VENDOR_DIR;
+  const file = native ? "native.js" : "sensors.js";
   const tag = opts.candidates.slice(0, 40);
+  const start = `export const day2 = startDay2({ key: "${opts.key}", endpoint: "${opts.endpoint}", release: /* the app's version if available */ undefined });`;
+  const steps = native
+    ? [
+        `1. Once at startup (the root layout or App.tsx):`,
+        "```",
+        `import { startDay2, useDay2Mark } from "./${VENDOR_DIR}/native.js";`,
+        start,
+        "```",
+        `2. Screens: with Expo Router, call day2.route(pathname) whenever usePathname() changes; with React Navigation, call day2.trackNavigation(navigationRef) in the NavigationContainer's onReady.`,
+        `3. Spread {...useDay2Mark("loading")} on loading spinners and {...useDay2Mark("error")} on input error messages.`,
+        `4. Where the app records sign-ups and first value, call day2.track("signup") and day2.track("activated"); for sharing and invites, day2.track("shared") / day2.track("invite_sent").`,
+        ...(tag.length
+          ? [`5. Wrap these press handlers so their checks can run: onPress={day2.action("<name>", handler)}`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → day2.action("${c.name}", …)`)]
+          : []),
+      ]
+    : [
+        `1. At the app's entry point (before rendering), call it once:`,
+        "```",
+        `import { startDay2 } from "./${VENDOR_DIR}/sensors.js";`,
+        start,
+        "```",
+        `2. Mark loading indicators with aria-busy="true" (or data-day2-loading) and input error messages with role="alert" (or data-day2-error), where they aren't already.`,
+        `3. Where the app records sign-ups and first value, call day2.track("signup") and day2.track("activated"); for sharing and invites, day2.track("shared") / day2.track("invite_sent").`,
+        ...(tag.length ? [`4. Add data-day2-action to these elements so their checks can run (name as given):`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → data-day2-action="${c.name}"`)] : []),
+      ];
+  const n = steps.filter((l) => /^\d\./.test(l)).length + 1;
   return {
     source: { kind: "day2_proposal", key: INSTALL_KEY },
     title: "Install day2 field checks",
@@ -231,45 +264,41 @@ export function installItem(app: AppEntry, opts: { key: string; endpoint: string
     description: [
       "Let day2 check on users' devices that the app does what it should, and report \"expected X, actual Y\" when it doesn't — the base for fixing UI bugs on its own and measuring growth.",
       "",
-      `day2 has placed the library in ${dir}/sensors.js (with ${dir}/sensors.d.ts). Wire it in:`,
-      `1. At the app's entry point (before rendering), call it once:`,
-      "```",
-      `import { startDay2 } from "./${VENDOR_DIR}/sensors.js";`,
-      `export const day2 = startDay2({ key: "${opts.key}", endpoint: "${opts.endpoint}", release: /* the app's version or commit if available */ undefined });`,
-      "```",
-      `   Adjust the import path to where the entry file is. The key is send-only and safe to have in the app's code.`,
-      `2. Mark loading indicators with aria-busy="true" (or data-day2-loading) and input error messages with role="alert" (or data-day2-error), where they aren't already.`,
-      `3. Where the app records sign-ups and first value, call day2.track("signup") and day2.track("activated"); for sharing and invites, day2.track("shared") / day2.track("invite_sent").`,
-      ...(tag.length
-        ? [
-            `4. Add data-day2-action to these elements so their checks can run (name as given):`,
-            ...tag.map((c) => `   - ${c.origin} "${c.label}" → data-day2-action="${c.name}"`),
-          ]
-        : []),
-      `${tag.length ? 5 : 4}. Add a test (for example ${dir}/day2.test.ts) showing the app starts day2 exactly once, with this key and endpoint.`,
+      `day2 has placed the library in ${dir}/${file} (with its .d.ts). Adjust import paths to where each file is; the key is send-only and safe to have in the app's code. Wire it in:`,
+      ...steps,
+      `${n}. Add a test (for example ${dir}/day2.test.ts) showing the app starts day2 exactly once, with this key and endpoint.`,
       "",
       "Don't change any behaviour; this only adds the checks.",
     ].join("\n"),
     doneWhen: [
       "startDay2 is called once at startup with the key and endpoint above",
-      "Loading indicators carry aria-busy or data-day2-loading; error messages role=alert or data-day2-error",
+      native ? "Screen changes reach day2 (day2.route or day2.trackNavigation)" : "Loading indicators carry aria-busy or data-day2-loading; error messages role=alert or data-day2-error",
       "Sign-up and first value call day2.track",
-      ...(tag.length ? ["The listed elements carry their data-day2-action names"] : []),
+      ...(tag.length ? [native ? "The listed press handlers are wrapped in day2.action" : "The listed elements carry their data-day2-action names"] : []),
       "A test shows day2 is started exactly once with the key and endpoint",
       "The app builds and its tests pass",
     ],
   };
 }
 
-let bundleCache: string | null = null;
+const bundleCache = new Map<string, string>();
 
-/** The library as one browser-ready file (built once per process). */
-export async function sensorsBundle(): Promise<string> {
-  if (bundleCache) return bundleCache;
-  const out = await Bun.build({ entrypoints: [join(import.meta.dir, "../packages/sensors/src/index.ts")], target: "browser", format: "esm", minify: true });
+/** The library as one ready-to-use file, built once per process: the web build, or the React Native one (react and react-native left to the app). */
+export async function sensorsBundle(kind: "web" | "react-native" = "web"): Promise<string> {
+  const have = bundleCache.get(kind);
+  if (have) return have;
+  const entry = kind === "web" ? "index.ts" : "native.ts";
+  const out = await Bun.build({
+    entrypoints: [join(import.meta.dir, "../packages/sensors/src", entry)],
+    target: "browser",
+    format: "esm",
+    minify: true,
+    ...(kind === "react-native" ? { external: ["react", "react-native"] } : {}),
+  });
   if (!out.success) throw new Error(`Couldn't build the day2 field library: ${out.logs.map((l) => l.message).join("; ")}`);
-  bundleCache = `/* day2 field checks (@day2/sensors) — installed by day2; updates come from day2. */\n${await out.outputs[0]!.text()}`;
-  return bundleCache;
+  const text = `/* day2 field checks (@day2/sensors${kind === "web" ? "" : "/native"}) — installed by day2; updates come from day2. */\n${await out.outputs[0]!.text()}`;
+  bundleCache.set(kind, text);
+  return text;
 }
 
 const TYPES = `export type Day2 = { track(type: string): void; check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void; setIdentity(identity: "session" | "device"): void; flush(): void; stop(): void };
@@ -277,12 +306,27 @@ export type StartOptions = { key: string; endpoint: string; release?: string; co
 export declare function startDay2(opts: StartOptions): Day2;
 `;
 
+const NATIVE_TYPES = `export type Day2Native = {
+  track(type: string): void;
+  check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void;
+  route(name: string): void;
+  trackNavigation(ref: { addListener(event: "state", cb: () => void): () => void; getCurrentRoute(): { name: string } | undefined }): () => void;
+  action<A extends unknown[], R>(name: string, handler?: (...args: A) => R, opts?: { testID?: string; label?: string }): (...args: A) => R | undefined;
+  flush(): void;
+  stop(): void;
+};
+export type NativeOptions = { key: string; endpoint: string; release?: string; contracts?: unknown; fetchContracts?: boolean; identity?: "session" | "device"; storage?: { getItem(key: string): Promise<string | null>; setItem(key: string, value: string): Promise<void> }; model?: string; enabled?: boolean };
+export declare function startDay2(opts: NativeOptions): Day2Native;
+export declare function useDay2Mark(id: string): { onLayout: (e: { nativeEvent: { layout: { width: number; height: number } } }) => void };
+`;
+
 /** Puts the library files into a working copy (the install ticket's clone). */
-export async function placeLibrary(workdir: string): Promise<string> {
+export async function placeLibrary(workdir: string, kind: "web" | "react-native" = "web"): Promise<string> {
   const dir = existsSync(join(workdir, "src")) ? join(workdir, "src", VENDOR_DIR) : join(workdir, VENDOR_DIR);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "sensors.js"), await sensorsBundle());
-  writeFileSync(join(dir, "sensors.d.ts"), TYPES);
+  const name = kind === "web" ? "sensors" : "native";
+  writeFileSync(join(dir, `${name}.js`), await sensorsBundle(kind));
+  writeFileSync(join(dir, `${name}.d.ts`), kind === "web" ? TYPES : NATIVE_TYPES);
   return dir;
 }
 

@@ -185,6 +185,7 @@ import { linearClient, publicIntegrations, type AppIntegrations } from "./backlo
 import { gatherSignalsForApp } from "./health-scout-cli";
 import { tickAll } from "./backlog-cli";
 import { autopilotAll } from "./growth-autopilot-run";
+import { simulateAll } from "./simulation-run";
 import { features } from "./features";
 import {
   answerBuild,
@@ -1449,12 +1450,13 @@ route("GET", "/api/apps/:id/field", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   const store = fieldStore();
   const now = new Date();
-  const [meta, contracts, health, backlog, key] = await Promise.all([
+  const [meta, contracts, health, backlog, key, simulation] = await Promise.all([
     store.meta(app.id),
     store.contracts(app.id),
     store.health(app.id, new Date(now.getTime() - FIELD_WINDOW_DAYS * 86_400_000)),
     loadBacklogFor(app),
     ingestKeys().forApp(app.id),
+    store.simulation(app.id),
   ]);
   const byId = new Map((contracts?.file.contracts ?? []).map((c) => [c.id, c]));
   const ticketFor = (key: string) => {
@@ -1464,7 +1466,7 @@ route("GET", "/api/apps/:id/field", async (_req, params, t) => {
   const install = ticketFor(INSTALL_KEY);
   const kind = appKind(app.repoPath);
   return json({
-    status: meta ? "reporting" : install ? "installing" : kind === "web" ? "not_installed" : "unsupported",
+    status: meta ? "reporting" : install ? "installing" : kind === "web" || kind === "react-native" ? "not_installed" : "unsupported",
     platform: kind,
     key,
     endpoint: authConfig().publicUrl,
@@ -1480,6 +1482,7 @@ route("GET", "/api/apps/:id/field", async (_req, params, t) => {
         }
       : null,
     installTicket: install,
+    simulation,
     windowDays: FIELD_WINDOW_DAYS,
     checks: health.map((h) => ({
       contract: h.contract,
@@ -1487,6 +1490,7 @@ route("GET", "/api/apps/:id/field", async (_req, params, t) => {
       failures: h.failures,
       rejected: h.rejected,
       devices: h.devices,
+      simulated: h.simulated,
       lastFailureAt: h.lastFailureAt,
       finding: h.failures ? describeBroken(h, byId.get(h.contract)) : null,
       ticket: ticketFor(`field:${h.contract}`),
@@ -2313,11 +2317,13 @@ function startBacklogTimer(): void {
           if (got?.ok) {
             await autopilotAll();
             await tickAll({ startWork: true });
+            await simulateAll();
           }
         });
       } else {
         await autopilotAll();
         await tickAll({ startWork: true });
+        await simulateAll();
       }
     } catch (err) {
       console.error("[day2-backlog] tick failed:", (err as Error).message);

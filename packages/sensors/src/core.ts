@@ -76,7 +76,7 @@ const POLL = 100;
 const MAX_FAILURES_PER_CONTRACT = 3;
 const MAX_FAILURES_PER_BATCH = 50;
 const MAX_CRUMBS = 20;
-const LOADING_TARGET = '[aria-busy="true"], [data-day2-loading]';
+export const LOADING_TARGET = '[aria-busy="true"], [data-day2-loading]';
 /** A message telling the user their input was not accepted. */
 export const ERROR_SHOWN = '[role="alert"], [aria-invalid="true"], [data-day2-error]';
 
@@ -182,7 +182,9 @@ export class Engine {
   }
 
   start(): void {
-    this.onRoute(this.env.route());
+    // Mobile apps report their first screen once navigation is ready.
+    const first = this.env.route();
+    if (first) this.onRoute(first);
     this.scheduleFlush();
     this.tick();
   }

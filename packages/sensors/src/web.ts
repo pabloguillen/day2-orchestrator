@@ -1,5 +1,8 @@
 import { Engine, normalizePath, type Env, type Tap } from "./core";
-import type { Batch, Contract, ContractFile, DeviceInfo, GrowthEvent } from "./types";
+import { acquisitionFrom } from "./acquisition";
+import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
+
+export { acquisitionFrom };
 
 /**
  * day2 field contracts for the web — one call at startup:
@@ -49,34 +52,6 @@ export type Day2 = {
 };
 
 const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, flush() {}, stop() {} };
-
-const SEARCH = /(^|\.)(google\.[a-z.]+|bing\.com|duckduckgo\.com|yahoo\.[a-z.]+|ecosia\.org|baidu\.com|yandex\.[a-z.]+|startpage\.com|qwant\.com)$/;
-const AI = /(^|\.)(chatgpt\.com|chat\.openai\.com|perplexity\.ai|claude\.ai|gemini\.google\.com|copilot\.microsoft\.com|you\.com)$/;
-
-/** Where a visitor came from, from the URL and the referrer. */
-export function acquisitionFrom(url: string, referrer: string, ownHost: string): GrowthEvent["acquisition"] {
-  let params: URLSearchParams;
-  try {
-    params = new URL(url).searchParams;
-  } catch {
-    params = new URLSearchParams();
-  }
-  const d2 = params.get("d2");
-  if (d2) return { campaignId: d2.slice(0, 40), channel: "paid" };
-  if (params.get("ref") === "share") return { channel: "shared_link" };
-  if (params.has("invite")) return { channel: "invite" };
-  if (!referrer) return { channel: "direct" };
-  let host = "";
-  try {
-    host = new URL(referrer).hostname;
-  } catch {
-    return { channel: "direct" };
-  }
-  if (host === ownHost) return undefined;
-  if (AI.test(host)) return { channel: "ai_assistant" };
-  if (SEARCH.test(host)) return { channel: "search" };
-  return { channel: "referral" };
-}
 
 const store = (kind: "session" | "local") => {
   try {

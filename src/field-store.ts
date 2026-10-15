@@ -27,12 +27,32 @@ export type ContractHealth = {
   rejected: number;
   /** Distinct devices among the reported failures. */
   devices: number;
+  /** Failures confirmed by day2's simulation (reproduced twice there). */
+  simulated: number;
   firstFailureAt: string | null;
   lastFailureAt: string | null;
   sample: StoredFailure | null;
 };
 
 export type FieldMeta = { lastSeenAt: string; lastRelease: string | null; platforms: string[] };
+
+/** One scheduled simulation run (simulation.ts). */
+export type SimulationRun = {
+  at: string;
+  durationMs: number;
+  profiles: string[];
+  screens: number;
+  actions: number;
+  links: number;
+  /** Confirmed failures (reproduced on a second try). */
+  failures: number;
+  /** Failures that didn't reproduce, so weren't recorded. */
+  flaky: number;
+  skipped: string[];
+};
+
+/** Simulated devices carry ids starting with this. */
+export const SIM_DEVICE_PREFIX = "sim-";
 export type StoredContracts = { file: ContractFile; candidates: Candidate[]; head: string | null; generatedAt: string };
 
 export interface FieldStore {
@@ -42,6 +62,8 @@ export interface FieldStore {
   events(appId: string, since: Date): Promise<EventLike[]>;
   meta(appId: string): Promise<FieldMeta | null>;
   setContracts(appId: string, c: Omit<StoredContracts, "generatedAt">, now: Date): Promise<void>;
+  setSimulation(appId: string, run: SimulationRun): Promise<void>;
+  simulation(appId: string): Promise<SimulationRun | null>;
   contracts(appId: string): Promise<StoredContracts | null>;
   prune(now: Date): Promise<void>;
 }
@@ -76,14 +98,14 @@ function counters(batch: Batch): Array<{ contract: string; passes: number; failu
 
 function mergeHealth(
   rows: Array<{ contract: string; passes: number; failures: number }>,
-  failureInfo: Map<string, { devices: number; first: string | null; last: string | null; sample: StoredFailure | null }>,
+  failureInfo: Map<string, { devices: number; simulated: number; first: string | null; last: string | null; sample: StoredFailure | null }>,
 ): ContractHealth[] {
   const by = new Map<string, ContractHealth>();
   const get = (c: string) => {
     let h = by.get(c);
     if (!h) {
       const fi = failureInfo.get(c);
-      h = { contract: c, passes: 0, failures: 0, rejected: 0, devices: fi?.devices ?? 0, firstFailureAt: fi?.first ?? null, lastFailureAt: fi?.last ?? null, sample: fi?.sample ?? null };
+      h = { contract: c, passes: 0, failures: 0, rejected: 0, devices: fi?.devices ?? 0, simulated: fi?.simulated ?? 0, firstFailureAt: fi?.first ?? null, lastFailureAt: fi?.last ?? null, sample: fi?.sample ?? null };
       by.set(c, h);
     }
     return h;
@@ -165,11 +187,12 @@ export function fileFieldStore(root: string): FieldStore {
       const rows = Object.entries(counts)
         .filter(([k]) => k.slice(k.lastIndexOf("|") + 1) >= from)
         .map(([k, v]) => ({ contract: k.slice(0, k.lastIndexOf("|")), passes: v.p, failures: v.f }));
-      const info = new Map<string, { devices: number; first: string | null; last: string | null; sample: StoredFailure | null }>();
+      const info = new Map<string, { devices: number; simulated: number; first: string | null; last: string | null; sample: StoredFailure | null }>();
       const devs = new Map<string, Set<string>>();
       for (const f of readLines<StoredFailure>(join(dir(appId), "failures.jsonl"))) {
         if (f.at < since.toISOString()) continue;
-        const cur = info.get(f.contract) ?? { devices: 0, first: f.at, last: f.at, sample: f };
+        const cur = info.get(f.contract) ?? { devices: 0, simulated: 0, first: f.at, last: f.at, sample: f };
+        if (f.deviceId.startsWith(SIM_DEVICE_PREFIX)) cur.simulated += 1;
         if (f.at < cur.first!) cur.first = f.at;
         if (f.at >= cur.last!) {
           cur.last = f.at;
@@ -201,6 +224,12 @@ export function fileFieldStore(root: string): FieldStore {
     },
     async contracts(appId) {
       return readJson<StoredContracts | null>(join(dir(appId), "contracts.json"), null);
+    },
+    async setSimulation(appId, run) {
+      writeJson(join(dir(appId), "simulation.json"), run);
+    },
+    async simulation(appId) {
+      return readJson<SimulationRun | null>(join(dir(appId), "simulation.json"), null);
     },
     async prune(now) {
       if (!existsSync(root)) return;
@@ -276,12 +305,12 @@ export function dbFieldStore(sql: SQL): FieldStore {
     async health(appId, since) {
       const rows = (await sql`SELECT contract, SUM(passes)::int AS passes, SUM(failures)::int AS failures FROM field_counts
                               WHERE app_id = ${appId} AND day >= ${dayOf(since.toISOString())} GROUP BY contract`) as Array<{ contract: string; passes: number; failures: number }>;
-      const fails = (await sql`SELECT contract, COUNT(DISTINCT device_id)::int AS devices, MIN(at) AS first, MAX(at) AS last FROM field_failures
-                               WHERE app_id = ${appId} AND at >= ${since.toISOString()} GROUP BY contract`) as Array<{ contract: string; devices: number; first: Date; last: Date }>;
+      const fails = (await sql`SELECT contract, COUNT(DISTINCT device_id)::int AS devices, (COUNT(*) FILTER (WHERE device_id LIKE ${SIM_DEVICE_PREFIX + "%"}))::int AS simulated, MIN(at) AS first, MAX(at) AS last
+                               FROM field_failures WHERE app_id = ${appId} AND at >= ${since.toISOString()} GROUP BY contract`) as Array<{ contract: string; devices: number; simulated: number; first: Date; last: Date }>;
       const latest = (await sql`SELECT DISTINCT ON (contract) contract, at, device_id, release, device, report FROM field_failures
                                 WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY contract, at DESC`) as Array<FailureRow & { contract: string }>;
-      const info = new Map<string, { devices: number; first: string | null; last: string | null; sample: StoredFailure | null }>();
-      for (const f of fails) info.set(f.contract, { devices: f.devices, first: new Date(f.first).toISOString(), last: new Date(f.last).toISOString(), sample: null });
+      const info = new Map<string, { devices: number; simulated: number; first: string | null; last: string | null; sample: StoredFailure | null }>();
+      for (const f of fails) info.set(f.contract, { devices: f.devices, simulated: f.simulated, first: new Date(f.first).toISOString(), last: new Date(f.last).toISOString(), sample: null });
       for (const l of latest) {
         const cur = info.get(l.contract);
         if (cur) cur.sample = toFailure(l);
@@ -319,6 +348,14 @@ export function dbFieldStore(sql: SQL): FieldStore {
       }>;
       const r = rows[0];
       return r ? { head: r.head, file: parse(r.file), candidates: parse(r.candidates), generatedAt: new Date(r.generated_at).toISOString() } : null;
+    },
+    async setSimulation(appId, run) {
+      await sql`INSERT INTO field_simulations (app_id, run, at) VALUES (${appId}, ${run}::jsonb, ${run.at})
+                ON CONFLICT (app_id) DO UPDATE SET run = EXCLUDED.run, at = EXCLUDED.at`;
+    },
+    async simulation(appId) {
+      const rows = (await sql`SELECT run FROM field_simulations WHERE app_id = ${appId}`) as Array<{ run: SimulationRun | string }>;
+      return rows[0] ? parse(rows[0].run) : null;
     },
     async prune(now) {
       await sql`DELETE FROM field_failures WHERE at < ${new Date(now.getTime() - FAILURE_DAYS * DAY).toISOString()}`;

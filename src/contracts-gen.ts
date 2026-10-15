@@ -95,8 +95,10 @@ function routesFromFiles(repo: RepoIndex, expoRouter: boolean): Array<{ route: s
   return out;
 }
 
-function routesFromCode(sf: ts.SourceFile, file: string): Array<{ route: string; file: string }> {
-  const out: Array<{ route: string; file: string }> = [];
+type RouteRef = { route: string; file: string; component?: string };
+
+function routesFromCode(sf: ts.SourceFile, file: string): RouteRef[] {
+  const out: RouteRef[] = [];
   const visit = (node: ts.Node, parentPath: string) => {
     let base = parentPath;
     // TanStack Router: createFileRoute('/apps/$appId/backlog')
@@ -112,6 +114,21 @@ function routesFromCode(sf: ts.SourceFile, file: string): Array<{ route: string;
         out.push({ route: toPattern(base), file });
       }
     }
+    // React Navigation: <Stack.Screen name="Checkout" component={…} />
+    if ((ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) && /\.Screen$/.test(tagName(node))) {
+      const name = attrString(node, "name");
+      const comp = attr(node, "component")?.initializer;
+      const component = comp && ts.isJsxExpression(comp) && comp.expression && ts.isIdentifier(comp.expression) ? comp.expression.text : undefined;
+      if (name) out.push({ route: name, file, ...(component ? { component } : {}) });
+    }
+    // React Navigation static config: createNativeStackNavigator({ screens: { Checkout: CheckoutScreen } })
+    if (ts.isPropertyAssignment(node) && node.name.getText(sf) === "screens" && ts.isObjectLiteralExpression(node.initializer) && insideNavigatorCall(node)) {
+      for (const p of node.initializer.properties) {
+        if (!(ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) || !p.name) continue;
+        const component = ts.isShorthandPropertyAssignment(p) ? p.name.text : ts.isIdentifier(p.initializer) ? p.initializer.text : undefined;
+        out.push({ route: p.name.getText(sf).replace(/^["']|["']$/g, ""), file, ...(component ? { component } : {}) });
+      }
+    }
     // React Router objects: { path: "checkout", children: [...] } inside createBrowserRouter / useRoutes.
     if (ts.isObjectLiteralExpression(node) && insideRouterCall(node)) {
       const prop = node.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText(sf) === "path");
@@ -125,6 +142,13 @@ function routesFromCode(sf: ts.SourceFile, file: string): Array<{ route: string;
   };
   visit(sf, "");
   return out;
+}
+
+function insideNavigatorCall(node: ts.Node): boolean {
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isCallExpression(p) && ts.isIdentifier(p.expression) && /^create\w*Navigator$/.test(p.expression.text)) return true;
+  }
+  return false;
 }
 
 function insideRouterCall(node: ts.Node): boolean {
@@ -232,9 +256,23 @@ function effects(body: ts.Node, sf: ts.SourceFile): Expectation[] {
 const toRequestPath = (url: string) => url.split(/[?#]/)[0]!.replace(/\/+$/, "") || "/";
 
 /** The code a JSX handler attribute runs: an inline function, or a function declared in the same file. */
-function handlerBody(init: ts.JsxAttribute["initializer"], sf: ts.SourceFile): ts.Node | null {
+/** `day2.action("cart.continue", onContinue)` — the React Native tag. */
+function wrappedAction(init: ts.JsxAttribute["initializer"]): { name: string; handler: ts.Expression | undefined } | null {
   if (!init || !ts.isJsxExpression(init) || !init.expression) return null;
   const e = init.expression;
+  if (!ts.isCallExpression(e) || !ts.isPropertyAccessExpression(e.expression) || e.expression.name.text !== "action") return null;
+  const name = literal(e.arguments[0]);
+  return name ? { name, handler: e.arguments[1] } : null;
+}
+
+function handlerBody(init: ts.JsxAttribute["initializer"], sf: ts.SourceFile): ts.Node | null {
+  if (!init || !ts.isJsxExpression(init) || !init.expression) return null;
+  let e = init.expression;
+  const wrapped = wrappedAction(init);
+  if (wrapped) {
+    if (!wrapped.handler) return null;
+    e = wrapped.handler;
+  }
   if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return e.body;
   let name = "";
   if (ts.isIdentifier(e)) name = e.text;
@@ -257,6 +295,16 @@ function handlerBody(init: ts.JsxAttribute["initializer"], sf: ts.SourceFile): t
   return found;
 }
 
+/** `{...useDay2Mark("total")}` on a React Native element. */
+function markOf(node: ts.JsxElement | ts.JsxSelfClosingElement): string | null {
+  for (const p of attrs(node).properties) {
+    if (!ts.isJsxSpreadAttribute(p)) continue;
+    const e = p.expression;
+    if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "useDay2Mark") return literal(e.arguments[0]);
+  }
+  return null;
+}
+
 function jsxText(node: ts.JsxElement | ts.JsxSelfClosingElement): string {
   if (!ts.isJsxElement(node)) return attrString(node, "aria-label") ?? "";
   const parts: string[] = [];
@@ -276,7 +324,10 @@ export function generateContracts(repoPath: string, now = new Date()): Generated
   const repo = indexRepo(repoPath);
   const pkg = existsSync(join(repoPath, "package.json")) ? readFileSync(join(repoPath, "package.json"), "utf-8") : "";
   const expoRouter = /"expo-router"/.test(pkg);
-  const routes = new Map<string, { route: string; file: string }>();
+  const native = /"(react-native|expo)"/.test(pkg);
+  const routes = new Map<string, RouteRef>();
+  /** Component name → the file that defines it (for React Navigation screens). */
+  const componentFile = new Map<string, string>();
   for (const r of routesFromFiles(repo, expoRouter)) routes.set(r.route, r);
 
   const actions: ActionContract[] = [];
@@ -290,6 +341,10 @@ export function generateContracts(repoPath: string, now = new Date()): Generated
     if (!text) continue;
     const sf = ts.createSourceFile(f, text, ts.ScriptTarget.Latest, true, kindOf(f));
     for (const r of routesFromCode(sf, f)) if (!routes.has(r.route)) routes.set(r.route, r);
+    for (const st of sf.statements) {
+      if (ts.isFunctionDeclaration(st) && st.name) componentFile.set(st.name.text, f);
+      if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) componentFile.set(d.name.text, f);
+    }
     // "apps.$appId.backlog.$ticketId.tsx" → "backlog"; "Cart.tsx" → "cart".
     const component =
       f
@@ -303,7 +358,7 @@ export function generateContracts(repoPath: string, now = new Date()): Generated
 
     const visit = (node: ts.Node) => {
       if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
-        const req = attrString(node, "data-day2-require");
+        const req = attrString(node, "data-day2-require") ?? markOf(node);
         if (req) requireByFile.set(f, [...(requireByFile.get(f) ?? []), `[data-day2-require="${req}"]`]);
         const handler = attr(node, "onClick") ?? attr(node, "onPress") ?? attr(node, "onSubmit");
         const body = handler ? handlerBody(handler.initializer, sf) : null;
@@ -312,11 +367,12 @@ export function generateContracts(repoPath: string, now = new Date()): Generated
           if (expect.length) {
             const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
             const origin = `${f}:${line}`;
-            const tagged = attrString(node, "data-day2-action");
+            const tagged = attrString(node, "data-day2-action") ?? wrappedAction(handler!.initializer)?.name ?? null;
             const id = attrString(node, "id");
             const testId = attrString(node, "data-testid") ?? attrString(node, "testID");
             const label = jsxText(node);
-            const target = tagged ? `action:${tagged}` : id ? `#${id}` : testId ? `[data-testid="${testId}"]` : null;
+            // React Native has no global taps: only wrapped handlers can be checked there.
+            const target = tagged ? `action:${tagged}` : native ? null : id ? `#${id}` : testId ? `[data-testid="${testId}"]` : null;
             if (target) {
               let cid = tagged ?? `${slug(component)}.${slug(id ?? testId ?? label)}`;
               while (usedIds.has(cid)) cid = `${cid}_${line}`;
@@ -335,14 +391,17 @@ export function generateContracts(repoPath: string, now = new Date()): Generated
 
   const screens: ScreenContract[] = [...routes.values()]
     .sort((a, b) => a.route.localeCompare(b.route))
-    .map((r) => ({
-      id: `screen:${r.route}`,
-      kind: "screen",
-      route: r.route,
-      ...(requireByFile.get(r.file)?.length ? { require: requireByFile.get(r.file) } : {}),
-      source: "code",
-      origin: r.file,
-    }));
+    .map((r) => {
+      const file = (r.component && componentFile.get(r.component)) || r.file;
+      return {
+        id: `screen:${r.route}`,
+        kind: "screen" as const,
+        route: r.route,
+        ...(requireByFile.get(file)?.length ? { require: requireByFile.get(file) } : {}),
+        source: "code" as const,
+        origin: file,
+      };
+    });
 
   const contracts: Contract[] = [...screens, ...actions];
   return { file: { version: CONTRACTS_VERSION, generatedAt: now.toISOString(), contracts }, candidates, screens: screens.length, actions: actions.length };

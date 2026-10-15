@@ -8,13 +8,38 @@
   "module": "./dist/index.js",
   "types": "./src/index.ts",
   "exports": {
-    ".": { "types": "./src/index.ts", "import": "./dist/index.js" },
-    "./core": { "types": "./src/core.ts", "import": "./dist/core.js" }
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./src/core.ts",
+      "import": "./dist/core.js"
+    },
+    "./native": {
+      "types": "./src/native.ts",
+      "import": "./dist/native.js"
+    }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "sideEffects": false,
   "scripts": {
-    "build": "bun build src/index.ts src/core.ts --outdir dist --target browser --format esm --minify --sourcemap=linked",
+    "build": "bun build src/index.ts src/core.ts --outdir dist --target browser --format esm --minify --sourcemap=linked && bun build src/native.ts --outdir dist --target browser --format esm --minify --external react --external react-native",
     "test": "bun test"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.72"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
   }
 }

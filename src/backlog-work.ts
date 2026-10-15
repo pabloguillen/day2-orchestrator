@@ -25,7 +25,7 @@ import type { IntegrationsStore } from "./integrations-store";
 import { canAfford, meteredQuery, withCreditContext } from "./metered-query";
 import { FIX_MAX_BUDGET_USD, runFixAgent, runVerifierAgent } from "./agent";
 import { cloneIsolatedWorkspace, pushBranch } from "./git";
-import { INSTALL_KEY, placeLibrary } from "./field-work";
+import { appKind, INSTALL_KEY, placeLibrary } from "./field-work";
 import { runPipeline, type PipelineDeps } from "./pipeline";
 import { listProposals } from "./proposals";
 import type { Signal } from "./signals/types";
@@ -118,7 +118,8 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
         ? {
             cloneIsolatedWorkspace: async (src: string) => {
               const cwd = await (deps.cloneIsolatedWorkspace ?? cloneIsolatedWorkspace)(src);
-              await placeLibrary(cwd);
+              const kind = appKind(app.repoPath);
+              await placeLibrary(cwd, kind === "react-native" ? "react-native" : "web");
               return cwd;
             },
           }

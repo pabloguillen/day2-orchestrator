@@ -14,12 +14,13 @@ That's a fact, not a heuristic. Rage taps and drop-off spikes stay hints.
 
 | Part | Where | What it does |
 |---|---|---|
-| Library | `packages/sensors` (`@day2/sensors`) | Runs in the app. Checks contracts, sends small JSON batches. About 7 KB gzipped, no dependencies. |
+| Library | `packages/sensors` (`@day2/sensors`, `@day2/sensors/native`) | Runs in the app (web, React Native, Expo). Checks contracts, sends small JSON batches. About 7 KB (web) / 6 KB (native) gzipped, no dependencies. |
 | Contract generator | `src/contracts-gen.ts` | Reads the app's code (TypeScript parser) and writes the contracts. |
 | Ingest | `src/field-ingest.ts`, `POST /api/ingest/<key>` | Receives batches: validates, re-shapes, rate-limits, stores. |
-| Store | `src/field-store.ts` | Postgres in production (`006_field_contracts.sql`), files locally. |
+| Store | `src/field-store.ts` | Postgres in production (`006_field_contracts.sql`, `007_field_simulations.sql`), files locally. |
+| Simulation | `src/simulation.ts`, `src/simulation-run.ts` | Once a day, the same checks in a real browser on four device profiles. |
 | Loops | `src/field-work.ts` | Broken contracts → tickets; install ticket; growth events; ads held for broken pages. |
-| Console | Field checks page per app | What's broken, its ticket, what holds. |
+| Console | Field checks page per app | What's broken, its ticket, what holds, the last simulation. |
 
 ## Contract families
 
@@ -55,8 +56,62 @@ message is a failure, because the app turned the user away without saying why.
    the devices and the code location. day2 reproduces it with a browser test
    first, then fixes it.
 
-Web is supported now. React Native / Expo is next: the core (`packages/sensors/src/core.ts`)
-is platform-neutral, so only a mobile adapter is needed.
+## React Native and Expo
+
+The same engine (`packages/sensors/src/core.ts`) with a mobile adapter
+(`src/native.ts`). day2 places `day2/native.js` in the app and the agent wires it:
+
+```tsx
+import { startDay2, useDay2Mark } from "./day2/native";
+export const day2 = startDay2({ key: "d2k_…", endpoint: "https://day2.example", model: Device.modelName });
+
+// screens: React Navigation…
+<NavigationContainer ref={ref} onReady={() => day2.trackNavigation(ref)}>
+// …or Expo Router
+const pathname = usePathname(); useEffect(() => day2.route(pathname), [pathname]);
+
+<Pressable onPress={day2.action("cart.continue", onContinue)}>   // action contract checked
+<Text {...useDay2Mark("total")}>…</Text>                          // what a screen requires
+<ActivityIndicator {...useDay2Mark("loading")} />                 // loading; "error" for input errors
+```
+
+| Web | React Native |
+|---|---|
+| `data-day2-action` | `day2.action(name, handler)` |
+| `data-day2-require`, `aria-busy`, `role="alert"` | `useDay2Mark(id)` (`"loading"`, `"error"`) |
+| URL changes | React Navigation state / Expo Router pathname |
+| fetch + XHR | XHR (React Native's fetch runs on it) |
+| `error` / `unhandledrejection` | the global error handler (kept chained) |
+| long tasks | a JS-thread heartbeat (late beat = freeze) |
+| `pagehide` | app goes to the background |
+| landing URL | the link that opened the app (`Linking.getInitialURL`) |
+
+The generator reads React Navigation (`<Stack.Screen name component>` and
+static `screens: {…}` configs) and Expo Router file routes; a screen's
+requirements come from its component's file. Only presses wrapped in
+`day2.action` become action contracts; bare `testID` presses are listed as
+candidates to wrap.
+
+## Daily simulation
+
+Field reports need users. The simulation covers what they haven't hit yet,
+and new releases before anyone does.
+
+- **When:** once a day per web app with a live address and contracts, on the
+  backlog timer. Skipped when the server has no Chromium or the account can't
+  pay for it (billed as server time, a fraction of a credit).
+- **How:** Chromium with the same library injected, on four profiles: small
+  Android (360 px, German, dark), iPhone, slow phone (slow 3G, 150 % text),
+  desktop. It opens every screen (up to 25), taps the actions that only read,
+  and checks internal links. Up to 5 minutes.
+- **Same checks, same reports:** results are recorded as batches from devices
+  `sim-<profile>`. A failure counts only when it happens again on a second try;
+  ones that don't repeat are counted as "flaky" and dropped.
+- **Straight to the backlog:** a confirmed simulated failure becomes a ticket at
+  once (no 3-failure threshold — it already reproduced).
+- **Safe on a live app:** never taps an action that writes (POST, `.insert()`,
+  …), types nothing, submits nothing. Its user agent ends in `day2-simulation`
+  and it sends no growth events. Mobile builds run their checks in the field only.
 
 ## Self-distribution
 

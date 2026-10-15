@@ -94,6 +94,35 @@ describe("contracts from the app's own code", () => {
     expect(g.file.contracts.find((c) => c.kind === "action")).toMatchObject({ target: '[data-testid="pay"]', expect: [{ screen: "Receipt" }] });
   });
 
+  test("React Native: navigator screens, day2.action wrappers, marks — untagged presses become candidates", () => {
+    const root = app({
+      "package.json": '{"dependencies":{"react-native":"0.76","expo":"52","@react-navigation/native-stack":"7"}}',
+      "App.tsx": `
+        const Stack = createNativeStackNavigator();
+        export default () => <NavigationContainer><Stack.Navigator>
+          <Stack.Screen name="Cart" component={Cart} />
+          <Stack.Screen name="Checkout" component={Checkout} />
+        </Stack.Navigator></NavigationContainer>;
+        const Tabs = createBottomTabNavigator({ screens: { Home: HomeScreen, Profile } });`,
+      "src/Cart.tsx": `
+        export function Cart({ navigation }) {
+          const onContinue = async () => { await fetch("/api/cart/validate", { method: "POST" }); navigation.navigate("Checkout"); };
+          return <View>
+            <Pressable onPress={day2.action("cart.continue", onContinue)}><Text>Continue</Text></Pressable>
+            <Pressable testID="help" onPress={() => navigation.navigate("Help")}><Text>Help</Text></Pressable>
+          </View>;
+        }`,
+      "src/Checkout.tsx": `export function Checkout() { return <Text {...useDay2Mark("total")}>Total</Text>; }`,
+    });
+    const g = generateContracts(root);
+    const screens = g.file.contracts.filter((c) => c.kind === "screen") as Array<{ route: string; require?: string[] }>;
+    expect(screens.map((c) => c.route).sort()).toEqual(["Cart", "Checkout", "Home", "Profile"]);
+    expect(g.file.contracts.find((c) => c.id === "cart.continue")).toMatchObject({ target: "action:cart.continue", expect: [{ request: "POST /api/cart/validate" }, { screen: "Checkout" }] });
+    // A testID alone can't be seen on React Native: wrap it.
+    expect(g.candidates).toEqual([expect.objectContaining({ name: "cart.help", expect: [{ screen: "Help" }] })]);
+    expect(screens.find((c) => c.route === "Checkout")).toMatchObject({ require: ['[data-day2-require="total"]'], origin: "src/Checkout.tsx" });
+  });
+
   test("computed targets are left out, not guessed", () => {
     const root = app({
       "package.json": "{}",
