@@ -63,6 +63,8 @@ export type Campaign = {
   impressions: number;
   lastSyncAt: string | null;
   lastScaledAt: string | null;
+  /** Paused because the page it leads to is broken (field checks); resumes when it works again. */
+  heldFor?: string | null;
 };
 
 export type BetsFile = { nextNumber: number; bets: Bet[] };

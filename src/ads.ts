@@ -31,6 +31,7 @@ export interface AdPlatform {
   launch(input: LaunchInput): Promise<{ campaignId: string }>;
   stats(campaignId: string): Promise<AdStats>;
   pause(campaignId: string): Promise<void>;
+  resume(campaignId: string): Promise<void>;
   setDailyBudget(campaignId: string, usd: number): Promise<void>;
 }
 
@@ -125,6 +126,9 @@ ${RULES}
     },
     async pause(campaignId) {
       await runAdAgent(servers, `Pause Meta ads campaign ${campaignId} (status PAUSED). Change nothing else.\n\n${RULES}\n{"status": "PAUSED"}  (or {"error": "why"})`, "Pause ad");
+    },
+    async resume(campaignId) {
+      await runAdAgent(servers, `Turn Meta ads campaign ${campaignId} back on (status ACTIVE). Change nothing else.\n\n${RULES}\n{"status": "ACTIVE"}  (or {"error": "why"})`, "Resume ad");
     },
     async setDailyBudget(campaignId, usd) {
       await runAdAgent(

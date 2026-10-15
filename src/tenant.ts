@@ -10,6 +10,7 @@ import { appsRegistryPath, creditStore, dataDir } from "./day2-paths";
 import { CONNECTORS_FILENAME, dbConnectors, fileConnectors, type ConnectorStore } from "./connectors";
 import { db, hasDatabase } from "./db";
 import { AD_IDENTITIES_FILENAME, dbAdIdentities, fileAdIdentities, type AdIdentityStore } from "./ad-identities";
+import { dbFieldStore, dbIngestKeys, fileFieldStore, fileIngestKeys, type FieldStore, type IngestKeys } from "./field-store";
 import { githubEnv } from "./github-app";
 import { dbIntegrations, fileIntegrations, type IntegrationsStore } from "./integrations-store";
 
@@ -96,6 +97,16 @@ export function platformTools(): ConnectorStore {
 
 export function adIdentities(): AdIdentityStore {
   return serverMode() === "accounts" ? dbAdIdentities(db()) : fileAdIdentities(join(dataDir(), AD_IDENTITIES_FILENAME));
+}
+
+/** What apps report from users' devices (field-store.ts), for every app. */
+export function fieldStore(): FieldStore {
+  return serverMode() === "accounts" ? dbFieldStore(db()) : fileFieldStore(join(dataDir(), "field"));
+}
+
+/** Each app's send-only key for those reports. */
+export function ingestKeys(): IngestKeys {
+  return serverMode() === "accounts" ? dbIngestKeys(db()) : fileIngestKeys(join(dataDir(), ".day2-ingest-keys.json"), LOCAL_ACCOUNT_ID);
 }
 
 export function sessionTenant(session: Session): Tenant {

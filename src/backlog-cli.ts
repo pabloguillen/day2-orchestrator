@@ -4,7 +4,9 @@ import { backlogFile, syncAppTrackers, tick } from "./backlog-work";
 import { db } from "./db";
 import { gatherSignalsForApp } from "./health-scout-cli";
 import type { AppEntry } from "./apps-registry";
-import { loadAccountTenant, localTenant, runAsTenant, serverMode, type Tenant } from "./tenant";
+import { fieldStore, ingestKeys, loadAccountTenant, localTenant, runAsTenant, serverMode, type Tenant } from "./tenant";
+import { authConfig } from "./auth";
+import { fieldSignals, installItem, refreshContracts } from "./field-work";
 /**
  * Keeps every app's backlog moving. The API server does this on its own
  * every DAY2_BACKLOG_TICK_MINUTES (default 15); by hand:
@@ -44,14 +46,27 @@ export async function tickAll(opts: { only?: string; startWork: boolean }): Prom
     await runAsTenant(tenant, async () => {
       try {
         const sentry = loadBacklog(backlogFile(app)).settings.sentry;
+        const field = fieldStore();
+        // The app's field contracts follow its code.
+        const contracts = await refreshContracts(app, field).catch((err: Error) => {
+          console.warn(`[day2-field] ${app.name}: couldn't generate contracts: ${err.message}`);
+          return null;
+        });
         const report = await tick(app, {
           startWork,
-          gatherSignals: () =>
-            gatherSignalsForApp({
+          gatherSignals: async () => [
+            ...(await gatherSignalsForApp({
               id: app.id,
               appBaseUrl: app.appBaseUrl,
               ...(sentry && process.env.SENTRY_AUTH_TOKEN ? { sentryOrg: sentry.org, sentryProject: sentry.project } : {}),
-            }),
+            })),
+            ...(await fieldSignals(app, field)),
+          ],
+          extraItems: async () => {
+            if (await field.meta(app.id)) return []; // already reporting
+            const item = installItem(app, { key: await ingestKeys().forApp(app.id), endpoint: authConfig().publicUrl, candidates: contracts?.candidates ?? [] });
+            return item ? [item] : [];
+          },
         });
         const sync = await syncAppTrackers(app, tenant.integrations);
         console.log(

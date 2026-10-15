@@ -24,7 +24,8 @@ import { describeSync, jiraClient, linearClient, syncTracker, type TrackerClient
 import type { IntegrationsStore } from "./integrations-store";
 import { canAfford, meteredQuery, withCreditContext } from "./metered-query";
 import { FIX_MAX_BUDGET_USD, runFixAgent, runVerifierAgent } from "./agent";
-import { pushBranch } from "./git";
+import { cloneIsolatedWorkspace, pushBranch } from "./git";
+import { INSTALL_KEY, placeLibrary } from "./field-work";
 import { runPipeline, type PipelineDeps } from "./pipeline";
 import { listProposals } from "./proposals";
 import type { Signal } from "./signals/types";
@@ -110,8 +111,20 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
   try {
     const t = await withBacklog(file, (b) => ({ backlog: b, result: findTicket(b, ticketId) }));
     if (!t) return { status: "error", reason: "ticket is gone" };
+    // Installing field checks: day2 places the library files in the working
+    // copy itself; the agent only wires them in.
+    const install: Partial<PipelineDeps> =
+      t.source.key === INSTALL_KEY
+        ? {
+            cloneIsolatedWorkspace: async (src: string) => {
+              const cwd = await (deps.cloneIsolatedWorkspace ?? cloneIsolatedWorkspace)(src);
+              await placeLibrary(cwd);
+              return cwd;
+            },
+          }
+        : {};
     const result = await withCreditContext({ appId: app.id, appName: app.name, service: "agent_work", description: `${t.id}: ${t.title}` }, () =>
-      runPipeline(app.repoPath, reportForTicket(t), resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId), ...deps }),
+      runPipeline(app.repoPath, reportForTicket(t), resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId), ...deps, ...install }),
     );
     await withBacklog(file, (b) => {
       const cur = findTicket(b, ticketId);
@@ -401,7 +414,14 @@ export function reconcileApprovals(b: Backlog, states: Map<string, "MERGED" | "C
  */
 export async function tick(
   app: AppEntry,
-  opts: { gatherSignals?: () => Promise<Signal[]>; startWork?: boolean; start?: typeof startTicket; now?: Date } = {},
+  opts: {
+    gatherSignals?: () => Promise<Signal[]>;
+    /** Tickets day2 proposes beyond signals (e.g. installing field checks). */
+    extraItems?: () => Promise<IncomingItem[]>;
+    startWork?: boolean;
+    start?: typeof startTicket;
+    now?: Date;
+  } = {},
 ): Promise<TickReport> {
   const now = opts.now ?? new Date();
   const file = backlogFile(app);
@@ -413,6 +433,14 @@ export async function tick(
       console.warn(`[day2-backlog] ${app.id}: couldn't gather signals: ${(err as Error).message}`);
     }
   }
+  let extra: IncomingItem[] = [];
+  if (opts.extraItems) {
+    try {
+      extra = await opts.extraItems();
+    } catch (err) {
+      console.warn(`[day2-backlog] ${app.id}: couldn't prepare proposals: ${(err as Error).message}`);
+    }
+  }
   const prTickets = await withBacklog(file, (b) => ({
     backlog: b,
     result: b.tickets.filter((t) => t.state === "to_approve" && t.approval?.kind === "pr").map((t) => ({ id: t.id, pr: (t.approval as { number: number }).number })),
@@ -421,7 +449,7 @@ export async function tick(
   if (hasGitRemote(app.repoPath)) for (const p of prTickets) states.set(p.id, await prState(app.repoPath, p.pr));
 
   const report = await withBacklog(file, (b) => {
-    const ing = ingest(b, [...proposalItems(app), ...signalItems(signals)], now);
+    const ing = ingest(b, [...proposalItems(app), ...signalItems(signals), ...extra], now);
     const ranked = rankBacklog(ing.backlog, now);
     const rec = reconcileApprovals(ranked.backlog, states, now);
     return {

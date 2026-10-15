@@ -1,7 +1,6 @@
 import type { AppEntry } from "./apps-registry";
 import { work } from "./backlog-cli";
 import { metaAdsViaAgent } from "./ads";
-import { fetchAppEvents } from "./app-events";
 import { researchCompetitorDistributionAngles } from "./competitor-feed";
 import { authConfig } from "./auth";
 import { connectorMcpServers, findConnector } from "./connectors";
@@ -12,7 +11,8 @@ import { GROWTH_CONFIG_FILENAME, loadGrowthConfig } from "./growth-config";
 import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
 import { withCreditContext, type CreditContext } from "./metered-query";
 import type { AppProfile } from "./onboarding";
-import { adIdentities, platformTools, runAsTenant, type Tenant } from "./tenant";
+import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } from "./tenant";
+import { appEvents, pageHealth } from "./field-work";
 import { resolve } from "node:path";
 
 /**
@@ -59,7 +59,8 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
     ads: Object.keys(metaServers).length ? metaAdsViaAgent(metaServers) : null,
     adAccountId: process.env.DAY2_META_AD_ACCOUNT_ID?.trim() || null,
     metaPageId: async (appId) => (await adIdentities().get(appId))?.metaPageId ?? null,
-    events: (a, since) => fetchAppEvents(a.appBaseUrl, since),
+    events: (a, since) => appEvents(a, since, fieldStore()),
+    pageHealth: (a, path) => pageHealth(a, path, fieldStore()),
   };
 }
 

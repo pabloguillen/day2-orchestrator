@@ -1,0 +1,20 @@
+{
+  "name": "@day2/sensors",
+  "version": "0.1.0",
+  "description": "day2 field contracts: checks on the user's device that what should happen did happen, and reports \"expected X, actual Y\" when it didn't.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": { "types": "./src/index.ts", "import": "./dist/index.js" },
+    "./core": { "types": "./src/core.ts", "import": "./dist/core.js" }
+  },
+  "files": ["dist", "src"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "bun build src/index.ts src/core.ts --outdir dist --target browser --format esm --minify --sourcemap=linked",
+    "test": "bun test"
+  }
+}

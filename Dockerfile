@@ -22,6 +22,8 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 COPY src ./src
 COPY sdk ./sdk
+# The field-checks library: built into apps by day2 (field-work.ts).
+COPY packages ./packages
 
 # Customer app checkouts and day2's own state live on volumes.
 RUN mkdir -p /app/managed-repos /data && chown -R bun:bun /app/managed-repos /data

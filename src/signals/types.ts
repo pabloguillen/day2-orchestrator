@@ -24,7 +24,7 @@
  * `growth-arm-check.ts` render, never converted here.
  */
 
-export type SignalSource = "sentry" | "interaction-friction" | "ux-swarm" | "growth-diagnosis";
+export type SignalSource = "sentry" | "interaction-friction" | "ux-swarm" | "growth-diagnosis" | "field-contract";
 
 export type Signal = {
   /** Stable id for dedup across repeated scout runs — same discipline as

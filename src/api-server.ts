@@ -48,7 +48,7 @@ import {
 import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
-import { fetchAppEvents } from "./app-events";
+import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
 import { auditLoops, indexRepo, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
 import {
@@ -71,9 +71,12 @@ import { emailSignInAvailable, inviteMail, sendMail, signInLinkMail } from "./ma
 import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, listInstallationRepos, type InstallationRepo } from "./github-app";
 import { isMetaPageId } from "./ad-identities";
 import { allApps } from "./apps-store";
+import { handleIngest } from "./field-ingest";
 import {
   adIdentities,
   assertProductionReady,
+  fieldStore,
+  ingestKeys,
   platformTools,
   localOperatorName,
   localTenant,
@@ -1440,6 +1443,57 @@ route("POST", "/api/apps/:id/growth/loops/:loopId/build", async (_req, params, t
   return json({ ticket, ...(await loopsResponse(app)) }, { status: 201 });
 });
 
+// ---- Field checks (packages/sensors): what day2 checks on users' devices ----
+
+route("GET", "/api/apps/:id/field", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const store = fieldStore();
+  const now = new Date();
+  const [meta, contracts, health, backlog, key] = await Promise.all([
+    store.meta(app.id),
+    store.contracts(app.id),
+    store.health(app.id, new Date(now.getTime() - FIELD_WINDOW_DAYS * 86_400_000)),
+    loadBacklogFor(app),
+    ingestKeys().forApp(app.id),
+  ]);
+  const byId = new Map((contracts?.file.contracts ?? []).map((c) => [c.id, c]));
+  const ticketFor = (key: string) => {
+    const tk = backlog.tickets.find((x) => x.source.key === key);
+    return tk ? { id: tk.id, state: tk.state } : null;
+  };
+  const install = ticketFor(INSTALL_KEY);
+  const kind = appKind(app.repoPath);
+  return json({
+    status: meta ? "reporting" : install ? "installing" : kind === "web" ? "not_installed" : "unsupported",
+    platform: kind,
+    key,
+    endpoint: authConfig().publicUrl,
+    lastSeenAt: meta?.lastSeenAt ?? null,
+    lastRelease: meta?.lastRelease ?? null,
+    platforms: meta?.platforms ?? [],
+    contracts: contracts
+      ? {
+          screens: contracts.file.contracts.filter((c) => c.kind === "screen").length,
+          actions: contracts.file.contracts.filter((c) => c.kind === "action").length,
+          untagged: contracts.candidates.length,
+          generatedAt: contracts.generatedAt,
+        }
+      : null,
+    installTicket: install,
+    windowDays: FIELD_WINDOW_DAYS,
+    checks: health.map((h) => ({
+      contract: h.contract,
+      passes: h.passes,
+      failures: h.failures,
+      rejected: h.rejected,
+      devices: h.devices,
+      lastFailureAt: h.lastFailureAt,
+      finding: h.failures ? describeBroken(h, byId.get(h.contract)) : null,
+      ticket: ticketFor(`field:${h.contract}`),
+    })),
+  });
+});
+
 // ---- Experiments from ad to product ("bets") ----
 
 async function betsResponse(app: AppEntry) {
@@ -1455,7 +1509,7 @@ async function betsResponse(app: AppEntry) {
   if (changed) saveBets(path, { ...file, bets });
   const live = bets.filter((b) => b.liveAt);
   const since = live.map((b) => b.liveAt!).sort()[0];
-  const events = since ? await fetchAppEvents(app.appBaseUrl, since) : null;
+  const events = since ? await appEvents(app, since, fieldStore()) : null;
   return {
     bets: bets.map(({ campaign, ...b }) => ({
       ...b,
@@ -2135,6 +2189,12 @@ export function isAgentBackedPath(pathname: string): boolean {
   return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|growth\/research|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname) || pathname === "/api/apps";
 }
 
+async function ingestAppBaseUrl(appId: string, accountId: string): Promise<string | null> {
+  if (serverMode() === "local") return (await localTenant().apps.find(appId))?.appBaseUrl ?? null;
+  const rows = (await db()`SELECT app_base_url FROM apps WHERE id = ${appId} AND account_id = ${accountId}`) as Array<{ app_base_url: string | null }>;
+  return rows[0]?.app_base_url ?? null;
+}
+
 const SIGNED_OUT = () => json({ error: "Sign in to continue.", code: "signed_out" }, { status: 401 });
 
 /**
@@ -2142,6 +2202,16 @@ const SIGNED_OUT = () => json({ error: "Sign in to continue.", code: "signed_out
  * can call it directly (no port binding, no real network).
  */
 export async function handleRequest(req: Request): Promise<Response> {
+  // Reports from apps on users' devices: their own rules (public key,
+  // any origin the app runs on, size and rate limits) — field-ingest.ts.
+  if (new URL(req.url).pathname.startsWith("/api/ingest/")) {
+    try {
+      return await handleIngest(req, { keys: ingestKeys(), store: fieldStore(), appBaseUrl: ingestAppBaseUrl });
+    } catch (err) {
+      console.error("[day2-ingest]", err);
+      return new Response(null, { status: 500, headers: { "access-control-allow-origin": "*" } });
+    }
+  }
   if (req.method === "OPTIONS") {
     return withCors(new Response(null, { status: 204 }));
   }
@@ -2225,10 +2295,18 @@ function startBacklogTimer(): void {
   const minutes = Number(process.env.DAY2_BACKLOG_TICK_MINUTES ?? 15);
   if (!(minutes > 0)) return;
   let running = false;
+  let prunedAt = 0;
   const pass = async () => {
     if (running) return;
     running = true;
     try {
+      // Field reports past their keep-time go, once a day.
+      if (Date.now() - prunedAt > 86_400_000) {
+        prunedAt = Date.now();
+        await fieldStore()
+          .prune(new Date())
+          .catch((err: Error) => console.error("[day2-field] prune failed:", err.message));
+      }
       if (serverMode() === "accounts") {
         await db().begin(async (tx) => {
           const [got] = (await tx`SELECT pg_try_advisory_xact_lock(${BACKLOG_TICK_LOCK}) AS ok`) as Array<{ ok: boolean }>;

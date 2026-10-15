@@ -49,6 +49,9 @@ function fakeAds(): AdPlatform {
     async pause(id) {
       adCalls.push(`pause ${id}`);
     },
+    async resume(id) {
+      adCalls.push(`resume ${id}`);
+    },
     async setDailyBudget(id, usd) {
       adCalls.push(`budget ${id} ${usd}`);
     },
@@ -245,6 +248,28 @@ describe("the growth autopilot", () => {
     saveGrowthConfig(repoFile(GROWTH_CONFIG_FILENAME), setKillSwitch(setMonthlyBudget(defaultGrowthConfig(), 300), true));
     const off = await autopilotPass(app, deps({ now: later }));
     expect(off.paused.sort()).toEqual(["B-1", "B-2"]);
+  });
+
+  test("no paid traffic to a broken page: the ad is held, then turned back on when the page works", async () => {
+    let broken = true;
+    const health = async (_a: AppEntry, path: string) => (broken && path.startsWith("/go/") ? { ok: false, reason: "/go/x doesn't fit a 375 px wide screen" } : { ok: true, reason: "" });
+    await autopilotPass(app, deps());
+    shipPages();
+    const r = await autopilotPass(app, deps({ now: new Date("2026-10-15T12:00:00Z"), pageHealth: health }));
+    expect(r.launched).toEqual([]);
+    expect(r.skipped.join(" ")).toContain("page is broken");
+    broken = false;
+    await autopilotPass(app, deps({ now: new Date("2026-10-15T12:30:00Z"), pageHealth: health }));
+    expect(adCalls.filter((c) => c.startsWith("launch"))).toHaveLength(2);
+    broken = true;
+    const held = await autopilotPass(app, deps({ now: new Date("2026-10-15T13:00:00Z"), pageHealth: health }));
+    expect(held.paused.sort()).toEqual(["B-1", "B-2"]);
+    expect(loadBets(repoFile(BETS_FILENAME)).bets[0]!.campaign).toMatchObject({ status: "paused", heldFor: expect.stringContaining("doesn't fit") });
+    expect(loadAutopilotLog(repoFile(AUTOPILOT_LOG_FILENAME))[0]!.text).toContain("its page is broken");
+    broken = false;
+    await autopilotPass(app, deps({ now: new Date("2026-10-15T13:30:00Z"), pageHealth: health }));
+    expect(adCalls.filter((c) => c.startsWith("resume"))).toHaveLength(2);
+    expect(loadBets(repoFile(BETS_FILENAME)).bets[0]!.campaign).toMatchObject({ status: "active", heldFor: null });
   });
 
   test("the owner can turn it off; a working experiment gets more budget", async () => {

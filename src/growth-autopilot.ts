@@ -138,6 +138,8 @@ export type AutopilotDeps = {
   /** The Facebook Page this app's ads run under, if the operator assigned one. */
   metaPageId: (appId: string) => Promise<string | null>;
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
+  /** Whether a page passes its field checks (field-work.ts); absent = assume fine. */
+  pageHealth?: (app: AppEntry, path: string) => Promise<{ ok: boolean; reason: string }>;
   now?: Date;
 };
 
@@ -358,7 +360,7 @@ async function pauseAll(app: AppEntry, deps: AutopilotDeps, logPath: string, at:
 async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, logPath: string, at: string, now: Date, report: AutopilotReport) {
   const betsPath = resolve(app.repoPath, BETS_FILENAME);
   let file = loadBets(betsPath);
-  const needsAds = file.bets.some((b) => (b.status === "live" && !b.campaign) || b.campaign?.status === "active");
+  const needsAds = file.bets.some((b) => (b.status === "live" && !b.campaign) || b.campaign?.status === "active" || (b.campaign?.heldFor && b.status === "live"));
   if (!needsAds) return;
   if (!deps.ads || !deps.adAccountId) {
     report.skipped.push("ads: day2's Meta Ads isn't connected on this server yet.");
@@ -371,6 +373,35 @@ async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, l
     file = { ...file, bets: file.bets.map((b) => (b.id === id ? fn(b) : b)) };
     saveBets(betsPath, file);
   };
+
+  // No paid traffic to a broken page: hold its ad until the page works again.
+  const healthOf = async (b: Bet) => (deps.pageHealth ? deps.pageHealth(app, b.landingPath) : { ok: true, reason: "" });
+  for (const b of file.bets) {
+    const c = b.campaign;
+    if (!c || b.status !== "live") continue;
+    if (c.status === "active") {
+      const h = await healthOf(b);
+      if (h.ok) continue;
+      try {
+        await ads.pause(c.campaignId);
+        update(b.id, (x) => ({ ...x, campaign: { ...c, status: "paused", heldFor: h.reason } }));
+        report.paused.push(b.id);
+        log(logPath, { at, step: "ads", text: `Paused the ad for ${b.id}: its page is broken (${h.reason}). day2 is fixing it and turns the ad back on when the page works.` });
+      } catch (err) {
+        log(logPath, { at, step: "skipped", text: `Couldn't pause the ad for ${b.id}: ${(err as Error).message}` });
+      }
+    } else if (c.heldFor) {
+      const h = await healthOf(b);
+      if (!h.ok) continue;
+      try {
+        await ads.resume(c.campaignId);
+        update(b.id, (x) => ({ ...x, campaign: { ...c, status: "active", heldFor: null } }));
+        log(logPath, { at, step: "ads", text: `${b.id}'s page works again — turned its ad back on.` });
+      } catch (err) {
+        log(logPath, { at, step: "skipped", text: `Couldn't turn the ad for ${b.id} back on: ${(err as Error).message}` });
+      }
+    }
+  }
 
   // Running campaigns: read results (throttled), bill spend, decide.
   const since = file.bets.map((b) => b.liveAt).filter((x): x is string => Boolean(x)).sort()[0];
@@ -456,6 +487,11 @@ async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, l
   for (const b of waiting) {
     const link = betLink(b, app.appBaseUrl);
     if (!link) continue;
+    const page = await healthOf(b);
+    if (!page.ok) {
+      report.skipped.push(`ads: ${b.id}'s page is broken (${page.reason})`);
+      continue;
+    }
     // Start at half the experiment's share and earn the rest by working.
     const daily = Math.max(MIN_DAILY_AD_USD, Math.round((monthlyAds / 30 / Math.max(1, running + 1) / 2) * 100) / 100);
     const check = await authorize(deps.credits, { appId: app.id, appName: app.name, service: "paid_ads", maxCostUsd: daily * AUTHORIZE_DAYS });

@@ -146,3 +146,38 @@ describe("market research and connected tools", () => {
     expect((await call("POST", "/api/platform/tools/nope/connect")).status).toBe(404);
   });
 });
+
+describe("field checks", () => {
+  test("an app's report arrives with its key and shows as a broken check", async () => {
+    const before = await call("GET", `/api/apps/${appId}/field`);
+    expect(before.status).toBe(200);
+    expect(before.body).toMatchObject({ status: "not_installed", platform: "web", lastSeenAt: null, checks: [] });
+    const key = before.body.key as string;
+    expect(key).toMatch(/^d2k_/);
+
+    const batch = {
+      v: 1,
+      device: { id: "dev-12345678", platform: "web", viewport: { w: 375, h: 700 } },
+      passes: { "screen:/": 3 },
+      failures: [1, 2, 3].map((i) => ({
+        contract: "builtin:screen.fits /",
+        at: new Date().toISOString(),
+        route: "/",
+        expected: "fits the screen",
+        actual: { overflowPx: 20 + i, wider: ["div#hero"], clipped: [], viewport: { w: 375, h: 700 } },
+        steps: ["screen /"],
+      })),
+      events: [{ type: "visit", at: new Date().toISOString(), acquisition: { channel: "search" } }],
+    };
+    const sent = await handleRequest(new Request(`http://localhost:4700/api/ingest/${key}`, { method: "POST", body: JSON.stringify(batch), headers: { "content-type": "text/plain" } }));
+    expect(sent.status).toBe(204);
+    expect(sent.headers.get("access-control-allow-origin")).toBe("*");
+
+    const after = await call("GET", `/api/apps/${appId}/field`);
+    expect(after.body).toMatchObject({ status: "reporting", platforms: ["web"] });
+    const fits = (after.body.checks as Array<{ contract: string; failures: number; finding: string }>).find((c) => c.contract === "builtin:screen.fits /")!;
+    expect(fits).toMatchObject({ failures: 3, finding: "/ doesn't fit a 375 px wide screen (div#hero too wide)" });
+    const contracts = await handleRequest(new Request(`http://localhost:4700/api/ingest/${key}/contracts`));
+    expect(contracts.status).toBe(200);
+  });
+});
