@@ -22,8 +22,8 @@ import {
 import { estimateCredits } from "./backlog-tell";
 import { describeSync, jiraClient, linearClient, syncTracker, type TrackerClient } from "./backlog-trackers";
 import type { IntegrationsStore } from "./integrations-store";
-import { meteredQuery, withCreditContext } from "./metered-query";
-import { runFixAgent, runVerifierAgent } from "./agent";
+import { canAfford, meteredQuery, withCreditContext } from "./metered-query";
+import { FIX_MAX_BUDGET_USD, runFixAgent, runVerifierAgent } from "./agent";
 import { pushBranch } from "./git";
 import { runPipeline, type PipelineDeps } from "./pipeline";
 import { listProposals } from "./proposals";
@@ -143,11 +143,13 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
     await withBacklog(file, (b) => {
       const cur = findTicket(b, ticketId);
       if (!cur) return { backlog: b, result: null };
-      const moved = updateTicket(b, ticketId, { state: "todo" }, new Date(), { kind: "day2" });
+      const moved = cur.state === "todo" ? { backlog: b, ticket: cur } : updateTicket(b, ticketId, { state: "todo" }, new Date(), { kind: "day2" });
+      const text = `stopped: ${reason.slice(0, 300)}`;
+      if (moved.ticket.activity.at(-1)?.text === text) return { backlog: moved.backlog, result: null };
       return {
         backlog: putTicket(moved.backlog, {
           ...moved.ticket,
-          activity: [...moved.ticket.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text: `stopped: ${reason.slice(0, 300)}` }],
+          activity: [...moved.ticket.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text }],
         }),
         result: null,
       };
@@ -169,13 +171,37 @@ export type StartResult =
 export async function startTicket(
   app: AppEntry,
   ticketId: string,
-  opts: { run?: (app: AppEntry, ticketId: string) => Promise<unknown>; plan?: (app: AppEntry, ticketId: string) => Promise<unknown> } = {},
+  opts: {
+    run?: (app: AppEntry, ticketId: string) => Promise<unknown>;
+    plan?: (app: AppEntry, ticketId: string) => Promise<unknown>;
+    /** Who's starting it: the owner (a click) or day2's backlog autopilot. */
+    by?: "user" | "day2";
+    afford?: typeof canAfford;
+  } = {},
 ): Promise<StartResult> {
+  const by = opts.by ?? "user";
   if (!hasGitRemote(app.repoPath)) {
     return { ok: false, status: 409, reason: `"${app.name}" has no connected git remote — day2 needs one to open a pull request.` };
   }
   if (isRunning(app.id, ticketId)) return { ok: false, status: 409, reason: "day2 is already working on this ticket." };
   const file = backlogFile(app);
+
+  // Credits first: when the work can't run, nothing moves. The autopilot
+  // notes it on the ticket once (not on every pass); the owner gets the
+  // reason straight back.
+  const pre = await withBacklog(file, (b) => {
+    const t = findTicket(b, ticketId);
+    return { backlog: b, result: t ? { state: t.state, planFirst: needsPlanApproval(b, t) && t.approval?.kind !== "plan" } : null };
+  });
+  if (pre && pre.state !== "doing" && pre.state !== "done") {
+    const planFirst = pre.planFirst;
+    const money = await (opts.afford ?? canAfford)(app, "agent_work", planFirst ? PLAN_MAX_BUDGET_USD : FIX_MAX_BUDGET_USD);
+    if (!money.ok) {
+      if (by === "day2") await noteWaiting(file, ticketId, `waiting for credits: ${money.reason}`);
+      return { ok: false, status: 402, reason: money.reason };
+    }
+  }
+
   const outcome = await withBacklog<StartResult>(file, (b) => {
     const t = findTicket(b, ticketId);
     if (!t) return { backlog: b, result: { ok: false, status: 404, reason: `No ticket ${ticketId}.` } };
@@ -187,7 +213,7 @@ export async function startTicket(
     }
     const planFirst = needsPlanApproval(b, t) && t.approval?.kind !== "plan";
     const now = new Date();
-    const moved = updateTicket(b, ticketId, { state: "doing" }, now, { kind: "user" });
+    const moved = updateTicket(b, ticketId, { state: "doing" }, now, { kind: by });
     const ticket: Ticket = {
       ...moved.ticket,
       progress: { step: 1, of: planFirst ? 2 : STEPS, label: planFirst ? "writing a plan" : "preparing an isolated copy" },
@@ -202,6 +228,18 @@ export async function startTicket(
   const job = outcome.started === "plan" ? (opts.plan ?? planTicket)(app, ticketId) : (opts.run ?? runTicket)(app, ticketId);
   void job.catch((err) => console.error(`[day2-backlog] ${ticketId}:`, err));
   return outcome;
+}
+
+/** Adds a day2 note to the ticket unless it's already the latest one —
+ * so a condition that lasts (no credits) is said once, not every pass. */
+async function noteWaiting(file: string, ticketId: string, text: string): Promise<void> {
+  await withBacklog(file, (b) => {
+    const t = findTicket(b, ticketId);
+    if (!t) return { backlog: b, result: null };
+    const last = [...t.activity].reverse().find((a) => a.actor === "day2");
+    if (last?.text === text) return { backlog: b, result: null };
+    return { backlog: putTicket(b, { ...t, activity: [...t.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text }] }), result: null };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +431,10 @@ export async function tick(
   });
   if (opts.startWork && hasGitRemote(app.repoPath)) {
     for (const id of report.next) {
-      const r = await (opts.start ?? startTicket)(app, id);
+      const r = await (opts.start ?? startTicket)(app, id, { by: "day2" });
       if (r.ok) report.started.push(id);
+      // Out of credits for one means out for the rest this pass.
+      else if (r.status === 402) break;
     }
   }
   return { created: report.created, updated: report.updated, reranked: report.reranked, reconciled: report.reconciled, started: report.started };

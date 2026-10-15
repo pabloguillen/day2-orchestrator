@@ -6,7 +6,10 @@ const query = meteredQuery("agent_work", "Fix");
 
 const MODEL = process.env.DAY2_MODEL ?? "claude-sonnet-5";
 const MAX_TURNS = 60;
-const MAX_BUDGET_USD = 3;
+/** The most one fix run may cost — also what starting a ticket checks the
+ * credits against, before anything moves. */
+export const FIX_MAX_BUDGET_USD = 3;
+const MAX_BUDGET_USD = FIX_MAX_BUDGET_USD;
 
 export type AgentRunResult = {
   finalText: string;

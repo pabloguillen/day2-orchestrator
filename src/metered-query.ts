@@ -75,6 +75,18 @@ type QueryParams = Parameters<typeof sdkQuery>[0];
  * the pre-check has to assume something; every current call site sets one. */
 const DEFAULT_MAX_COST_USD = 1;
 
+/**
+ * Whether the payer for this app could afford a run costing up to
+ * `maxCostUsd` right now — the same check a metered run makes, done before
+ * starting so nothing moves (or gets logged) when it can't run.
+ */
+export async function canAfford(app: { id: string; name: string; repoPath: string }, service: CreditService, maxCostUsd: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!creditsEnabled()) return { ok: true };
+  const payer = await payerFor(app.repoPath);
+  const check = await authorize(payer.store, { appId: app.id, appName: app.name, service, maxCostUsd });
+  return check.ok ? { ok: true } : { ok: false, reason: check.reason };
+}
+
 export function meteredQuery(defaultService: CreditService, label = "Agent run") {
   return async function* query(params: QueryParams): AsyncGenerator<SDKMessage, void> {
     if (!creditsEnabled()) {

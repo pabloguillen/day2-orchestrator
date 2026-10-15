@@ -94,6 +94,34 @@ describe("working on a ticket", () => {
     expect(await startTicket(app, "D2-99", { run: async () => {} })).toMatchObject({ ok: false, status: 404 });
   });
 
+  test("out of credits: nothing moves; the autopilot says so once, not every pass", async () => {
+    seed();
+    const broke = async () => ({ ok: false as const, reason: "Not enough credits — this can use up to 855 and 400 are left. Top up or change your plan." });
+    let ran = false;
+    for (let pass = 0; pass < 3; pass++) {
+      const r = await startTicket(app, "D2-1", { by: "day2", afford: broke, run: async () => void (ran = true) });
+      expect(r).toMatchObject({ ok: false, status: 402 });
+    }
+    expect(ran).toBe(false);
+    const t = findTicket(loadBacklog(backlogFile(app)), "D2-1")!;
+    expect(t.state).toBe("todo");
+    const notes = t.activity.filter((a) => a.text.startsWith("waiting for credits"));
+    expect(notes).toHaveLength(1);
+    expect(t.activity.some((a) => a.kind === "state")).toBe(false);
+    // The owner clicking Start gets the reason back; nothing is logged.
+    const mine = await startTicket(app, "D2-1", { afford: broke, run: async () => {} });
+    expect(mine).toMatchObject({ ok: false, status: 402, reason: expect.stringContaining("Not enough credits") });
+    expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.activity).toHaveLength(t.activity.length);
+  });
+
+  test("when day2 starts a ticket, the move is day2's, not the owner's", async () => {
+    seed();
+    await startTicket(app, "D2-1", { by: "day2", afford: async () => ({ ok: true }), run: async () => {} });
+    const t = findTicket(loadBacklog(backlogFile(app)), "D2-1")!;
+    const move = t.activity.find((a) => a.kind === "state")!;
+    expect(move.actor).toBe("day2");
+  });
+
   test("plans are parsed strictly", () => {
     expect(parsePlan('{"plan":"1. a\\n2. b","doneWhen":["x",3],"effort":"M"}')).toEqual({ plan: "1. a\n2. b", doneWhen: ["x"], effort: "M" });
     expect(parsePlan('{"doneWhen":[]}')).toBeNull();
