@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { Batch, ContractFile, DeviceInfo, Failure } from "../packages/sensors/src/types";
 import type { Candidate } from "./contracts-gen";
 import type { EventLike } from "./metrics/types";
+import type { RetentionSnapshot } from "./retention";
 
 /**
  * What apps report from users' devices (packages/sensors), per app:
@@ -15,6 +16,10 @@ import type { EventLike } from "./metrics/types";
 
 export const FAILURE_DAYS = 30;
 export const EVENT_DAYS = 180;
+/** Active days per user, for lifecycle states and return rates. */
+export const USER_DAY_DAYS = 400;
+/** A user's first/last seen, so someone back after a long time isn't "new". */
+export const USER_DAYS = 730;
 const DAY = 86_400_000;
 
 export type StoredFailure = Failure & { deviceId: string; release: string | null; device: DeviceInfo };
@@ -51,6 +56,9 @@ export type SimulationRun = {
   skipped: string[];
 };
 
+/** One user's activity: the days they were active (UTC, "YYYY-MM-DD"). */
+export type UserActivity = { user: string; firstSeen: string; lastSeen: string; days: string[] };
+
 /** Simulated devices carry ids starting with this. */
 export const SIM_DEVICE_PREFIX = "sim-";
 export type StoredContracts = { file: ContractFile; candidates: Candidate[]; head: string | null; generatedAt: string };
@@ -65,6 +73,10 @@ export interface FieldStore {
   setSimulation(appId: string, run: SimulationRun): Promise<void>;
   simulation(appId: string): Promise<SimulationRun | null>;
   contracts(appId: string): Promise<StoredContracts | null>;
+  /** Users last seen on or after `sinceDay` with their active days since then; plus how many were last seen before. */
+  activity(appId: string, sinceDay: string): Promise<{ users: UserActivity[]; older: number }>;
+  setRetention(appId: string, snapshot: RetentionSnapshot): Promise<void>;
+  retention(appId: string): Promise<RetentionSnapshot | null>;
   prune(now: Date): Promise<void>;
 }
 
@@ -79,6 +91,18 @@ export const newIngestKey = () => `d2k_${randomBytes(18).toString("base64url")}`
 export const INGEST_KEY_RE = /^d2k_[A-Za-z0-9_-]{20,40}$/;
 
 const dayOf = (iso: string) => iso.slice(0, 10);
+
+/** The days each identified user was active in a batch. */
+function userDays(batch: Batch): Map<string, Set<string>> {
+  const m = new Map<string, Set<string>>();
+  for (const e of batch.events) {
+    if (!e.user) continue;
+    const s = m.get(e.user) ?? new Set();
+    s.add(dayOf(e.at));
+    m.set(e.user, s);
+  }
+  return m;
+}
 
 /** Splits a batch's counters: held, broken beyond what was reported in full, rejected input. */
 function counters(batch: Batch): Array<{ contract: string; passes: number; failures: number }> {
@@ -155,6 +179,8 @@ function readLines<T>(path: string): T[] {
     });
 }
 
+type FileUsers = Record<string, { first: string; days: string[] }>;
+
 export function fileFieldStore(root: string): FieldStore {
   const dir = (appId: string) => join(root, appId.replace(/[^A-Za-z0-9_-]/g, "_"));
   type Counts = Record<string, { p: number; f: number }>;
@@ -173,7 +199,17 @@ export function fileFieldStore(root: string): FieldStore {
       writeJson(join(d, "counts.json"), counts);
       const { id: deviceId, ...device } = batch.device;
       for (const f of batch.failures) appendFileSync(join(d, "failures.jsonl"), `${JSON.stringify({ ...f, deviceId, release: batch.release ?? null, device: { id: deviceId, ...device } })}\n`);
-      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify({ type: e.type, at: e.at, deviceId, ...(e.acquisition ? { acquisition: e.acquisition } : {}) })}\n`);
+      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify({ type: e.type, at: e.at, deviceId, ...(e.user ? { userId: e.user } : {}), ...(e.acquisition ? { acquisition: e.acquisition } : {}) })}\n`);
+      const active = userDays(batch);
+      if (active.size) {
+        const users = readJson<FileUsers>(join(d, "users.json"), {});
+        for (const [u, days] of active) {
+          const cur = (users[u] ??= { first: [...days].sort()[0]!, days: [] });
+          cur.days = [...new Set([...cur.days, ...days])].sort();
+          if (cur.days[0]! < cur.first) cur.first = cur.days[0]!;
+        }
+        writeJson(join(d, "users.json"), users);
+      }
       const meta = readJson<FieldMeta | null>(join(d, "meta.json"), null);
       writeJson(join(d, "meta.json"), {
         lastSeenAt: now.toISOString(),
@@ -231,6 +267,23 @@ export function fileFieldStore(root: string): FieldStore {
     async simulation(appId) {
       return readJson<SimulationRun | null>(join(dir(appId), "simulation.json"), null);
     },
+    async activity(appId, sinceDay) {
+      const all = readJson<FileUsers>(join(dir(appId), "users.json"), {});
+      const users: UserActivity[] = [];
+      let older = 0;
+      for (const [user, u] of Object.entries(all)) {
+        const lastSeen = u.days.at(-1) ?? u.first;
+        if (lastSeen < sinceDay) older++;
+        else users.push({ user, firstSeen: u.first, lastSeen, days: u.days.filter((x) => x >= sinceDay) });
+      }
+      return { users, older };
+    },
+    async setRetention(appId, snapshot) {
+      writeJson(join(dir(appId), "retention.json"), snapshot);
+    },
+    async retention(appId) {
+      return readJson<RetentionSnapshot | null>(join(dir(appId), "retention.json"), null);
+    },
     async prune(now) {
       if (!existsSync(root)) return;
       const { readdirSync } = await import("node:fs");
@@ -246,6 +299,18 @@ export function fileFieldStore(root: string): FieldStore {
           if (!existsSync(p)) continue;
           const keep = readLines<{ at: string }>(p).filter((x) => x.at >= cut);
           writeFileSync(p, keep.map((x) => JSON.stringify(x)).join("\n") + (keep.length ? "\n" : ""));
+        }
+        const users = readJson<FileUsers>(join(d, "users.json"), {});
+        if (Object.keys(users).length) {
+          const daysCut = dayOf(new Date(now.getTime() - USER_DAY_DAYS * DAY).toISOString());
+          const usersCut = dayOf(new Date(now.getTime() - USER_DAYS * DAY).toISOString());
+          for (const [k, u] of Object.entries(users)) {
+            const last = u.days.at(-1) ?? u.first;
+            // The last day is kept with the user (as last seen) until the user goes.
+            if (last < usersCut) delete users[k];
+            else u.days = u.days.filter((x, i, a) => x >= daysCut || i === a.length - 1);
+          }
+          writeJson(join(d, "users.json"), users);
         }
         const counts = readJson<Counts>(join(d, "counts.json"), {});
         const dayCut = dayOf(eventCut);
@@ -294,7 +359,13 @@ export function dbFieldStore(sql: SQL): FieldStore {
                    VALUES (${appId}, ${f.contract.slice(0, 300)}, ${f.at}, ${batch.device.id}, ${batch.release ?? null}, ${batch.device}::jsonb, ${f}::jsonb)`;
         }
         for (const e of batch.events) {
-          await tx`INSERT INTO field_events (app_id, at, device_id, type, acquisition) VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.type}, ${e.acquisition ?? null}::jsonb)`;
+          await tx`INSERT INTO field_events (app_id, at, device_id, user_id, type, acquisition) VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.user ?? null}, ${e.type}, ${e.acquisition ?? null}::jsonb)`;
+        }
+        for (const [user, days] of userDays(batch)) {
+          const sorted = [...days].sort();
+          await tx`INSERT INTO field_users (app_id, user_id, first_seen, last_seen) VALUES (${appId}, ${user}, ${sorted[0]!}, ${sorted.at(-1)!})
+                   ON CONFLICT (app_id, user_id) DO UPDATE SET first_seen = LEAST(field_users.first_seen, EXCLUDED.first_seen), last_seen = GREATEST(field_users.last_seen, EXCLUDED.last_seen)`;
+          for (const day of sorted) await tx`INSERT INTO field_user_days (app_id, user_id, day) VALUES (${appId}, ${user}, ${day}) ON CONFLICT DO NOTHING`;
         }
         await tx`INSERT INTO field_meta (app_id, last_seen_at, last_release, platforms) VALUES (${appId}, ${now.toISOString()}, ${batch.release ?? null}, ARRAY[${batch.device.platform}]::text[])
                  ON CONFLICT (app_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
@@ -322,13 +393,14 @@ export function dbFieldStore(sql: SQL): FieldStore {
       return rows.map(toFailure);
     },
     async events(appId, since) {
-      const rows = (await sql`SELECT at, device_id, type, acquisition FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
+      const rows = (await sql`SELECT at, device_id, user_id, type, acquisition FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
         at: Date;
         device_id: string;
+        user_id: string | null;
         type: string;
         acquisition: EventLike["acquisition"] | string | null;
       }>;
-      return rows.map((r) => ({ type: r.type, at: new Date(r.at).toISOString(), deviceId: r.device_id, ...(r.acquisition ? { acquisition: parse(r.acquisition) } : {}) }));
+      return rows.map((r) => ({ type: r.type, at: new Date(r.at).toISOString(), deviceId: r.device_id, ...(r.user_id ? { userId: r.user_id } : {}), ...(r.acquisition ? { acquisition: parse(r.acquisition) } : {}) }));
     },
     async meta(appId) {
       const rows = (await sql`SELECT last_seen_at, last_release, platforms FROM field_meta WHERE app_id = ${appId}`) as Array<{ last_seen_at: Date; last_release: string | null; platforms: string[] }>;
@@ -357,7 +429,26 @@ export function dbFieldStore(sql: SQL): FieldStore {
       const rows = (await sql`SELECT run FROM field_simulations WHERE app_id = ${appId}`) as Array<{ run: SimulationRun | string }>;
       return rows[0] ? parse(rows[0].run) : null;
     },
+    async activity(appId, sinceDay) {
+      const rows = (await sql`SELECT u.user_id, u.first_seen::text AS first_seen, u.last_seen::text AS last_seen,
+                                     COALESCE(array_agg(d.day::text ORDER BY d.day) FILTER (WHERE d.day IS NOT NULL), '{}') AS days
+                              FROM field_users u LEFT JOIN field_user_days d ON d.app_id = u.app_id AND d.user_id = u.user_id AND d.day >= ${sinceDay}
+                              WHERE u.app_id = ${appId} AND u.last_seen >= ${sinceDay}
+                              GROUP BY u.user_id, u.first_seen, u.last_seen`) as Array<{ user_id: string; first_seen: string; last_seen: string; days: string[] }>;
+      const older = (await sql`SELECT COUNT(*)::int AS n FROM field_users WHERE app_id = ${appId} AND last_seen < ${sinceDay}`) as Array<{ n: number }>;
+      return { users: rows.map((r) => ({ user: r.user_id, firstSeen: r.first_seen, lastSeen: r.last_seen, days: r.days })), older: older[0]?.n ?? 0 };
+    },
+    async setRetention(appId, snapshot) {
+      await sql`INSERT INTO app_retention (app_id, snapshot, at) VALUES (${appId}, ${snapshot}::jsonb, ${snapshot.at})
+                ON CONFLICT (app_id) DO UPDATE SET snapshot = EXCLUDED.snapshot, at = EXCLUDED.at`;
+    },
+    async retention(appId) {
+      const rows = (await sql`SELECT snapshot FROM app_retention WHERE app_id = ${appId}`) as Array<{ snapshot: RetentionSnapshot | string }>;
+      return rows[0] ? parse(rows[0].snapshot) : null;
+    },
     async prune(now) {
+      await sql`DELETE FROM field_user_days WHERE day < ${dayOf(new Date(now.getTime() - USER_DAY_DAYS * DAY).toISOString())}`;
+      await sql`DELETE FROM field_users WHERE last_seen < ${dayOf(new Date(now.getTime() - USER_DAYS * DAY).toISOString())}`;
       await sql`DELETE FROM field_failures WHERE at < ${new Date(now.getTime() - FAILURE_DAYS * DAY).toISOString()}`;
       await sql`DELETE FROM field_events WHERE at < ${new Date(now.getTime() - EVENT_DAYS * DAY).toISOString()}`;
       await sql`DELETE FROM field_counts WHERE day < ${dayOf(new Date(now.getTime() - EVENT_DAYS * DAY).toISOString())}`;

@@ -14,6 +14,8 @@ export type EventLike = {
   type: string;
   at: string; // ISO 8601
   deviceId: string;
+  /** The app's user, hashed (packages/sensors `hashUser`), when the app identified them. */
+  userId?: string;
   metadata?: unknown;
   acquisition?: {
     channel?: string;

@@ -14,7 +14,7 @@ That's a fact, not a heuristic. Rage taps and drop-off spikes stay hints.
 
 | Part | Where | What it does |
 |---|---|---|
-| Library | `packages/sensors` (`@day2/sensors`, `@day2/sensors/native`) | Runs in the app (web, React Native, Expo). Checks contracts, sends small JSON batches. About 7 KB (web) / 6 KB (native) gzipped, no dependencies. |
+| Library | `packages/sensors` (`@day2/sensors`, `@day2/sensors/native`) | Runs in the app (web, React Native, Expo). Checks contracts, sends small JSON batches. About 9 KB (web) / 8 KB (native) gzipped, no dependencies. |
 | Contract generator | `src/contracts-gen.ts` | Reads the app's code (TypeScript parser) and writes the contracts. |
 | Ingest | `src/field-ingest.ts`, `POST /api/ingest/<key>` | Receives batches: validates, re-shapes, rate-limits, stores. |
 | Store | `src/field-store.ts` | Postgres in production (`006_field_contracts.sql`, `007_field_simulations.sql`), files locally. |
@@ -122,6 +122,9 @@ and new releases before anyone does.
 - No paid traffic to a broken page. Before launching an ad, and on every pass
   while it runs, day2 checks the page's contracts for the last day. A broken page
   holds its ad, and day2 turns it back on when the page works again.
+
+Retention (lifecycle states, treatments with holdouts) builds on the same
+library: `day2.identify` and `day2.treatment` — see `docs/retention.md`.
 
 ## Privacy and safety
 

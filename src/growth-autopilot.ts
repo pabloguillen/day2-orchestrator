@@ -28,6 +28,7 @@ import { authorize, CreditsError, type CreditStore } from "./credits";
 import { billAdSpend, type AdPlatform } from "./ads";
 import type { CompetitorAngleInsight } from "./competitor-feed";
 import type { EventLike } from "./metrics/types";
+import { retentionPass, type RetentionDeps } from "./retention-pass";
 
 /**
  * The growth autopilot: day2 growing an app with nobody triggering anything.
@@ -80,7 +81,7 @@ export function saveAutopilot(path: string, s: AutopilotSettings): void {
   renameSync(tmp, path);
 }
 
-export type AutopilotEntry = { at: string; step: "built_in" | "research" | "experiment" | "ads" | "skipped"; text: string; credits?: number };
+export type AutopilotEntry = { at: string; step: "built_in" | "retention" | "research" | "experiment" | "ads" | "skipped"; text: string; credits?: number };
 
 const KEEP_LOG = 300;
 
@@ -140,6 +141,8 @@ export type AutopilotDeps = {
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
   /** Whether a page passes its field checks (field-work.ts); absent = assume fine. */
   pageHealth?: (app: AppEntry, path: string) => Promise<{ ok: boolean; reason: string }>;
+  /** Retention (retention.ts): the field store and the research agent; absent = skipped. */
+  retention?: RetentionDeps;
   now?: Date;
 };
 
@@ -148,6 +151,7 @@ export type AutopilotReport = {
   benchmarked: boolean;
   improvementsCreated: string[];
   undone: string[];
+  retentionTickets: string[];
   researched: boolean; experimentsCreated: string[]; launched: string[]; paused: string[]; scaled: string[]; skipped: string[] };
 
 export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise<AutopilotReport> {
@@ -155,7 +159,7 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
   const at = now.toISOString();
   const file = (f: string) => resolve(app.repoPath, f);
   const logPath = file(AUTOPILOT_LOG_FILENAME);
-  const report: AutopilotReport = { ticketsCreated: [], benchmarked: false, improvementsCreated: [], undone: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
+  const report: AutopilotReport = { ticketsCreated: [], benchmarked: false, improvementsCreated: [], undone: [], retentionTickets: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
   const settings = loadAutopilot(file(AUTOPILOT_FILENAME));
   const killSwitch = loadGrowthConfig(file(GROWTH_CONFIG_FILENAME)).budget.killSwitch;
 
@@ -195,6 +199,18 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
 
   // 1b. Make what's there as good as the leading apps in the category.
   await improveBuiltIn(app, profile, deps, logPath, at, now, report);
+
+  // 1c. Keep the users it has: lifecycle states, treatments, holdouts.
+  if (deps.retention) {
+    try {
+      const r = await retentionPass(app, profile, deps.retention, (text, credits) => log(logPath, { at, step: "retention", text, ...(credits ? { credits } : {}) }), now);
+      report.retentionTickets.push(...r.ticketsCreated);
+      report.undone.push(...r.undone);
+      report.skipped.push(...r.skipped);
+    } catch (err) {
+      report.skipped.push(`retention: ${(err as Error).message}`);
+    }
+  }
 
   // 2. Research, on a schedule.
   const researchPath = file(MARKET_RESEARCH_FILENAME);

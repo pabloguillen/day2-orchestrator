@@ -224,6 +224,9 @@ export function appKind(repoPath: string): AppKind {
   return "web";
 }
 
+const IDENTIFY_STEP = (n: number) =>
+  `${n}. When a user signs in or a signed-in session is restored, call day2.identify(user.id) (the app's own id; day2 only receives a salted hash); on sign-out, day2.identify(null). Without accounts, skip this. Only after consent where the app's markets require it.`;
+
 export function installItem(app: AppEntry, opts: { key: string; endpoint: string; candidates: Candidate[] }): IncomingItem | null {
   const kind = appKind(app.repoPath);
   if (kind !== "web" && kind !== "react-native") return null;
@@ -242,8 +245,9 @@ export function installItem(app: AppEntry, opts: { key: string; endpoint: string
         `2. Screens: with Expo Router, call day2.route(pathname) whenever usePathname() changes; with React Navigation, call day2.trackNavigation(navigationRef) in the NavigationContainer's onReady.`,
         `3. Spread {...useDay2Mark("loading")} on loading spinners and {...useDay2Mark("error")} on input error messages.`,
         `4. Where the app records sign-ups and first value, call day2.track("signup") and day2.track("activated"); for sharing and invites, day2.track("shared") / day2.track("invite_sent").`,
+        IDENTIFY_STEP(5),
         ...(tag.length
-          ? [`5. Wrap these press handlers so their checks can run: onPress={day2.action("<name>", handler)}`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → day2.action("${c.name}", …)`)]
+          ? [`6. Wrap these press handlers so their checks can run: onPress={day2.action("<name>", handler)}`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → day2.action("${c.name}", …)`)]
           : []),
       ]
     : [
@@ -254,7 +258,8 @@ export function installItem(app: AppEntry, opts: { key: string; endpoint: string
         "```",
         `2. Mark loading indicators with aria-busy="true" (or data-day2-loading) and input error messages with role="alert" (or data-day2-error), where they aren't already.`,
         `3. Where the app records sign-ups and first value, call day2.track("signup") and day2.track("activated"); for sharing and invites, day2.track("shared") / day2.track("invite_sent").`,
-        ...(tag.length ? [`4. Add data-day2-action to these elements so their checks can run (name as given):`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → data-day2-action="${c.name}"`)] : []),
+        IDENTIFY_STEP(4),
+        ...(tag.length ? [`5. Add data-day2-action to these elements so their checks can run (name as given):`, ...tag.map((c) => `   - ${c.origin} "${c.label}" → data-day2-action="${c.name}"`)] : []),
       ];
   const n = steps.filter((l) => /^\d\./.test(l)).length + 1;
   return {
@@ -274,6 +279,7 @@ export function installItem(app: AppEntry, opts: { key: string; endpoint: string
       "startDay2 is called once at startup with the key and endpoint above",
       native ? "Screen changes reach day2 (day2.route or day2.trackNavigation)" : "Loading indicators carry aria-busy or data-day2-loading; error messages role=alert or data-day2-error",
       "Sign-up and first value call day2.track",
+      "day2.identify runs on sign-in and session restore, and with null on sign-out",
       ...(tag.length ? [native ? "The listed press handlers are wrapped in day2.action" : "The listed elements carry their data-day2-action names"] : []),
       "A test shows day2 is started exactly once with the key and endpoint",
       "The app builds and its tests pass",
@@ -301,7 +307,7 @@ export async function sensorsBundle(kind: "web" | "react-native" = "web"): Promi
   return text;
 }
 
-const TYPES = `export type Day2 = { track(type: string): void; check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void; setIdentity(identity: "session" | "device"): void; flush(): void; stop(): void };
+const TYPES = `export type Day2 = { track(type: string): void; check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void; setIdentity(identity: "session" | "device"): void; identify(userId: string | null): void; treatment(id: string, holdout?: number): "on" | "holdout"; flush(): void; stop(): void };
 export type StartOptions = { key: string; endpoint: string; release?: string; contracts?: unknown; fetchContracts?: boolean; identity?: "session" | "device"; layoutSampleRate?: number; enabled?: boolean };
 export declare function startDay2(opts: StartOptions): Day2;
 `;
@@ -312,6 +318,8 @@ const NATIVE_TYPES = `export type Day2Native = {
   route(name: string): void;
   trackNavigation(ref: { addListener(event: "state", cb: () => void): () => void; getCurrentRoute(): { name: string } | undefined }): () => void;
   action<A extends unknown[], R>(name: string, handler?: (...args: A) => R, opts?: { testID?: string; label?: string }): (...args: A) => R | undefined;
+  identify(userId: string | null): void;
+  treatment(id: string, holdout?: number): "on" | "holdout";
   flush(): void;
   stop(): void;
 };
@@ -320,13 +328,40 @@ export declare function startDay2(opts: NativeOptions): Day2Native;
 export declare function useDay2Mark(id: string): { onLayout: (e: { nativeEvent: { layout: { width: number; height: number } } }) => void };
 `;
 
-/** Puts the library files into a working copy (the install ticket's clone). */
+const LIFECYCLE_TYPES = `export type Rhythm = "daily" | "weekly" | "monthly";
+export type LifecycleState = "new" | "current" | "reactivated" | "resurrected" | "at_risk" | "lapsing" | "dormant";
+export declare const WINDOWS: Record<Rhythm, { period: number; short: number; long: number }>;
+export declare const DEFAULT_HOLDOUT: number;
+/** The user's state at \`now\` from the times they were active. */
+export declare function stateOf(active: Array<number | string | Date>, now: number | Date, rhythm: Rhythm, firstSeen?: number | string | Date): LifecycleState | null;
+/** "on" gets the treatment, "holdout" doesn't — the same answer as day2.treatment(id) on the device. */
+export declare function arm(user: string | null | undefined, treatment: string, holdout?: number): "on" | "holdout";
+/** The id day2 knows a user by: hashUser(DAY2_KEY, userId). */
+export declare function hashUser(appKey: string, userId: string): string;
+/** Whether one more reminder may go out: one per period, none after 3 unanswered. */
+export declare function mayNudge(input: { sent: Array<number | string | Date>; lastActive: number | string | Date | null; now: number | Date; rhythm: Rhythm; maxUnanswered?: number }): boolean;
+`;
+
+let lifecycleCache: string | null = null;
+
+/** The lifecycle helpers (states, holdouts, reminder limits) for the app and its server. */
+export async function lifecycleBundle(): Promise<string> {
+  if (lifecycleCache) return lifecycleCache;
+  const out = await Bun.build({ entrypoints: [join(import.meta.dir, "../packages/sensors/src/lifecycle.ts")], target: "browser", format: "esm", minify: true });
+  if (!out.success) throw new Error(`Couldn't build the day2 lifecycle helpers: ${out.logs.map((l) => l.message).join("; ")}`);
+  lifecycleCache = `/* day2 lifecycle helpers (@day2/sensors/lifecycle) — installed by day2; works in the app and on its server. */\n${await out.outputs[0]!.text()}`;
+  return lifecycleCache;
+}
+
+/** Puts the library files into a working copy (the install or retention ticket's clone). */
 export async function placeLibrary(workdir: string, kind: "web" | "react-native" = "web"): Promise<string> {
   const dir = existsSync(join(workdir, "src")) ? join(workdir, "src", VENDOR_DIR) : join(workdir, VENDOR_DIR);
   mkdirSync(dir, { recursive: true });
   const name = kind === "web" ? "sensors" : "native";
   writeFileSync(join(dir, `${name}.js`), await sensorsBundle(kind));
   writeFileSync(join(dir, `${name}.d.ts`), kind === "web" ? TYPES : NATIVE_TYPES);
+  writeFileSync(join(dir, "lifecycle.js"), await lifecycleBundle());
+  writeFileSync(join(dir, "lifecycle.d.ts"), LIFECYCLE_TYPES);
   return dir;
 }
 

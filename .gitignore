@@ -51,3 +51,6 @@ deploy/backups/
 # and the daily simulation reported.
 .day2-ingest-keys.json
 field/
+
+# The field library build output (bun run build in packages/sensors).
+packages/sensors/dist/

@@ -181,3 +181,40 @@ describe("field checks", () => {
     expect(contracts.status).toBe(200);
   });
 });
+
+describe("retention", () => {
+  test("states and rates; a researched treatment built on request (once)", async () => {
+    const { fieldStore } = await import("./tenant");
+    const { RETENTION_FILENAME } = await import("./retention");
+    const { hashUser } = await import("../packages/sensors/src/lifecycle");
+    const empty = await call("GET", `/api/apps/${appId}/growth/retention`);
+    expect(empty.body.snapshot).toMatchObject({ status: "no_users", users: 0 });
+
+    const now = Date.now();
+    const day = (ago: number) => new Date(now - ago * 86_400_000).toISOString();
+    for (let i = 0; i < 40; i++) {
+      const user = hashUser("d2k_x", `u${i}`);
+      const ago = i < 20 ? [0, 1, 2, 3, 4] : [3, 4, 5, 6];
+      await fieldStore().record(appId, { v: 1, device: { id: `d${i}`, platform: "web" }, passes: {}, failures: [], events: ago.map((a) => ({ type: "active", at: day(a), user })) }, new Date());
+    }
+    const leaders = [{ app: "Duolingo", example: "Reminders", source: "https://blog.duolingo.com/" }];
+    writeFileSync(
+      join(REPO, RETENTION_FILENAME),
+      JSON.stringify({ research: [{ id: "rr-1", at: new Date().toISOString(), category: "language apps", productType: "habit", leaders: ["Duolingo"], credits: 1, ideas: [{ id: "at_risk-reminder", target: "at_risk", channel: "push", name: "Reminder", practice: "p", change: "c", leaders }] }], treatments: [] }),
+    );
+    // Fresh numbers (the snapshot from before had nobody).
+    const { rmSync: rm } = await import("node:fs");
+    rm(join(ROOT, "field", appId, "retention.json"), { force: true });
+    const r = await call("GET", `/api/apps/${appId}/growth/retention`);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ productType: { id: "habit" }, category: "language apps", next: [{ id: "at_risk-reminder" }] });
+    expect(r.body.snapshot.users).toBe(40);
+
+    const built = await call("POST", `/api/apps/${appId}/growth/retention/at_risk-reminder/build`);
+    expect(built.status).toBe(201);
+    expect(built.body.treatments).toMatchObject([{ id: "at_risk-reminder", result: { state: "building" }, ticket: { state: "todo" } }]);
+    const again = await call("POST", `/api/apps/${appId}/growth/retention/at_risk-reminder/build`);
+    expect(again.body.treatments).toHaveLength(1);
+    expect((await call("POST", `/api/apps/${appId}/growth/retention/nope/build`)).status).toBe(404);
+  });
+});

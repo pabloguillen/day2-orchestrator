@@ -122,6 +122,8 @@ export type Failure = {
 export type GrowthEvent = {
   type: string;
   at: string;
+  /** The app's user, hashed (`hashUser`), once the app called `identify`. */
+  user?: string;
   acquisition?: { campaignId?: string; channel?: string };
 };
 

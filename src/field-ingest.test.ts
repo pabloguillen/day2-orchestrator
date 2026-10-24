@@ -79,6 +79,28 @@ function suite(name: string, make: () => Promise<{ store: FieldStore; deps: Inge
       expect(await ctx.store.failures(ctx.appId, "cart.continue", 1)).toHaveLength(1);
     });
 
+    test("identified users: hashed ids only, active days per user, a stored snapshot", async () => {
+      const u1 = `u_${"a".repeat(32)}`;
+      const u2 = `u_${"b".repeat(32)}`;
+      const ev = (user: string, at: string) => ({ type: "active", at, user });
+      const b = { v: 1, device: { id: "dev-users1", platform: "web" }, passes: {}, failures: [], events: [ev(u1, "2026-10-14T15:00:00Z"), ev(u1, "2026-10-15T09:00:00Z"), ev(u1, "2026-10-15T11:00:00Z"), { type: "active", at: "2026-10-15T09:00:00Z", user: "alice@example.com" }] };
+      expect((await handleIngest(post(ctx.key, b), ctx.deps)).status).toBe(204);
+      // Someone last seen in March (written directly: ingest dates old reports to arrival).
+      await ctx.store.record(ctx.appId, { v: 1, device: { id: "dev-users2", platform: "web" }, passes: {}, failures: [], events: [ev(u2, "2026-03-01T09:00:00Z")] }, NOW);
+      const all = await ctx.store.activity(ctx.appId, "2026-01-01");
+      const one = all.users.find((u) => u.user === u1)!;
+      expect(one).toMatchObject({ firstSeen: "2026-10-14", lastSeen: "2026-10-15", days: ["2026-10-14", "2026-10-15"] });
+      expect(all.users.map((u) => u.user).sort()).toEqual([u1, u2]); // the raw email was dropped
+      expect(JSON.stringify(await ctx.store.events(ctx.appId, new Date("2026-01-01")))).not.toContain("alice");
+      const recent = await ctx.store.activity(ctx.appId, "2026-10-01");
+      expect(recent).toMatchObject({ older: 1, users: [{ user: u1 }] });
+      await ctx.store.setRetention(ctx.appId, { at: NOW.toISOString(), status: "ready", users: 2 } as never);
+      expect(await ctx.store.retention(ctx.appId)).toMatchObject({ status: "ready", users: 2 });
+      // Kept 400 days per day, two years per user.
+      await ctx.store.prune(new Date("2028-03-15T00:00:00Z"));
+      expect((await ctx.store.activity(ctx.appId, "2026-01-01")).users.map((u) => u.user)).toEqual([u1]);
+    });
+
     test("contracts are served by key; unknown keys, other sites, junk and floods are refused", async () => {
       await ctx.store.setContracts(ctx.appId, { head: "abc", file: { version: 1, generatedAt: NOW.toISOString(), contracts: [{ id: "screen:/", kind: "screen", route: "/", source: "code" }] }, candidates: [] }, NOW);
       const c = await handleIngest(new Request(`https://day2.example/api/ingest/${ctx.key}/contracts`), ctx.deps);

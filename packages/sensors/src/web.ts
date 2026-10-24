@@ -1,8 +1,10 @@
 import { Engine, normalizePath, type Env, type Tap } from "./core";
 import { acquisitionFrom } from "./acquisition";
+import { arm, hashUser } from "./lifecycle";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
 
 export { acquisitionFrom };
+export { arm, hashUser, mayNudge, stateOf } from "./lifecycle";
 
 /**
  * day2 field contracts for the web — one call at startup:
@@ -46,12 +48,23 @@ export type Day2 = {
   check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void;
   /** Switch identity after consent changes. */
   setIdentity(identity: "session" | "device"): void;
+  /**
+   * The signed-in user (your own id; day2 only receives a salted hash), or
+   * null on sign-out. Lets day2 see who comes back — lifecycle states and
+   * retention. Call it only after consent where the law requires it.
+   */
+  identify(userId: string | null): void;
+  /**
+   * Whether this user gets a retention treatment ("on") or is held out to
+   * measure it ("holdout"). Same answer on every device and on your server.
+   */
+  treatment(id: string, holdout?: number): "on" | "holdout";
   /** Send what's collected now. */
   flush(): void;
   stop(): void;
 };
 
-const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, flush() {}, stop() {} };
+const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, identify() {}, treatment: () => "on", flush() {}, stop() {} };
 
 const store = (kind: "session" | "local") => {
   try {
@@ -341,7 +354,7 @@ export function startDay2(opts: StartOptions): Day2 {
     if (document.visibilityState === "hidden") {
       sendLcp();
       engine.flush(true);
-    }
+    } else engine.touch();
   };
   const onPageHide = () => {
     sendLcp();
@@ -401,6 +414,8 @@ export function startDay2(opts: StartOptions): Day2 {
       identity = next;
       deviceId = idFor(identity);
     },
+    identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
+    treatment: (id, holdout) => arm(engine.userId, id, holdout),
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

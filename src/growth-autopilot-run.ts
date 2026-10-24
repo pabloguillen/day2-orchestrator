@@ -14,6 +14,7 @@ import type { AppProfile } from "./onboarding";
 import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } from "./tenant";
 import { appEvents, pageHealth } from "./field-work";
 import { resolve } from "node:path";
+import { researchRetention } from "./retention";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -61,6 +62,16 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
     metaPageId: async (appId) => (await adIdentities().get(appId))?.metaPageId ?? null,
     events: (a, since) => appEvents(a, since, fieldStore()),
     pageHealth: (a, path) => pageHealth(a, path, fieldStore()),
+    retention: {
+      store: fieldStore(),
+      async research(input) {
+        const check = await authorize(tenant.credits, { appId: app.id, appName: app.name, service: "scan_answer", maxCostUsd: BENCHMARK_MAX_USD });
+        if (!check.ok) throw new CreditsError(check);
+        const ctx: CreditContext = { appId: app.id, appName: app.name, service: "scan_answer", description: "Retention research (autopilot)" };
+        const result = await withCreditContext(ctx, () => researchRetention(input));
+        return { result, credits: ctx.charged ?? 0 };
+      },
+    },
   };
 }
 
@@ -73,6 +84,7 @@ export async function autopilotAll(): Promise<void> {
           r.ticketsCreated.length && `${r.ticketsCreated.length} growth tickets`,
           r.benchmarked && "compared with leading apps",
           r.improvementsCreated.length && `${r.improvementsCreated.length} improvements`,
+          r.retentionTickets.length && `${r.retentionTickets.length} retention tickets`,
           r.undone.length && `${r.undone.length} changes to undo`,
           r.researched && "research",
           r.experimentsCreated.length && `${r.experimentsCreated.length} experiments`,

@@ -72,6 +72,7 @@ import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, lis
 import { isMetaPageId } from "./ad-identities";
 import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
+import { USER_DAY_DAYS } from "./field-store";
 import {
   adIdentities,
   assertProductionReady,
@@ -186,6 +187,7 @@ import { gatherSignalsForApp } from "./health-scout-cli";
 import { tickAll } from "./backlog-cli";
 import { autopilotAll } from "./growth-autopilot-run";
 import { simulateAll } from "./simulation-run";
+import { addTreatment, computeSnapshot, loadRetention, RETENTION_FILENAME, retentionView, saveRetention, treatmentKey, treatmentTicket } from "./retention";
 import { features } from "./features";
 import {
   answerBuild,
@@ -1445,6 +1447,47 @@ route("POST", "/api/apps/:id/growth/loops/:loopId/build", async (_req, params, t
 });
 
 // ---- Field checks (packages/sensors): what day2 checks on users' devices ----
+
+/** Retention: users per lifecycle state, return rates, treatments and their measured effect. */
+async function retentionResponse(app: AppEntry) {
+  const store = fieldStore();
+  const file = loadRetention(appFile(app, RETENTION_FILENAME));
+  let snapshot = await store.retention(app.id);
+  if (!snapshot) {
+    const now = new Date();
+    const activity = await store.activity(app.id, new Date(now.getTime() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10));
+    snapshot = computeSnapshot({ ...activity, productType: file.research[0]?.productType ?? null, now });
+    await store.setRetention(app.id, snapshot);
+  }
+  return retentionView(file, snapshot, await loadBacklogFor(app));
+}
+
+route("GET", "/api/apps/:id/growth/retention", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json(await retentionResponse(app));
+});
+
+/** Build a researched treatment now, instead of waiting for its turn. */
+route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const path = appFile(app, RETENTION_FILENAME);
+  const file = loadRetention(path);
+  const research = file.research[0];
+  const idea = research?.ideas.find((i) => i.id === params.ideaId);
+  if (!research || !idea) throw new HttpError(404, "No such treatment in the latest research.");
+  const view = await retentionResponse(app);
+  const snapshot = view.snapshot!;
+  if (snapshot.status === "no_users") throw new HttpError(409, "day2 can't see who comes back yet — the app has to identify its users first.");
+  const now = new Date();
+  const ticket = await withBacklog(backlogFile(app), (b) => {
+    const existing = b.tickets.find((x) => x.source.key === treatmentKey(idea.id));
+    if (existing) return { backlog: b, result: existing };
+    const r = createTicket(b, treatmentTicket(idea, research, snapshot), now);
+    return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+  });
+  if (!file.treatments.some((x) => x.id === idea.id)) saveRetention(path, addTreatment(file, idea, research, snapshot.rhythm, ticket.id, now));
+  return json(await retentionResponse(app), { status: 201 });
+});
 
 route("GET", "/api/apps/:id/field", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);

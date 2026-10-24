@@ -116,7 +116,8 @@ describe("field contracts in day2's loops", () => {
     expect(rnItem.description).toContain('import { startDay2, useDay2Mark } from "./day2/native.js";');
     expect(rnItem.description).toContain("day2.trackNavigation(navigationRef)");
     expect(rnItem.description).toContain('src/Cart.tsx:5 "Help" → day2.action("cart.help", …)');
-    expect(rnItem.description).toContain("6. Add a test");
+    expect(rnItem.description).toContain("5. When a user signs in or a signed-in session is restored, call day2.identify(user.id)");
+    expect(rnItem.description).toContain("7. Add a test");
     const nativeDir = await placeLibrary(join(ROOT, "rncopy"), "react-native");
     const nativeJs = readFileSync(join(nativeDir, "native.js"), "utf-8");
     expect(nativeJs).toContain('from"react-native"');
@@ -125,6 +126,10 @@ describe("field contracts in day2's loops", () => {
     const dir = await placeLibrary(join(ROOT, "copy"));
     expect(readFileSync(join(dir, "sensors.js"), "utf-8")).toContain("startDay2");
     expect(existsSync(join(dir, "sensors.d.ts"))).toBe(true);
+    // The lifecycle helpers for retention (states, holdouts), usable on the app's server too.
+    const lifecycle = await import(join(dir, "lifecycle.js"));
+    expect(lifecycle.stateOf([Date.now()], Date.now(), "daily")).toBe("new");
+    expect(readFileSync(join(dir, "lifecycle.d.ts"), "utf-8")).toContain("mayNudge");
 
     // The install ticket's run gets the files before the agent starts.
     saveBacklog(backlogFile(app), emptyBacklog());

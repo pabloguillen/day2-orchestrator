@@ -111,10 +111,10 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
   try {
     const t = await withBacklog(file, (b) => ({ backlog: b, result: findTicket(b, ticketId) }));
     if (!t) return { status: "error", reason: "ticket is gone" };
-    // Installing field checks: day2 places the library files in the working
-    // copy itself; the agent only wires them in.
+    // Installing field checks, and retention work: day2 places the library
+    // files (current version) in the working copy itself; the agent only wires them in.
     const install: Partial<PipelineDeps> =
-      t.source.key === INSTALL_KEY
+      t.source.key === INSTALL_KEY || t.source.key?.startsWith("retention:")
         ? {
             cloneIsolatedWorkspace: async (src: string) => {
               const cwd = await (deps.cloneIsolatedWorkspace ?? cloneIsolatedWorkspace)(src);

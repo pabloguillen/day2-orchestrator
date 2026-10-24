@@ -10,9 +10,11 @@ export const day2 = startDay2({ key: "d2k_…", endpoint: "https://day2.example"
 
 day2.track("signup");                          // growth events
 day2.check("receipt.total", total === sum);     // invariants from your code
+day2.identify(user.id);                         // who comes back (day2 gets a salted hash only); null on sign-out
+if (day2.treatment("back-welcome") === "on") …  // retention treatments, 10% held out to measure them
 ```
 
-- About 7 KB gzipped, no dependencies, safe to call during server rendering (does nothing there).
+- About 9 KB gzipped, no dependencies, safe to call during server rendering (does nothing there).
 - Contracts come from day2 (generated from your code) and from `contracts` passed in.
 - Tag elements day2 should check: `data-day2-action="cart.continue"`; required parts of a screen: `data-day2-require="total"`.
 - Mark loading with `aria-busy="true"` and input errors with `role="alert"`.
@@ -27,6 +29,8 @@ export const day2 = startDay2({ key: "d2k_…", endpoint: "https://day2.example"
 <Pressable onPress={day2.action("cart.continue", onContinue)}>
 <Text {...useDay2Mark("total")}>…</Text>
 ```
+
+On the app's server, `@day2/sensors/lifecycle` gives the same `stateOf`, `arm`, `hashUser` and `mayNudge` (reminder limits) — see `docs/retention.md`.
 
 See `docs/field-contracts.md` in the orchestrator for the full picture.
 

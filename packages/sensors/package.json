@@ -19,6 +19,10 @@
     "./native": {
       "types": "./src/native.ts",
       "import": "./dist/native.js"
+    },
+    "./lifecycle": {
+      "types": "./src/lifecycle.ts",
+      "import": "./dist/lifecycle.js"
     }
   },
   "files": [
@@ -27,7 +31,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "bun build src/index.ts src/core.ts --outdir dist --target browser --format esm --minify --sourcemap=linked && bun build src/native.ts --outdir dist --target browser --format esm --minify --external react --external react-native",
+    "build": "bun build src/index.ts src/core.ts src/lifecycle.ts --outdir dist --target browser --format esm --minify --sourcemap=linked && bun build src/native.ts --outdir dist --target browser --format esm --minify --external react --external react-native",
     "test": "bun test"
   },
   "peerDependencies": {

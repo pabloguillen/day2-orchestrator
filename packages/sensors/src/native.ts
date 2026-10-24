@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { AppState, Appearance, Dimensions, Linking, PixelRatio, Platform } from "react-native";
 import { acquisitionFrom } from "./acquisition";
+import { arm, hashUser } from "./lifecycle";
 import { Engine, ERROR_SHOWN, LOADING_TARGET, normalizePath, type Env } from "./core";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
 
@@ -60,9 +61,15 @@ export type Day2Native = {
   trackNavigation(ref: NavRef): () => void;
   /** Wraps a press handler so its contract (`action:<name>`) is checked. */
   action<A extends unknown[], R>(name: string, handler?: (...args: A) => R, opts?: { testID?: string; label?: string }): (...args: A) => R | undefined;
+  /** The signed-in user (day2 only receives a salted hash), or null on sign-out. After consent where required. */
+  identify(userId: string | null): void;
+  /** Whether this user gets a retention treatment ("on") or is held out to measure it. */
+  treatment(id: string, holdout?: number): "on" | "holdout";
   flush(): void;
   stop(): void;
 };
+
+export { arm, hashUser, mayNudge, stateOf } from "./lifecycle";
 
 const NOOP: Day2Native = {
   track() {},
@@ -70,6 +77,8 @@ const NOOP: Day2Native = {
   route() {},
   trackNavigation: () => () => {},
   action: (_n, h) => (...a) => h?.(...a),
+  identify() {},
+  treatment: () => "on",
   flush() {},
   stop() {},
 };
@@ -239,7 +248,10 @@ export function startDay2(opts: NativeOptions): Day2Native {
   // Send when the app goes to the background.
   const sub = AppState.addEventListener("change", (state) => {
     if (state === "background" || state === "inactive") engine.flush(true);
-    if (state === "active") last = Date.now();
+    if (state === "active") {
+      last = Date.now();
+      engine.touch();
+    }
   });
   undo.push(() => sub.remove());
 
@@ -287,6 +299,8 @@ export function startDay2(opts: NativeOptions): Day2Native {
         return handler?.(...args);
       };
     },
+    identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
+    treatment: (id, holdout) => arm(engine.userId, id, holdout),
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

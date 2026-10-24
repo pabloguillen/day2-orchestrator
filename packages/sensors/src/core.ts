@@ -161,6 +161,8 @@ export class Engine {
   private failures: Failure[] = [];
   private failuresBy: Record<string, number> = {};
   private events: GrowthEvent[] = [];
+  private user: string | null = null;
+  private activeDay = "";
   private crumbs: Breadcrumb[] = [];
   private pending: Pending[] = [];
 
@@ -206,6 +208,7 @@ export class Engine {
     const route = normalizePath(raw);
     if (route === this.currentRoute) return;
     this.currentRoute = route;
+    this.markActive();
     this.routeSince = this.env.now();
     this.loadingSince = null;
     this.loadingReported = false;
@@ -220,6 +223,7 @@ export class Engine {
 
   onTap(tap: Tap): void {
     this.crumb("tap", tap.label);
+    this.markActive();
     const now = this.env.now();
     for (const c of this.contracts) {
       if (c.kind !== "action") continue;
@@ -271,7 +275,36 @@ export class Engine {
 
   /** Growth events: visit, signup, activated, shared, invite_sent… */
   track(type: string, acquisition?: GrowthEvent["acquisition"]): void {
-    this.events.push({ type: type.slice(0, 40), at: new Date(this.env.now()).toISOString(), ...(acquisition ? { acquisition } : {}) });
+    this.events.push({ type: type.slice(0, 40), at: new Date(this.env.now()).toISOString(), ...(this.user ? { user: this.user } : {}), ...(acquisition ? { acquisition } : {}) });
+  }
+
+  /**
+   * The signed-in user, already hashed (`hashUser`); null when signed out.
+   * From then on the user's activity is counted once a day ("active"), which
+   * is what lifecycle states are made of.
+   */
+  identify(user: string | null): void {
+    if (user === this.user) return;
+    this.user = user;
+    this.activeDay = "";
+    this.markActive();
+  }
+
+  get userId(): string | null {
+    return this.user;
+  }
+
+  /** The app came back to the foreground: counts as activity. */
+  touch(): void {
+    this.markActive();
+  }
+
+  private markActive(): void {
+    if (!this.user) return;
+    const day = new Date(this.env.now()).toISOString().slice(0, 10);
+    if (day === this.activeDay) return;
+    this.activeDay = day;
+    this.track("active");
   }
 
   // ---- Actions ----------------------------------------------------------------

@@ -256,3 +256,24 @@ describe("sending", () => {
     expect(env.sent.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("who comes back", () => {
+  test("once identified, activity is counted once a day, with the hashed user", () => {
+    const e = engine([]);
+    env.t = Date.parse("2026-10-24T08:00:00Z");
+    e.track("visit");
+    e.identify("u_abc");
+    e.onRoute("/a");
+    e.onTap({ action: "x", label: "x", matches: () => false });
+    env.t += 86_400_000;
+    e.touch();
+    e.identify(null);
+    e.onRoute("/b");
+    const ev = e.peek().events;
+    expect(ev.map((x) => [x.type, x.user ?? null])).toEqual([
+      ["visit", null],
+      ["active", "u_abc"],
+      ["active", "u_abc"],
+    ]);
+  });
+});

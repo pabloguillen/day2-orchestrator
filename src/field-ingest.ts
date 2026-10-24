@@ -125,6 +125,7 @@ export function cleanBatch(raw: unknown, now: Date): Batch | null {
   }
 
   const events: GrowthEvent[] = [];
+  const USER_RE = /^u_[0-9a-f]{32}$/;
   for (const e of (Array.isArray(r.events) ? r.events : []).slice(0, 200)) {
     if (!e || typeof e !== "object") continue;
     const x = e as Record<string, unknown>;
@@ -139,7 +140,9 @@ export function cleanBatch(raw: unknown, now: Date): Batch | null {
             ...(typeof a.channel === "string" && CHANNELS.has(a.channel) ? { channel: a.channel } : {}),
           }
         : undefined;
-    events.push({ type, at, ...(acquisition && Object.keys(acquisition).length ? { acquisition } : {}) });
+    // Users arrive hashed by the library (hashUser); anything else is dropped.
+    const user = typeof x.user === "string" && USER_RE.test(x.user) ? x.user : undefined;
+    events.push({ type, at, ...(user ? { user } : {}), ...(acquisition && Object.keys(acquisition).length ? { acquisition } : {}) });
   }
 
   return { v: 1, ...(str(r.release, 60) ? { release: str(r.release, 60) } : {}), device, passes, failures, events };
