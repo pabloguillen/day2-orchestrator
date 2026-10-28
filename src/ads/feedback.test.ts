@@ -16,7 +16,7 @@ import type { AdCopyPlan, CopyInput } from "./copy";
 import { setRatesForTest } from "./fx";
 import { filePlatformIdentities } from "./identities";
 import { computeLearnings, copyHints, formatsToSkip, platformOrder, recordInAllocator, researchHint } from "./learnings";
-import { judgeBy, parseTag, platformResults, retentionFrom } from "./results";
+import { fitOf, parseTag, platformResults, retentionFrom } from "./results";
 import type { AdPlatform, AdStats, LaunchSpec, Launched, PlatformId, PlatformInfo } from "./types";
 
 /** The feedback loop: per-ad results, users who stay, conversions back to the platforms, and what the next round learns. */
@@ -57,56 +57,90 @@ const camp = (platform: PlatformId, over: Partial<PlatformCampaign> = {}): Platf
   ...over,
 });
 
-describe("per ad, and users who stay", () => {
-  const events = [
-    ...Array.from({ length: 10 }, (_, i) => visit(`a${i}`, "B-1.tiktok.v1", { signup: true, user: `u_a${i}` })).flat(),
-    ...Array.from({ length: 10 }, (_, i) => visit(`b${i}`, "B-1.tiktok.v2", { signup: i < 2, user: `u_b${i}` })).flat(),
-  ];
-  // Only the walkthrough's users came back a week later.
-  const users: UserActivity[] = [
-    ...Array.from({ length: 10 }, (_, i) => ({ user: `u_a${i}`, firstSeen: ago(10).slice(0, 10), lastSeen: ago(1).slice(0, 10), days: [ago(10).slice(0, 10), ago(1).slice(0, 10)] })),
-    ...Array.from({ length: 2 }, (_, i) => ({ user: `u_b${i}`, firstSeen: ago(10).slice(0, 10), lastSeen: ago(10).slice(0, 10), days: [ago(10).slice(0, 10)] })),
-  ];
-  const retention = retentionFrom(events, users, NOW);
-  const [r] = platformResults(bet(), [camp("tiktok")], events, retention);
+const day = (d: number) => ago(d).slice(0, 10);
+/** Identified users who started `d` days ago; `stayed` of them were back a week or more later. */
+const cohort = (prefix: string, n: number, stayed: number, d = 10): UserActivity[] =>
+  Array.from({ length: n }, (_, i) => ({ user: `u_${prefix}${i}`, firstSeen: day(d), lastSeen: i < stayed ? day(1) : day(d), days: i < stayed ? [day(d), day(1)] : [day(d)] }));
+/** Visits + sign-ups for identified users of one ad tag (or organic, no tag). */
+const signups = (prefix: string, n: number, tag: string | null, signedUp = n): EventLike[] =>
+  Array.from({ length: n }, (_, i) => [
+    { type: "visit", at: ago(9.6), deviceId: `${prefix}${i}`, ...(tag ? { acquisition: { campaignId: tag, channel: "paid" } } : {}) },
+    ...(i < signedUp ? [{ type: "signup", at: ago(9.5), deviceId: `${prefix}${i}`, userId: `u_${prefix}${i}` }] : []),
+  ]).flat() as EventLike[];
 
+describe("what an ad is judged on: cost, adjusted for fit — not absolute retention", () => {
   test("tags: experiment, platform, ad", () => {
     expect(parseTag("B-1.tiktok.v2")).toEqual({ bet: "B-1", platform: "tiktok", ad: "v2" });
     expect(parseTag("B-1")).toEqual({ bet: "B-1" });
   });
-  test("people, sign-ups and users who stayed, per ad", () => {
-    expect(r).toMatchObject({ people: 20, outcomes: 12, retained: 10, eligible: 12 });
-    expect(r!.ads.map((a) => [a.key, a.people, a.outcomes, a.retained])).toEqual([
-      ["B-1-tiktok-v1", 10, 10, 10],
-      ["B-1-tiktok-v2", 10, 2, 0],
-    ]);
-    expect(judgeBy([r!])).toBe("retained");
-  });
-  test("inside a platform: the ad nobody stays from is paused, the best keeps running", () => {
-    expect(adDecisions(camp("tiktok"), r!, "retained")).toEqual([{ key: "B-1-tiktok-v2", why: expect.stringContaining("without a single user who stayed") }]);
-    expect(adDecisions(camp("tiktok", { creatives: camp("tiktok").creatives.slice(0, 1) }), r!, "retained")).toEqual([]);
+
+  test("fit compares an ad's people with other new users at the same time, shrunk and bounded", () => {
+    const base = { eligible: 40, retained: 20 }; // 50% of other new users stay
+    expect(fitOf({ eligible: 10, retained: 5 }, base)).toBe(1);
+    expect(fitOf({ eligible: 10, retained: 0 }, base)).toBe(0.5); // (0 + 10·0.5)/(10 + 10) / 0.5
+    expect(fitOf({ eligible: 200, retained: 0 }, base)).toBe(0.5); // bounded
+    expect(fitOf({ eligible: 10, retained: 10 }, base)).toBe(1.5);
+    expect(fitOf({ eligible: 3, retained: 0 }, base)).toBeNull(); // too few of the ad's own
+    expect(fitOf({ eligible: 10, retained: 0 }, { eligible: 10, retained: 5 })).toBeNull(); // too few to compare with
   });
 
-  test("learnings: formats, platforms, copy and angles ranked — and where they go", () => {
-    const meta = camp("meta");
-    const metaEvents = Array.from({ length: 10 }, (_, i) => visit(`m${i}`, "B-1.meta.v1", { signup: i < 1 })).flat();
-    const results = new Map([["B-1", platformResults(bet(), [camp("tiktok"), meta], [...events, ...metaEvents], retention)]]);
-    const l = computeLearnings([bet(), bet({ id: "B-0", status: "stopped", stopReason: "Stopped by day2: it brought people who reach the goal less often", angle: "Save money on trips" })], [camp("tiktok"), meta].map((c) => ({ ...c, creatives: c.creatives })), results, "outcome", NOW);
-    expect(l.platforms.map((p) => p.platform)).toEqual(["tiktok", "meta"]);
+  test("when everyone leaves (a product/retention problem), the ads aren't blamed", () => {
+    const events = [...signups("a", 10, "B-1.tiktok.v1"), ...signups("o", 30, null)];
+    const users = [...cohort("a", 10, 1), ...cohort("o", 30, 3)]; // 10% stay, ad and organic alike
+    const [r] = platformResults(bet(), [camp("tiktok")], events, retentionFrom(events, users, NOW, 7));
+    expect(r).toMatchObject({ outcomes: 10, eligible: 10, retained: 1, fit: 1, costPerOutcome: 10, adjustedCost: 10 });
+  });
+
+  const events = [...signups("a", 10, "B-1.tiktok.v1"), ...signups("b", 10, "B-1.tiktok.v2"), ...signups("o", 40, null)];
+  const users = [...cohort("a", 10, 5), ...cohort("b", 10, 0), ...cohort("o", 40, 20)];
+  const retention = retentionFrom(events, users, NOW, 7);
+
+  test("per ad: people, sign-ups, who stayed, fit and adjusted cost; the experiment's own users aren't the comparison", () => {
+    const [r] = platformResults(bet(), [camp("tiktok")], events, retention);
+    expect(r!.ads.map((a) => [a.key, a.outcomes, a.retained, a.fit, a.costPerOutcome, a.adjustedCost])).toEqual([
+      ["B-1-tiktok-v1", 10, 5, 1, 5, 5],
+      ["B-1-tiktok-v2", 10, 0, 0.5, 5, 10],
+    ]);
+  });
+
+  test("fit adjusts the cost, it doesn't overrule it: same cost, weaker fit → not paused yet", () => {
+    const [r] = platformResults(bet(), [camp("tiktok")], events, retention);
+    expect(adDecisions(camp("tiktok"), r!)).toEqual([]);
+  });
+
+  test("costlier AND a weaker fit → paused, saying both", () => {
+    const pricey = camp("tiktok", { adSpendUsd: { "B-1-tiktok-v1": 40, "B-1-tiktok-v2": 60 } });
+    const [r] = platformResults(bet(), [pricey], events, retention);
+    const d = adDecisions(pricey, r!);
+    expect(d).toEqual([{ key: "B-1-tiktok-v2", why: expect.stringContaining("its people stay less than other new users") }]);
+    expect(d[0]!.why).toContain("1.5×");
+    expect(adDecisions(camp("tiktok", { creatives: pricey.creatives.slice(0, 1) }), r!)).toEqual([]);
+  });
+
+  test("learnings: ranked by fit-adjusted cost — and where they go", () => {
+    const metaEvents = [...signups("m", 10, "B-1.meta.v1", 2)];
+    const metaUsers = cohort("m", 2, 1);
+    const all = [...events, ...metaEvents];
+    const ret = retentionFrom(all, [...users, ...metaUsers], NOW, 7);
+    const meta = camp("meta", { creatives: camp("meta").creatives.slice(0, 1), adSpendUsd: { "B-1-meta-v1": 100 } });
+    const results = new Map([["B-1", platformResults(bet(), [camp("tiktok"), meta], all, ret)]]);
+    const l = computeLearnings([bet(), bet({ id: "B-0", status: "stopped", stopReason: "Stopped by day2: it brought people who reach the goal less often", angle: "Save money on trips" })], [camp("tiktok"), meta], results, NOW);
+    expect(l.fitKnown).toBe(true);
+    expect(l.platforms.map((p) => [p.platform, p.fit])).toEqual([["tiktok", 0.67], ["meta", null]]);
     expect(platformOrder(["meta", "tiktok", "google", "snapchat"], l)).toEqual(["tiktok", "meta", "google", "snapchat"]);
-    expect(l.formats.find((f) => f.format === "walkthrough")).toMatchObject({ wins: 1 });
-    expect(l.formats.find((f) => f.format === "presenter")!.losses).toBeGreaterThanOrEqual(1);
+    expect(l.formats.find((f) => f.format === "walkthrough")).toMatchObject({ wins: 1, fit: 1 });
+    expect(l.formats.find((f) => f.format === "presenter")).toMatchObject({ losses: 0, fit: 0.5 });
     expect(copyHints(l)).toContain('Angle that failed: "Save money on trips"');
     expect(researchHint(l)).toContain("failed: Save money on trips");
     // A format that lost twice and never won isn't made again.
-    expect(formatsToSkip({ ...l, formats: [{ format: "presenter", ads: 4, people: 10, outcomes: 0, spendUsd: 80, costUsd: null, wins: 0, losses: 2 }] })).toEqual(["presenter"]);
+    expect(formatsToSkip({ ...l, formats: [{ format: "presenter", ads: 4, people: 10, outcomes: 0, spendUsd: 80, costUsd: null, fit: null, adjustedCostUsd: null, wins: 0, losses: 2 }] })).toEqual(["presenter"]);
   });
 
   test("the growth allocator learns from every ad, once", () => {
+    const [r] = platformResults(bet(), [camp("tiktok")], events, retention);
     const ads = r!.ads.map((a) => ({ key: a.key, format: a.key.endsWith("v1") ? ("walkthrough" as const) : ("presenter" as const), people: a.people, outcomes: a.outcomes, spendUsd: a.spendUsd }));
     const first = recordInAllocator({ arms: [], updatedAt: "" }, ads, {});
-    const walk = first.state.arms.find((x) => x.arm.formatTag === "walkthrough")!;
-    expect(walk).toMatchObject({ attempts: 10, successes: 10 });
+    expect(first.state.arms.find((x) => x.arm.formatTag === "walkthrough")!).toMatchObject({ attempts: 10, successes: 10 });
     const again = recordInAllocator(first.state, ads, first.recorded);
     expect(again.state.arms.find((x) => x.arm.formatTag === "walkthrough")!.attempts).toBe(10);
   });

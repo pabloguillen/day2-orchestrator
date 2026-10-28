@@ -107,3 +107,7 @@ The measurement is a controlled test, using intention to treat.
 - **New installs:** the field-checks install ticket includes `day2.identify` on sign-in, session restore and sign-out.
 - **Apps already reporting without identified users:** they get a **Let day2 see who comes back** ticket.
 - After that, everything runs on the growth autopilot's timer. The owner can also build a researched treatment on request from the Retention tab when the autopilot is off.
+
+## Users from ads
+
+Ads bring people; keeping them is this engine's job, so ads are never judged by absolute retention (see `docs/ads.md`, "Ads and retention"). The snapshot splits new users by source (day2's ads vs everyone else). When ad-brought new users come back clearly less than other new users, day2 tickets one treatment for them only — open on what the ad promised (`day2.cameFrom()` in the field library) — with its own holdout. While ads are running, new users' leak counts 1.5× when choosing the next treatment, and while fewer than 10% of new users come back at all, ads don't scale up.

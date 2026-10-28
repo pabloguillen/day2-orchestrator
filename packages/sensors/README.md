@@ -12,6 +12,7 @@ day2.track("signup");                          // growth events
 day2.check("receipt.total", total === sum);     // invariants from your code
 day2.identify(user.id);                         // who comes back (day2 gets a salted hash only); null on sign-out
 if (day2.treatment("back-welcome") === "on") …  // retention treatments, 10% held out to measure them
+day2.cameFrom()                                 // { experiment: "B-4", platform: "tiktok", ad: "v1" } after a day2 ad, else null
 ```
 
 - About 9 KB gzipped, no dependencies, safe to call during server rendering (does nothing there).

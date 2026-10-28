@@ -1,5 +1,5 @@
 import { Engine, normalizePath, type Env, type Tap } from "./core";
-import { acquisitionFrom } from "./acquisition";
+import { acquisitionFrom, cameFromTag, type CameFrom } from "./acquisition";
 import { arm, hashUser } from "./lifecycle";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
 
@@ -59,12 +59,19 @@ export type Day2 = {
    * measure it ("holdout"). Same answer on every device and on your server.
    */
   treatment(id: string, holdout?: number): "on" | "holdout";
+  /**
+   * Where this person first came from, when it was a day2 link — e.g. an ad
+   * for experiment "B-4" on TikTok. Lets the app continue the ad's promise
+   * (open on the feature the ad showed). Null otherwise.
+   */
+  cameFrom(): CameFrom | null;
   /** Send what's collected now. */
   flush(): void;
   stop(): void;
 };
 
-const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, identify() {}, treatment: () => "on", flush() {}, stop() {} };
+const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, identify() {}, treatment: () => "on", cameFrom: () => null, flush() {}, stop() {} };
+const FROM_KEY = "day2.from";
 
 const store = (kind: "session" | "local") => {
   try {
@@ -372,7 +379,13 @@ export function startDay2(opts: StartOptions): Day2 {
     const ss = store("session");
     if (!ss?.getItem("day2.visit")) {
       ss?.setItem("day2.visit", "1");
-      engine.track("visit", acquisitionFrom(location.href, document.referrer, location.hostname));
+      const acq = acquisitionFrom(location.href, document.referrer, location.hostname);
+      engine.track("visit", acq);
+      // First touch only: kept for the session, and across visits only with device identity (consent).
+      if (acq?.campaignId && !ss?.getItem(FROM_KEY) && !(identity === "device" && store("local")?.getItem(FROM_KEY))) {
+        ss?.setItem(FROM_KEY, acq.campaignId);
+        if (identity === "device") store("local")?.setItem(FROM_KEY, acq.campaignId);
+      }
     }
   } catch {
     engine.track("visit");
@@ -416,6 +429,13 @@ export function startDay2(opts: StartOptions): Day2 {
     },
     identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
     treatment: (id, holdout) => arm(engine.userId, id, holdout),
+    cameFrom() {
+      try {
+        return cameFromTag(store("session")?.getItem(FROM_KEY) ?? (identity === "device" ? store("local")?.getItem(FROM_KEY) : null));
+      } catch {
+        return null;
+      }
+    },
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

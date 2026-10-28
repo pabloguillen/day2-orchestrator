@@ -19,7 +19,9 @@ import type { PlatformIdentityStore } from "./identities";
 import { computeLearnings, copyHints, formatOf, formatsToSkip, platformOrder, recordInAllocator, type Format, type Learnings } from "./learnings";
 import { produceContent, type ProduceInput, type Produced } from "./produce";
 import type { VideoProvider } from "./providers/video";
-import { judgeBy, platformResults, retentionFrom, shortKey, type PlatformResult, type Retention } from "./results";
+import { platformResults, retentionFrom, shortKey, type PlatformResult, type Retention } from "./results";
+import { scaleGate, stayAfterDays } from "./retention-link";
+import type { RetentionSnapshot } from "../retention";
 import type { AdCreativeInput, AdPlatform, AdStats, ConversionSetup, Identity, Launched, PlatformId, PlatformInfo, Ratio } from "./types";
 
 export { platformResults } from "./results";
@@ -107,19 +109,23 @@ export type AdsFile = {
   conversions: Partial<Record<PlatformId, { setup: ConversionSetup; at: string }>>;
   /** What was already counted into the growth allocator, per ad. */
   allocatorRecorded: Record<string, { people: number; outcomes: number; spendUsd: number }>;
+  /** Why scale-ups are on hold for the retention engine (retention-link.ts), or null. */
+  scaleHeld: string | null;
 };
 
 export function loadAds(path: string): AdsFile {
-  const empty: AdsFile = { campaigns: [], content: [], learnings: null, conversions: {}, allocatorRecorded: {} };
+  const empty: AdsFile = { campaigns: [], content: [], learnings: null, conversions: {}, allocatorRecorded: {}, scaleHeld: null };
   if (!existsSync(path)) return empty;
   try {
     const p = JSON.parse(readFileSync(path, "utf-8")) as Partial<AdsFile>;
     return {
       campaigns: (Array.isArray(p.campaigns) ? p.campaigns : []).map((c) => ({ ...c, billing: c.billing ?? "credits", currency: c.currency ?? "USD", optimizeFor: c.optimizeFor ?? "clicks" })),
       content: Array.isArray(p.content) ? p.content : [],
-      learnings: p.learnings ?? null,
+      // Learnings from before fit-adjusted judging are recomputed on the next pass.
+      learnings: p.learnings && "fitKnown" in p.learnings ? p.learnings : null,
       conversions: p.conversions ?? {},
       allocatorRecorded: p.allocatorRecorded ?? {},
+      scaleHeld: p.scaleHeld ?? null,
     };
   } catch {
     return empty;
@@ -220,47 +226,55 @@ export function creativesFor(info: PlatformInfo, betId: string, copy: AdCopyPlan
 
 export type Decision = { platform: PlatformId; action: "stop" | "cut" | "scale"; dailyUsd?: number; why: string };
 
-const countOf = (r: { outcomes: number; retained: number }, by: "retained" | "outcome") => (by === "retained" ? r.retained : r.outcomes);
-const costOf = (r: { costPerOutcome: number | null; costPerRetained: number | null }, by: "retained" | "outcome") => (by === "retained" ? r.costPerRetained : r.costPerOutcome);
+const costOf = (r: { adjustedCost: number | null }) => r.adjustedCost;
+
+/** Why one cost is worse than another, saying so when how well its people stay is part of it. */
+function worseBy(a: { adjustedCost: number | null; costPerOutcome: number | null; fit: number | null }, b: { adjustedCost: number | null; costPerOutcome: number | null; fit: number | null }, word: string, than: string): string {
+  const times = (a.adjustedCost! / b.adjustedCost!).toFixed(1);
+  const rawTimes = a.costPerOutcome && b.costPerOutcome ? a.costPerOutcome / b.costPerOutcome : null;
+  const fitMatters = (a.fit ?? 1) !== (b.fit ?? 1) && rawTimes !== null && Math.abs(rawTimes - Number(times)) >= 0.2;
+  return fitMatters
+    ? `each ${word} costs ${rawTimes!.toFixed(1)}× as much as ${than}, and its people stay ${a.fit !== null && a.fit < 1 ? "less than" : "about as well as"} other new users (${times}× all told)`
+    : `each ${word} costs ${times}× more than ${than}`;
+}
 
 /**
  * Per experiment, comparing its platforms (pure). A platform is judged once
- * it ran JUDGE_AFTER_DAYS and spent enough to tell; by users who stayed when
- * `by` is "retained", else by sign-ups / first value.
+ * it ran JUDGE_AFTER_DAYS and spent enough to tell — by cost per result,
+ * adjusted for fit (results.ts). `hold` stops scale-ups (retention-link.ts).
  */
-export function rebalance(campaigns: PlatformCampaign[], results: PlatformResult[], infos: Map<PlatformId, PlatformInfo>, now: Date, room: { dailyUsd: number }, outcomeWord: string, by: "retained" | "outcome" = "outcome"): Decision[] {
+export function rebalance(campaigns: PlatformCampaign[], results: PlatformResult[], infos: Map<PlatformId, PlatformInfo>, now: Date, room: { dailyUsd: number }, word: string, hold = false): Decision[] {
   const decisions: Decision[] = [];
-  const word = by === "retained" ? "user who stayed" : outcomeWord;
   const active = campaigns.filter((c) => c.status === "active");
   const res = new Map(results.map((r) => [r.platform, r]));
   const judged = active.filter((c) => {
     const min = infos.get(c.platform)?.minDailyUsd ?? 5;
     return now.getTime() - Date.parse(c.launchedAt) >= JUDGE_AFTER_DAYS * DAY && c.spendUsd >= Math.max(JUDGE_MIN_SPEND_USD, 3 * min);
   });
-  const withCost = judged.filter((c) => costOf(res.get(c.platform)!, by) != null).sort((a, b) => costOf(res.get(a.platform)!, by)! - costOf(res.get(b.platform)!, by)!);
+  const withCost = judged.filter((c) => costOf(res.get(c.platform)!) != null).sort((a, b) => costOf(res.get(a.platform)!)! - costOf(res.get(b.platform)!)!);
   const best = withCost[0];
-  const bestCost = best ? costOf(res.get(best.platform)!, by)! : null;
+  const bestR = best ? res.get(best.platform)! : null;
+  const bestCost = bestR ? costOf(bestR)! : null;
   for (const c of judged) {
     const r = res.get(c.platform)!;
     const min = infos.get(c.platform)?.minDailyUsd ?? 5;
-    const n = countOf(r, by);
-    const cost = costOf(r, by);
-    if (n === 0 && c.spendUsd >= Math.max(2 * JUDGE_MIN_SPEND_USD, 5 * min, bestCost ? 3 * bestCost : 0)) {
+    const cost = costOf(r);
+    if (r.outcomes === 0 && c.spendUsd >= Math.max(2 * JUDGE_MIN_SPEND_USD, 5 * min, bestCost ? 3 * bestCost : 0)) {
       decisions.push({ platform: c.platform, action: "stop", why: `spent ${money(c.spendUsd)} without a single ${word}` });
-    } else if (best && c !== best && cost !== null && bestCost !== null && cost > 2.5 * bestCost) {
-      const times = (cost / bestCost).toFixed(1);
-      const than = infos.get(best.platform)?.name ?? best.platform;
-      if (c.dailyBudgetUsd > min) decisions.push({ platform: c.platform, action: "cut", dailyUsd: min, why: `each ${word} costs ${times}× more than on ${than}` });
-      else decisions.push({ platform: c.platform, action: "stop", why: `each ${word} costs ${times}× more than on ${than}, already at its minimum budget` });
+    } else if (best && bestR && c !== best && cost !== null && bestCost !== null && cost > 2.5 * bestCost) {
+      const why = worseBy(r, bestR, word, `on ${infos.get(best.platform)?.name ?? best.platform}`);
+      if (c.dailyBudgetUsd > min) decisions.push({ platform: c.platform, action: "cut", dailyUsd: min, why });
+      else decisions.push({ platform: c.platform, action: "stop", why: `${why}, already at its minimum budget` });
     }
   }
-  if (best && (!best.lastScaledAt || now.getTime() - Date.parse(best.lastScaledAt) >= SCALE_EVERY_MS)) {
+  if (!hold && best && (!best.lastScaledAt || now.getTime() - Date.parse(best.lastScaledAt) >= SCALE_EVERY_MS)) {
     const freed = decisions.reduce((n, d) => {
       const c = active.find((x) => x.platform === d.platform);
       return n + (d.action === "stop" ? (c?.dailyBudgetUsd ?? 0) : d.action === "cut" ? (c?.dailyBudgetUsd ?? 0) - (d.dailyUsd ?? 0) : 0);
     }, 0);
     const target = Math.min(Math.round(best.dailyBudgetUsd * SCALE_FACTOR * 100) / 100, best.dailyBudgetUsd + room.dailyUsd + freed);
-    if (target > best.dailyBudgetUsd + 0.5) decisions.push({ platform: best.platform, action: "scale", dailyUsd: target, why: `the lowest cost per ${word} (${money(bestCost!)})` });
+    const fitNote = bestR!.fit !== null && bestR!.fit > 1.05 ? ", and its people stay better than other new users" : "";
+    if (target > best.dailyBudgetUsd + 0.5) decisions.push({ platform: best.platform, action: "scale", dailyUsd: target, why: `the lowest cost per ${word} (${money(bestR!.costPerOutcome!)})${fitNote}` });
   }
   return decisions;
 }
@@ -268,23 +282,22 @@ export function rebalance(campaigns: PlatformCampaign[], results: PlatformResult
 /**
  * Inside one platform: ads to pause (pure). An ad is judged once it spent
  * enough; it's paused when it brought nothing while another ad did, or when
- * each result costs 2.5× the best ad's. At least one ad keeps running.
+ * its fit-adjusted cost per result is 2.5× the best ad's. At least one ad keeps running.
  */
-export function adDecisions(c: PlatformCampaign, r: PlatformResult, by: "retained" | "outcome"): Array<{ key: string; why: string }> {
+export function adDecisions(c: PlatformCampaign, r: PlatformResult): Array<{ key: string; why: string }> {
   const live = c.creatives.filter((x) => !x.paused);
   if (live.length < 2) return [];
   const rows = r.ads.filter((a) => live.some((x) => x.key === a.key) && a.spendUsd >= AD_MIN_SPEND_USD);
-  const withCost = rows.filter((a) => costOf(a, by) !== null).sort((a, b) => costOf(a, by)! - costOf(b, by)!);
+  const withCost = rows.filter((a) => costOf(a) !== null).sort((a, b) => costOf(a)! - costOf(b)!);
   const best = withCost[0];
   if (!best) return [];
-  const bestCost = costOf(best, by)!;
-  const word = by === "retained" ? "user who stayed" : "result";
+  const bestCost = costOf(best)!;
   const out: Array<{ key: string; why: string }> = [];
   for (const a of rows) {
     if (a === best || live.length - out.length <= 1) continue;
-    const cost = costOf(a, by);
-    if (cost === null && a.spendUsd >= Math.max(2 * AD_MIN_SPEND_USD, 3 * bestCost)) out.push({ key: a.key, why: `spent ${money(a.spendUsd)} without a single ${word}, while another ad brought them` });
-    else if (cost !== null && cost > 2.5 * bestCost) out.push({ key: a.key, why: `each ${word} costs ${(cost / bestCost).toFixed(1)}× more than the best ad's` });
+    const cost = costOf(a);
+    if (cost === null && a.spendUsd >= Math.max(2 * AD_MIN_SPEND_USD, 3 * bestCost)) out.push({ key: a.key, why: `spent ${money(a.spendUsd)} without a single result, while another ad brought them` });
+    else if (cost !== null && cost > 2.5 * bestCost) out.push({ key: a.key, why: worseBy(a, best, "result", "the best ad's") });
   }
   return out;
 }
@@ -303,8 +316,10 @@ export type PlatformAdsDeps = {
   assets: AssetStore;
   providers: { creatify: VideoProvider | null; runway: VideoProvider | null };
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
-  /** Identified users' active days (retention engine); absent = judge by sign-ups only. */
+  /** Identified users' active days (retention engine); absent = fit unknown, cost alone. */
   users?: (app: AppEntry) => Promise<UserActivity[]>;
+  /** The retention engine's latest snapshot: the app's rhythm, and whether new users come back at all. */
+  retention?: (app: AppEntry) => Promise<RetentionSnapshot | null>;
   /** Conversions already sent; absent = don't send conversions. */
   sentConversions?: SentConversions;
   pageHealth?: (app: AppEntry, path: string) => Promise<{ ok: boolean; reason: string }>;
@@ -487,9 +502,13 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
 
   // 4. Judge per experiment: stop, pause losing ads, compare platforms.
   const users = deps.users ? await deps.users(app).catch(() => [] as UserActivity[]) : [];
-  const retention: Retention | undefined = events && users.length ? retentionFrom(events, users, now) : undefined;
+  const snapshot = deps.retention ? await deps.retention(app).catch(() => null) : null;
+  const retention: Retention | undefined = events && users.length ? retentionFrom(events, users, now, stayAfterDays(snapshot)) : undefined;
+  const held = scaleGate(snapshot);
+  if (held.hold && !file.scaleHeld) log(`Holding ad scale-ups: ${held.why}. Running ads continue.`);
+  if (!held.hold && file.scaleHeld) log("New users come back often enough again — ads may scale up again.");
+  file.scaleHeld = held.hold ? held.why : null;
   const allResults = new Map<string, PlatformResult[]>();
-  let judgedBy: "retained" | "outcome" = "outcome";
   const stopAll = async (betId: string, why: string) => {
     for (const c of file.campaigns.filter((x) => x.betId === betId && x.status !== "stopped")) {
       await deps.platforms.get(c.platform)?.pause(c.launched).catch(() => {});
@@ -519,14 +538,12 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     }
     if (!events) continue;
     const results = allResults.get(b.id)!.filter((r) => mine.some((c) => c.platform === r.platform));
-    const by = judgeBy(results);
-    if (by === "retained") judgedBy = "retained";
     // Inside each platform: losing ads.
     for (const c of mine.filter((x) => x.status === "active")) {
       const r = results.find((x) => x.platform === c.platform);
       const p = deps.platforms.get(c.platform);
       if (!r || !p) continue;
-      for (const d of adDecisions(c, r, by)) {
+      for (const d of adDecisions(c, r)) {
         try {
           await p.setAdActive(c.launched, d.key, false);
           const cr = c.creatives.find((x) => x.key === d.key)!;
@@ -541,7 +558,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     const activeDaily = file.campaigns.filter((c) => c.status === "active").reduce((n, c) => n + c.dailyBudgetUsd, 0);
     const room = { dailyUsd: Math.max(0, opts.monthlyAdsUsd / 30 - activeDaily) };
     const outcomeWord = b.metric === "signup" ? "sign-up" : "new user reaching first value";
-    for (const d of rebalance(mine, results, deps.infos, now, room, outcomeWord, by)) {
+    for (const d of rebalance(mine, results, deps.infos, now, room, outcomeWord, held.hold)) {
       const c = mine.find((x) => x.platform === d.platform)!;
       const p = deps.platforms.get(c.platform);
       if (!p) continue;
@@ -575,7 +592,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
   // 5. What day2 learned, for the next round (and the growth allocator).
   if (allResults.size) {
     const views = file.campaigns.map((c) => ({ betId: c.betId, platform: c.platform, status: c.status, stopReason: c.stopReason, creatives: c.creatives }));
-    file.learnings = computeLearnings(bets.bets, views, allResults, judgedBy, now);
+    file.learnings = computeLearnings(bets.bets, views, allResults, now);
     const ads = [...allResults.entries()].flatMap(([betId, rs]) =>
       rs.flatMap((r) => {
         const c = file.campaigns.find((x) => x.betId === betId && x.platform === r.platform);

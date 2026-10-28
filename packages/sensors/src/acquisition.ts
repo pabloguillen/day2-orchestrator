@@ -35,3 +35,13 @@ export function acquisitionFrom(url: string, referrer: string, ownHost: string):
   return { channel: "referral" };
 }
 
+
+/** Where a user first came from, when it was a day2 link: the experiment, and for ads the platform and the ad. */
+export type CameFrom = { experiment: string; platform: string | null; ad: string | null };
+
+/** "B-4.tiktok.v1" → { experiment: "B-4", platform: "tiktok", ad: "v1" }. */
+export function cameFromTag(tag: string | null | undefined): CameFrom | null {
+  if (!tag || !/^[A-Za-z0-9._-]{1,40}$/.test(tag)) return null;
+  const [experiment, platform, ad] = tag.split(".");
+  return experiment ? { experiment, platform: platform || null, ad: ad || null } : null;
+}

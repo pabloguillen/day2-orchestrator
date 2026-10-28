@@ -64,6 +64,7 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
 4. **Content** (`ads/produce.ts`, `ads/content.ts`), made once per experiment in every format the chosen platforms need:
    - **Images.** The app's real landing page, as a phone screenshot, in a frame with the brand colour, headline and button. One image per ratio per variant.
    - **Walkthrough videos.** A real screen recording of the page, composed into the same frame with ffmpeg. It only scrolls: nothing is tapped or typed on the live app. Each video gets a cover image and an audio track.
+   - **Motion videos** (`ads/motion.ts`). Animated product ads made in-house: kinetic headline, the app's real screenshots moving in a phone frame, benefit lines, end card with the button. Rendered frame by frame in Chromium and encoded with ffmpeg — no vendor, nothing generated: every screen is a real screenshot and every word is checked copy.
    - **AI presenter videos (Creatify).** Made when Creatify is connected and the script passed both checks.
    - **Generated motion shots (Runway).** Off by default; switch on with `DAY2_ADS_RUNWAY=on`.
 
@@ -79,14 +80,14 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
    - **Broken page:** its ads are held until the page works again (field checks).
    - **Budget used:** when the month's ad budget is used, everything is held until the new month.
    - **Conversions back to the platform.** Each sign-up from an ad is sent to that platform's conversions API (click id, plus the visitor's IP and browser where the platform needs them), once. That's what lets the platform find more people like them.
-   - **Judged by users who stay.** Once at least 10 people from an experiment's ads have been around for a week, platforms and ads are judged by how many are still using the app a week later; until then by sign-ups.
-   - **Inside a platform**, the ad that does clearly worse than the best one (or brings nobody who stays) is paused; the others keep running.
-   - **Comparing platforms**, per experiment, after 3 days and enough spend, by cost per result:
+   - **What an ad is judged on** (see "Ads and retention" below): cost per result, adjusted for **fit** — whether the people it brings stay as well as other new users who started at the same time. Never by absolute retention.
+   - **Inside a platform**, an ad whose fit-adjusted cost is 2.5× the best ad's (or that spent without a result) is paused; the others keep running.
+   - **Comparing platforms**, per experiment, after 3 days and enough spend, by fit-adjusted cost per result:
      - a platform that spent without a single result is stopped;
      - one that costs more than 2.5× the best is cut to its minimum, or stopped if it's already there;
-     - the best gets 1.5× more, at most weekly.
+     - the best gets 1.5× more, at most weekly — unless scale-ups are on hold for the retention engine (below).
    - **Worse overall:** an experiment that brings people who do worse than everyone else is stopped everywhere.
-7. **What day2 learned** (`ads/learnings.ts`), recomputed every pass and used by the next round:
+7. **What day2 learned** (`ads/learnings.ts`), ranked by fit-adjusted cost, recomputed every pass and used by the next round:
    - **Words:** headlines that brought the cheapest results, and the ones (and angles) that failed, go to the copy writer.
    - **Formats:** a format that lost twice and never won isn't made again.
    - **Platforms:** new experiments start with the platforms that did best for this app.
@@ -94,10 +95,19 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
    - **Growth allocator:** every ad's people and results count as format trials, once.
 8. **Kill switch.** The kill switch, or turning the autopilot off, pauses every ad on every platform.
 
+## Ads and retention
+
+An ad brings people to the product. Whether they stay is mostly the product and day2's retention engine (`docs/retention.md`). So the two are judged separately and connected on purpose (`ads/results.ts`, `ads/retention-link.ts`, `retention-pass.ts`):
+
+- **Ads are judged on what they control.** Cost per result, adjusted for fit. Fit compares the people an ad brought with *other new users who started in the same weeks* — same product, same retention treatments (holdouts are random, independent of source), so the retention engine's effect cancels out and what's left is whether the ad attracted the right people with the right promise. Fit is shrunk towards 1 when there are few users (10-user prior), bounded to 0.5–1.5, and unknown until there are 5 of the ad's own users and 20 others to compare with. "Staying" means seen again after the app's rhythm (7, 14 or 30 days for daily, weekly, monthly apps). If everyone leaves, no ad is blamed.
+- **The retention engine knows who came from ads.** Its snapshot splits new users into ad-brought and everyone else. When ad-brought new users come back clearly less (under 70% of the others' rate, 20+ of each), the gap is the first minutes after the ad, not the ad: day2 tickets one treatment — "continue the ad's promise" — for ad-brought users only (the app reads `day2.cameFrom()` from the field library), measured against its own holdout of ad-brought users.
+- **While ads buy users, new users' leak weighs 1.5×** when the retention engine picks what to fix next.
+- **Don't pour into a leaking bucket.** While fewer than 10% of new users come back the next period (30+ new users), ads keep running but don't scale up; they scale again by themselves once the retention engine has lifted it. The Ads tab says so and links to Retention.
+
 The console shows all of this under **Growth → Ads**:
-- this month's credits, people brought, and users still there a week later;
+- this month's credits, people brought, and credits per sign-up (and a note when scale-ups are on hold);
 - platforms: through whose account, the page ads show as, sign-ups sent back, and one button for whatever is missing;
-- every campaign with its spend, people, sign-ups, users who stayed and cost per one — and each ad's own results (best, paused and why);
+- every campaign with its spend, people, sign-ups, fit ("stay vs. others") and cost per one — and each ad's own results (best, paused and why);
 - what day2 learned;
 - the ads that were made.
 

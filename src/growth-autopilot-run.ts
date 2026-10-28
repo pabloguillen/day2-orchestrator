@@ -83,6 +83,7 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
         providers: videoProviders(),
         sentConversions: sentConversions(),
         users: async (a: AppEntry) => (await fieldStore().activity(a.id, new Date(Date.now() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users,
+        retention: (a: AppEntry) => fieldStore().retention(a.id),
       };
     })(),
     retention: {

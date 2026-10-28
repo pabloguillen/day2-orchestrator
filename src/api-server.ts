@@ -79,6 +79,7 @@ import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnec
 import { fromUsd } from "./ads/fx";
 import { FORMAT_LABEL } from "./ads/learnings";
 import { retentionFrom } from "./ads/results";
+import { stayAfterDays } from "./ads/retention-link";
 import { hasSecretsKey } from "./secrets";
 import { chromiumPath } from "./simulation";
 import { REF_RE } from "./ads/identities";
@@ -1621,7 +1622,7 @@ async function adsResponse(app: AppEntry) {
   const since = file.campaigns.map((c) => c.launchedAt).sort()[0];
   const events = since ? ((await appEvents(app, since, fieldStore())) ?? []) : [];
   const users = since ? (await fieldStore().activity(app.id, new Date(now.getTime() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users : [];
-  const retention = users.length ? retentionFrom(events, users, now) : undefined;
+  const retention = users.length ? retentionFrom(events, users, now, stayAfterDays(await fieldStore().retention(app.id).catch(() => null))) : undefined;
   const assets = await assetStore().list(app.id);
   const byId = new Map(assets.map((a) => [a.id, a]));
   const results = new Map<string, PlatformResultView>();
@@ -1656,6 +1657,8 @@ async function adsResponse(app: AppEntry) {
       }),
     ),
     month: { budgetCredits: creditsForCost(monthlyAds, "paid_ads"), spentCredits: creditsForCost(monthSpend, "paid_ads") },
+    /** Why ads aren't scaling up right now (new users barely come back — the retention engine is on it), or null. */
+    scaleHeld: file.scaleHeld,
     campaigns: file.campaigns.map((c) => {
       const b = bets.find((x) => x.id === c.betId);
       const r = results.get(`${c.betId}:${c.platform}`);
@@ -1679,6 +1682,7 @@ async function adsResponse(app: AppEntry) {
         people: r?.people ?? 0,
         outcomes: r?.outcomes ?? 0,
         retained: r?.retained ?? 0,
+        fit: r?.fit ?? null,
         perOutcome: money(c, r?.costPerOutcome ?? null),
         creditsPerOutcome: c.billing === "own" ? null : credits(r?.costPerOutcome ?? null),
         creatives: c.creatives.map((x) => {
@@ -1694,6 +1698,7 @@ async function adsResponse(app: AppEntry) {
             thumbnailUrl: a?.thumbnail?.url ?? (a?.kind === "image" ? a.url : null),
             people: ad?.people ?? 0,
             outcomes: ad?.outcomes ?? 0,
+            fit: ad?.fit ?? null,
             perOutcome: money(c, ad?.costPerOutcome ?? null),
           };
         }),
@@ -1701,9 +1706,9 @@ async function adsResponse(app: AppEntry) {
     }),
     learnings: file.learnings && {
       at: file.learnings.at,
-      judgedBy: file.learnings.judgedBy,
-      platforms: file.learnings.platforms.map((p) => ({ platform: p.platform, name: platformInfo(p.platform).name, people: p.people, results: file.learnings!.judgedBy === "retained" ? p.retained : p.outcomes, perResultCredits: credits(p.costUsd) })),
-      formats: file.learnings.formats.map((f) => ({ format: f.format, label: FORMAT_LABEL[f.format], ads: f.ads, people: f.people, results: f.outcomes, wins: f.wins, losses: f.losses, perResultCredits: credits(f.costUsd) })),
+      fitKnown: file.learnings.fitKnown,
+      platforms: file.learnings.platforms.map((p) => ({ platform: p.platform, name: platformInfo(p.platform).name, people: p.people, results: p.outcomes, fit: p.fit, perResultCredits: credits(p.costUsd) })),
+      formats: file.learnings.formats.map((f) => ({ format: f.format, label: FORMAT_LABEL[f.format], ads: f.ads, people: f.people, results: f.outcomes, fit: f.fit, wins: f.wins, losses: f.losses, perResultCredits: credits(f.costUsd) })),
       copy: { winners: file.learnings.copy.winners.map(({ costUsd: _c, ...w }) => w), losers: file.learnings.copy.losers },
       angles: file.learnings.angles,
     },

@@ -173,6 +173,10 @@ describe("comparing platforms by what they bring", () => {
       { platform: "meta", action: "scale", dailyUsd: 15, why: expect.stringMatching(/^the lowest cost per sign-up \([\d,]+ credits\)$/) },
     ]);
   });
+  test("while the retention engine holds scale-ups, losers are still cut but nothing grows", () => {
+    const d = rebalance(campaigns, results, new Map(Object.entries(INFOS)) as Map<PlatformId, PlatformInfo>, NOW, { dailyUsd: 0 }, "sign-up", true);
+    expect(d.map((x) => x.action)).toEqual(["cut", "stop"]);
+  });
   test("too early or too little spend: no judgement yet", () => {
     const young = campaigns.map((c) => ({ ...c, launchedAt: new Date(NOW.getTime() - DAY).toISOString() }));
     expect(rebalance(young, results, new Map(Object.entries(INFOS)) as Map<PlatformId, PlatformInfo>, NOW, { dailyUsd: 0 }, "sign-up")).toEqual([]);

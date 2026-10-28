@@ -136,7 +136,16 @@ export type RetentionSnapshot = {
   trend: Array<{ end: string; rate: number | null }>;
   /** The state losing the most users. */
   leak: Target | null;
+  /**
+   * New users split by where they came from: day2's ads vs everyone else, in
+   * the last full period (null when the app has no ad-brought users). When
+   * ad users come back clearly less, the first minutes after an ad are the
+   * leak to fix — not the ad (see ads/retention-link.ts).
+   */
+  newBySource?: { ads: { n: number; kept: number; rate: number | null }; other: { n: number; kept: number; rate: number | null } } | null;
 };
+
+export type Source = "ads" | "other";
 
 const EMPTY_STATES = (): Record<LifecycleState, number> => ({ new: 0, current: 0, reactivated: 0, resurrected: 0, at_risk: 0, lapsing: 0, dormant: 0 });
 const perTarget = <T>(v: () => T): Record<Target, T> => ({ new: v(), current: v(), back: v(), at_risk: v(), lapsing: v() });
@@ -179,7 +188,7 @@ const stateAt = (u: Timeline, at: number, rhythm: Rhythm) => (u.first > at ? nul
 const activeIn = (u: Timeline, from: number, to: number) => u.times.some((x) => x > from && x <= to);
 const targetOf = (s: LifecycleState | null): Target | null => (s ? (TARGETS.find((t) => TARGET_STATES[t].includes(s)) ?? null) : null);
 
-export function computeSnapshot(input: { users: UserActivity[]; older: number; productType: ProductType | null; now: Date }): RetentionSnapshot {
+export function computeSnapshot(input: { users: UserActivity[]; older: number; productType: ProductType | null; now: Date; sourceOf?: (user: string) => Source }): RetentionSnapshot {
   const { now } = input;
   const usage = rhythmFromUsage(input.users, now);
   const rhythm = usage ?? (input.productType ? PRODUCT_TYPES[input.productType].rhythm : "weekly");
@@ -208,6 +217,19 @@ export function computeSnapshot(input: { users: UserActivity[]; older: number; p
     return { n, kept };
   };
   const last = ratesAt(end - P);
+  // New users in the last full period, by source.
+  let newBySource: RetentionSnapshot["newBySource"] = null;
+  if (input.sourceOf) {
+    const by = { ads: { n: 0, kept: 0 }, other: { n: 0, kept: 0 } };
+    for (const u of lines) {
+      if (targetOf(stateAt(u, end - P, rhythm)) !== "new") continue;
+      const g = by[input.sourceOf(u.user)];
+      g.n++;
+      if (activeIn(u, end - P, end)) g.kept++;
+    }
+    const rate = (g: { n: number; kept: number }) => (g.n >= MIN_FOR_RATE ? g.kept / g.n : null);
+    if (by.ads.n) newBySource = { ads: { ...by.ads, rate: rate(by.ads) }, other: { ...by.other, rate: rate(by.other) } };
+  }
   const rates = perTarget<number | null>(() => null);
   const lost = perTarget(() => 0);
   for (const k of TARGETS) {
@@ -233,6 +255,7 @@ export function computeSnapshot(input: { users: UserActivity[]; older: number; p
     lost,
     trend,
     leak,
+    newBySource,
   };
 }
 
@@ -414,6 +437,8 @@ export type TreatmentResult =
     };
 
 export type Treatment = TreatmentIdea & {
+  /** Only users from this source get it (and are measured): "ads" = brought by day2's ads. */
+  segment?: Source;
   researchId: string;
   rhythm: Rhythm;
   holdout: number;
@@ -455,18 +480,26 @@ const undoKey = (id: string) => `retention:undo:${id}`;
  * The next treatment to build: for the state losing the most users, the
  * first idea not yet tried — one at a time, so each is measured on its own.
  */
-export function nextTreatment(file: RetentionFile, snap: RetentionSnapshot, backlog: Backlog): TreatmentIdea | null {
-  const research = file.research[0];
-  if (!research || snap.status !== "ready") return null;
-  const open = file.treatments.filter((t) => {
+export function openTreatments(file: RetentionFile, backlog: Backlog): number {
+  return file.treatments.filter((t) => {
     const ticket = backlog.tickets.find((x) => x.id === t.ticketId);
     return ticket && ticket.state !== "done" && ticket.state !== "parked";
   }).length;
-  if (open >= MAX_OPEN_TREATMENTS) return null;
+}
+
+/**
+ * `paidNew`: day2 is buying new users with ads right now, so each new user
+ * lost costs money — new users' leak counts 1.5× when choosing what to fix.
+ */
+export function nextTreatment(file: RetentionFile, snap: RetentionSnapshot, backlog: Backlog, opts: { paidNew?: boolean } = {}): TreatmentIdea | null {
+  const research = file.research[0];
+  if (!research || snap.status !== "ready") return null;
+  if (openTreatments(file, backlog) >= MAX_OPEN_TREATMENTS) return null;
   // A state with a treatment still being measured waits for its verdict.
   const measuring = new Set(file.treatments.filter((t) => t.result.state === "building" || t.result.state === "collecting").map((t) => t.target));
   const tried = new Set(file.treatments.map((t) => `${t.target}:${t.name.trim().toLowerCase()}`));
-  const order = TARGETS.filter((k) => snap.rates[k] !== null && !measuring.has(k)).sort((a, b) => snap.lost[b] - snap.lost[a]);
+  const weight = (k: Target) => snap.lost[k] * (k === "new" && opts.paidNew ? 1.5 : 1);
+  const order = TARGETS.filter((k) => snap.rates[k] !== null && !measuring.has(k)).sort((a, b) => weight(b) - weight(a));
   for (const target of order) {
     const idea = research.ideas.find((i) => i.target === target && !tried.has(`${target}:${i.name.trim().toLowerCase()}`));
     if (idea) return idea;
@@ -527,6 +560,73 @@ export function treatmentTicket(idea: TreatmentIdea, research: RetentionResearch
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ads and retention: continue the ad's promise
+// ---------------------------------------------------------------------------
+
+export const AD_PROMISE_ID = "new-ads-continue-the-promise";
+/** Ad-brought new users must come back less than this share of other new users' rate before day2 acts. */
+export const AD_PROMISE_GAP = 0.7;
+
+export type AdExperiment = { id: string; angle: string; landingPath: string | null };
+
+/**
+ * Pure. When new users from day2's ads come back clearly less often than
+ * other new users (enough of both), the gap is usually the first minutes:
+ * the ad promised one thing, the app opens on a generic start. One
+ * treatment — only for ad-brought users, measured against its own holdout.
+ * Null when it doesn't apply, was tried, or another treatment is open.
+ */
+export function adPromiseIdea(file: RetentionFile, snap: RetentionSnapshot, backlog: Backlog, experiments: AdExperiment[]): (TreatmentIdea & { segment: Source }) | null {
+  const s = snap.newBySource;
+  if (snap.status !== "ready" || !s || s.ads.rate === null || s.other.rate === null || !experiments.length) return null;
+  if (s.ads.rate >= AD_PROMISE_GAP * s.other.rate) return null;
+  if (file.treatments.some((t) => t.id === AD_PROMISE_ID) || openTreatments(file, backlog) >= MAX_OPEN_TREATMENTS) return null;
+  const list = experiments.slice(0, 6).map((e) => `"${e.id}" promised "${e.angle}"${e.landingPath ? ` (landing ${e.landingPath})` : ""}`).join("; ");
+  return {
+    id: AD_PROMISE_ID,
+    target: "new",
+    channel: "in_app",
+    segment: "ads",
+    name: "Continue the ad's promise in the first minute",
+    practice: "People who arrive from an ad came for the one thing the ad showed. The first screens should deliver exactly that before anything else.",
+    change: `For new users who came from a day2 ad (day2.cameFrom() returns the experiment), open on what that ad promised and get them to it in one step, before the generic tour. The ads: ${list}.`,
+    leaders: [],
+  };
+}
+
+export function adPromiseTicket(idea: TreatmentIdea, snap: RetentionSnapshot): NewTicketInput {
+  const s = snap.newBySource!;
+  const pct0 = (x: number | null) => (x === null ? "?" : `${Math.round(x * 100)}%`);
+  const word = RHYTHM_WORD[snap.rhythm];
+  return {
+    title: "Keep new users from ads: continue the ad's promise in the first minute",
+    type: "feature",
+    description: [
+      `New users from day2's ads come back ${pct0(s.ads.rate)} of the time the next ${word}; other new users ${pct0(s.other.rate)} (${s.ads.n} and ${s.other.n} new users last ${word}).`,
+      `The ads are doing their job (bringing people at a good price); the gap is what happens right after. The ad promised one thing — the app should open on it.`,
+      ``,
+      `Change (in the app): ${idea.change}`,
+      ``,
+      `How: const from = day2.cameFrom() — { experiment, platform, ad } or null. Map experiment ids to the screen/feature above; keep everything else as it is for everyone else.`,
+      ``,
+      `Holdout (required, so day2 can measure it): ${Math.round(DEFAULT_HOLDOUT * 100)}% of ad-brought users must not get this.`,
+      `- Show it only when day2.cameFrom() !== null && day2.treatment("${idea.id}") === "on".`,
+    ].join("\n"),
+    doneWhen: [
+      "New users from a day2 ad land on what that ad promised, in one step",
+      "Users who didn't come from an ad see no change",
+      `Held-out users (treatment "${idea.id}") get the usual start`,
+      "A test covers an ad-brought user, a held-out one and an organic one",
+    ],
+    priority: 2,
+    prioritySource: "day2",
+    source: { kind: "day2_proposal", key: treatmentKey(idea.id) },
+    actor: "day2",
+    createdNote: "From day2's ads and retention engine: ad-brought new users come back less than others.",
+  };
+}
+
 export function identifyTicket(native: boolean): NewTicketInput {
   return {
     title: "Let day2 see who comes back",
@@ -553,7 +653,7 @@ export function identifyTicket(native: boolean): NewTicketInput {
   };
 }
 
-export function addTreatment(file: RetentionFile, idea: TreatmentIdea, research: RetentionResearch, rhythm: Rhythm, ticketId: string, now: Date): RetentionFile {
+export function addTreatment(file: RetentionFile, idea: TreatmentIdea & { segment?: Source }, research: { id: string }, rhythm: Rhythm, ticketId: string, now: Date): RetentionFile {
   const t: Treatment = { ...idea, researchId: research.id, rhythm, holdout: DEFAULT_HOLDOUT, ticketId, createdAt: now.toISOString(), shippedAt: null, result: { state: "building", note: "Being built." }, undoTicketId: null };
   return { ...file, treatments: [t, ...file.treatments] };
 }
@@ -570,7 +670,7 @@ const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
  * their hashed id puts them in; the outcome is being active in the next
  * period. Intention to treat: no need to know who actually saw it.
  */
-export function measureTreatment(t: Treatment, users: UserActivity[], now: Date): TreatmentResult {
+export function measureTreatment(t: Treatment, users: UserActivity[], now: Date, sourceOf?: (user: string) => Source): TreatmentResult {
   if (!t.shippedAt) return { state: "building", note: "Being built." };
   const P = WINDOWS[t.rhythm].period * DAY;
   const start = dayStart(Date.parse(t.shippedAt)) + DAY;
@@ -579,6 +679,7 @@ export function measureTreatment(t: Treatment, users: UserActivity[], now: Date)
   const treated: boolean[] = [];
   const held: boolean[] = [];
   for (const u of timelines(users)) {
+    if (t.segment && sourceOf && sourceOf(u.user) !== t.segment) continue;
     for (let b = start; b <= lastBoundary; b += P) {
       const s = stateAt(u, b, t.rhythm);
       if (!s || !TARGET_STATES[t.target].includes(s)) continue;
@@ -622,6 +723,7 @@ export function updateTreatments(
   tickets: Ticket[],
   users: UserActivity[],
   now: Date,
+  sourceOf?: (user: string) => Source,
 ): { file: RetentionFile; decided: Treatment[]; undo: Array<{ treatment: Treatment; ticket: NewTicketInput }> } {
   const decided: Treatment[] = [];
   const undo: Array<{ treatment: Treatment; ticket: NewTicketInput }> = [];
@@ -632,7 +734,7 @@ export function updateTreatments(
       if (ticket?.state === "done") t = { ...t, shippedAt: ticket.doneAt ?? ticket.updatedAt };
     }
     if (t.result.state !== "building" && t.result.state !== "collecting") return t;
-    const result = measureTreatment(t, users, now);
+    const result = measureTreatment(t, users, now, sourceOf);
     t = { ...t, result };
     if (result.state !== "building" && result.state !== "collecting") {
       decided.push(t);
@@ -658,6 +760,8 @@ export type RetentionView = {
     name: string;
     target: Target;
     channel: Channel;
+    /** "ads": only for users brought by day2's ads. */
+    segment: Source | null;
     practice: string;
     leaders: Leader[];
     ticket: { id: string; state: Ticket["state"] } | null;
@@ -682,7 +786,7 @@ export function retentionView(file: RetentionFile, snapshot: RetentionSnapshot |
     productType: research ? { id: research.productType, label: PRODUCT_TYPES[research.productType].label } : null,
     category: research?.category ?? null,
     leaders: research?.leaders ?? [],
-    treatments: file.treatments.map((t) => ({ id: t.id, name: t.name, target: t.target, channel: t.channel, practice: t.practice, leaders: t.leaders, ticket: ticketOf(t.ticketId), result: t.result })),
+    treatments: file.treatments.map((t) => ({ id: t.id, name: t.name, target: t.target, channel: t.channel, segment: t.segment ?? null, practice: t.practice, leaders: t.leaders, ticket: ticketOf(t.ticketId), result: t.result })),
     next: (research?.ideas ?? [])
       .filter((i) => !tried.has(i.id))
       .sort((a, b) => (lost ? lost[b.target] - lost[a.target] : 0))

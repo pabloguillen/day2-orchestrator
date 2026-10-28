@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquisitionFrom } from "../src/acquisition";
+import { acquisitionFrom, cameFromTag } from "../src/acquisition";
 
 describe("where a visitor came from", () => {
   test("an ad: experiment, platform, ad — and the platform's click id for conversions", () => {
@@ -9,5 +9,14 @@ describe("where a visitor came from", () => {
   });
   test("click ids without day2's tag aren't kept", () => {
     expect(acquisitionFrom("https://buddy.example/?gclid=abc", "https://www.google.com/", "buddy.example")).toEqual({ channel: "search" });
+  });
+});
+
+describe("cameFromTag", () => {
+  test("experiment, platform and ad from a day2 tag; junk is ignored", () => {
+    expect(cameFromTag("B-4.tiktok.v1")).toEqual({ experiment: "B-4", platform: "tiktok", ad: "v1" });
+    expect(cameFromTag("B-4")).toEqual({ experiment: "B-4", platform: null, ad: null });
+    expect(cameFromTag("<script>")).toBeNull();
+    expect(cameFromTag(null)).toBeNull();
   });
 });

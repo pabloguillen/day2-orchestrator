@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { AppState, Appearance, Dimensions, Linking, PixelRatio, Platform } from "react-native";
-import { acquisitionFrom } from "./acquisition";
+import { acquisitionFrom, cameFromTag, type CameFrom } from "./acquisition";
 import { arm, hashUser } from "./lifecycle";
 import { Engine, ERROR_SHOWN, LOADING_TARGET, normalizePath, type Env } from "./core";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
@@ -65,6 +65,8 @@ export type Day2Native = {
   identify(userId: string | null): void;
   /** Whether this user gets a retention treatment ("on") or is held out to measure it. */
   treatment(id: string, holdout?: number): "on" | "holdout";
+  /** Where this person first came from, when it was a day2 link (e.g. an ad), so the app can continue its promise. */
+  cameFrom(): CameFrom | null;
   flush(): void;
   stop(): void;
 };
@@ -79,6 +81,7 @@ const NOOP: Day2Native = {
   action: (_n, h) => (...a) => h?.(...a),
   identify() {},
   treatment: () => "on",
+  cameFrom: () => null,
   flush() {},
   stop() {},
 };
@@ -256,8 +259,17 @@ export function startDay2(opts: NativeOptions): Day2Native {
   undo.push(() => sub.remove());
 
   // The visit, with where it came from (the link that opened the app).
+  let from: string | null = null;
+  if (opts.identity === "device" && opts.storage) void opts.storage.getItem("day2.from").then((v) => (from = from ?? v)).catch(() => {});
   void Linking.getInitialURL()
-    .then((url) => engine.track("visit", url ? acquisitionFrom(url, "", "") : { channel: "direct" }))
+    .then((url) => {
+      const acq = url ? acquisitionFrom(url, "", "") : { channel: "direct" as const };
+      engine.track("visit", acq);
+      if (acq?.campaignId && !from) {
+        from = acq.campaignId;
+        if (opts.identity === "device") void opts.storage?.setItem("day2.from", from).catch(() => {});
+      }
+    })
     .catch(() => engine.track("visit"));
 
   if (opts.fetchContracts !== false) {
@@ -301,6 +313,7 @@ export function startDay2(opts: NativeOptions): Day2Native {
     },
     identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
     treatment: (id, holdout) => arm(engine.userId, id, holdout),
+    cameFrom: () => cameFromTag(from),
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

@@ -8,7 +8,12 @@ import { indexRepo } from "./distribution-loops";
 import { appKind } from "./field-work";
 import { USER_DAY_DAYS, type FieldStore } from "./field-store";
 import type { AppProfile } from "./onboarding";
+import { ADS_FILENAME, loadAds } from "./ads/autopilot";
+import { parseTag, retentionFrom } from "./ads/results";
+import { BETS_FILENAME, loadBets } from "./growth-bets";
 import {
+  adPromiseIdea,
+  adPromiseTicket,
   addTreatment,
   computeSnapshot,
   historyDays,
@@ -27,6 +32,7 @@ import {
   type ResearchInput,
   type RetentionResearch,
   type RetentionSnapshot,
+  type Source,
 } from "./retention";
 import { randomUUID } from "node:crypto";
 
@@ -109,8 +115,13 @@ export async function retentionPass(
     return report;
   }
   const days = Math.min(USER_DAY_DAYS, historyDays("monthly"));
-  const activity = await deps.store.activity(app.id, dayOf(new Date(now.getTime() - days * 86_400_000)));
-  const snapshot = computeSnapshot({ ...activity, productType, now });
+  const since = new Date(now.getTime() - days * 86_400_000);
+  const activity = await deps.store.activity(app.id, dayOf(since));
+  // Where each user first came from: day2's ads (a tag with a platform) or anything else.
+  const ads = loadAds(resolve(app.repoPath, ADS_FILENAME));
+  const brought = ads.campaigns.length ? retentionFrom(await deps.store.events(app.id, since).catch(() => []), [], now).broughtBy : new Map<string, string>();
+  const sourceOf = (user: string): Source => (parseTag(brought.get(user))?.platform ? "ads" : "other");
+  const snapshot = computeSnapshot({ ...activity, productType, now, ...(brought.size ? { sourceOf } : {}) });
   await deps.store.setRetention(app.id, snapshot);
   report.snapshot = snapshot;
 
@@ -137,7 +148,7 @@ export async function retentionPass(
 
   // 3. Measure what's live, against its holdout.
   const backlog = await backlogNow();
-  const upd = updateTreatments(file, backlog.tickets, activity.users, now);
+  const upd = updateTreatments(file, backlog.tickets, activity.users, now, sourceOf);
   file = upd.file;
   for (const d of upd.decided) log(`Measured "${d.name}" (${d.ticketId}) against its holdout: ${d.result.note}`);
   for (const u of upd.undo) {
@@ -174,9 +185,25 @@ export async function retentionPass(
     }
   }
 
-  // 5. The biggest leak gets the next treatment.
+  // 5. Ad-brought new users staying clearly less than other new users: the
+  // first minutes after an ad are the leak (the ads keep running).
+  const bets = loadBets(resolve(app.repoPath, BETS_FILENAME)).bets;
+  const adBets = bets.filter((b) => ads.campaigns.some((c) => c.betId === b.id)).map((b) => ({ id: b.id, angle: b.angle, landingPath: b.landingPath ?? null }));
+  const promise = adPromiseIdea(file, snapshot, await backlogNow(), adBets);
+  if (promise) {
+    const t = await add(adPromiseTicket(promise, snapshot));
+    file = addTreatment(file, promise, { id: "ads" }, snapshot.rhythm, t.id, now);
+    report.ticketsCreated.push(t.id);
+    const s = snapshot.newBySource!;
+    log(`New users from ads come back ${Math.round(s.ads.rate! * 100)}% of the time, other new users ${Math.round(s.other.rate! * 100)}% — added ${t.id} so the app opens on what each ad promised. Ad-brought users only, 10% held out.`);
+    saveRetention(path, file);
+    return report;
+  }
+
+  // 6. The biggest leak gets the next treatment (new users weigh more while ads buy them).
   const research = file.research[0];
-  const idea = research ? nextTreatment(file, snapshot, await backlogNow()) : null;
+  const paidNew = ads.campaigns.some((c) => c.status === "active");
+  const idea = research ? nextTreatment(file, snapshot, await backlogNow(), { paidNew }) : null;
   if (idea && research) {
     const t = await add(treatmentTicket(idea, research, snapshot));
     file = addTreatment(file, idea, research, snapshot.rhythm, t.id, now);
