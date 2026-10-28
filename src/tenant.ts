@@ -3,7 +3,9 @@ import { dirname, join, resolve, sep } from "node:path";
 import { $ } from "bun";
 import type { AppEntry } from "./apps-registry";
 import { allApps, dbApps, fileApps, type AppsStore } from "./apps-store";
-import type { Role, Session } from "./auth";
+import { authConfig, type Role, type Session } from "./auth";
+import { dbAssetStore, fileAssetStore, type AssetStore } from "./ads/assets";
+import { dbPlatformIdentities, filePlatformIdentities, type PlatformIdentityStore } from "./ads/identities";
 import { INTEGRATIONS_FILENAME } from "./backlog-trackers";
 import type { CreditStore } from "./credits";
 import { appsRegistryPath, creditStore, dataDir } from "./day2-paths";
@@ -93,6 +95,18 @@ export function accountTenant(accountId: string, githubInstallationId: number | 
  * (connectors.ts) — one store for the whole platform. */
 export function platformTools(): ConnectorStore {
   return serverMode() === "accounts" ? dbConnectors(db()) : fileConnectors(join(dataDir(), CONNECTORS_FILENAME));
+}
+
+/** Finished ad images and videos (ads/assets.ts), on day2's disk. */
+export function assetStore(): AssetStore {
+  const root = join(dataDir(), "ad-assets");
+  const url = authConfig().publicUrl;
+  return serverMode() === "accounts" ? dbAssetStore(db(), root, url) : fileAssetStore(root, url);
+}
+
+/** Who each app's ads show as on each platform (ads/identities.ts). */
+export function platformIdentities(): PlatformIdentityStore {
+  return serverMode() === "accounts" ? dbPlatformIdentities(db()) : filePlatformIdentities(join(dataDir(), ".day2-platform-identities.json"), join(dataDir(), AD_IDENTITIES_FILENAME));
 }
 
 export function adIdentities(): AdIdentityStore {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { $ } from "bun";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   generateAppId,
@@ -73,9 +73,16 @@ import { isMetaPageId } from "./ad-identities";
 import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
 import { USER_DAY_DAYS } from "./field-store";
+import { ADS_FILENAME, loadAds, platformResults } from "./ads/autopilot";
+import { ALL_PLATFORMS, configuredPlatforms, platformInfo } from "./ads/registry";
+import { REF_RE } from "./ads/identities";
+import { ASSET_ID_RE } from "./ads/assets";
+import type { PlatformId } from "./ads/types";
 import {
   adIdentities,
   assertProductionReady,
+  assetStore,
+  platformIdentities,
   fieldStore,
   ingestKeys,
   platformTools,
@@ -1578,6 +1585,135 @@ async function betsResponse(app: AppEntry) {
     measuring: events !== null,
   };
 }
+
+// ---- Ads on every platform (src/ads/) ----
+
+/** What the Ads tab shows: platforms (ready or what's missing), this month's ads, every campaign with what it brought, and the content made. Spend in credits only. */
+async function adsResponse(app: AppEntry) {
+  const now = new Date();
+  const platforms = configuredPlatforms();
+  const linked = await platformIdentities().forApp(app.id);
+  const file = loadAds(appFile(app, ADS_FILENAME));
+  const bets = loadBets(appFile(app, BETS_FILENAME)).bets;
+  const monthlyAds = monthlyAdBudgetUsd(loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME)).budget.monthlyBudgetUsd);
+  const month = now.toISOString().slice(0, 7);
+  const monthSpend = file.campaigns.reduce((n, c) => n + Math.max(0, c.spendUsd - (c.month.id === month ? c.month.spendAtStart : c.spendUsd)), 0);
+  const since = file.campaigns.map((c) => c.launchedAt).sort()[0];
+  const events = since ? ((await appEvents(app, since, fieldStore())) ?? []) : [];
+  const assets = await assetStore().list(app.id);
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const results = new Map<string, ReturnType<typeof platformResults>[number]>();
+  for (const b of bets) {
+    const mine = file.campaigns.filter((c) => c.betId === b.id);
+    if (mine.length) for (const r of platformResults(b, mine, events)) results.set(`${b.id}:${r.platform}`, r);
+  }
+  return {
+    platforms: ALL_PLATFORMS.map((id) => {
+      const info = platformInfo(id);
+      const ident = linked.find((l) => l.platform === id);
+      return {
+        id,
+        name: info.name,
+        connected: platforms.has(id),
+        identity: info.identity,
+        identityHelp: info.identityHelp ?? null,
+        linked: ident ? { ref: ident.ref, displayName: ident.displayName, setBy: ident.setBy } : null,
+        ready: platforms.has(id) && (info.identity !== "app_account" || Boolean(ident)),
+        audiences: info.audiences,
+      };
+    }),
+    month: { budgetCredits: creditsForCost(monthlyAds, "paid_ads"), spentCredits: creditsForCost(monthSpend, "paid_ads") },
+    campaigns: file.campaigns.map((c) => {
+      const b = bets.find((x) => x.id === c.betId);
+      const r = results.get(`${c.betId}:${c.platform}`);
+      return {
+        betId: c.betId,
+        betTitle: b?.title ?? c.betId,
+        metric: b?.metric ?? "activation",
+        platform: c.platform,
+        status: c.status,
+        heldFor: c.heldFor,
+        stopReason: c.stopReason,
+        review: c.review,
+        launchedAt: c.launchedAt,
+        dailyCredits: creditsForCost(c.dailyBudgetUsd, "paid_ads"),
+        spentCredits: creditsForCost(c.billedSpendUsd, "paid_ads"),
+        impressions: c.impressions,
+        clicks: c.clicks,
+        people: r?.people ?? 0,
+        outcomes: r?.outcomes ?? 0,
+        creditsPerOutcome: r?.costPerOutcome != null ? creditsForCost(r.costPerOutcome, "paid_ads") : null,
+        creatives: c.creatives.map((x) => {
+          const a = x.assetId ? byId.get(x.assetId) : undefined;
+          return { key: x.key, kind: x.kind, url: a?.url ?? null, thumbnailUrl: a?.thumbnail?.url ?? (a?.kind === "image" ? a.url : null) };
+        }),
+      };
+    }),
+    content: file.content.map((ct) => ({
+      betId: ct.betId,
+      at: ct.at,
+      variants: ct.copy.variants.map((v) => ({ headline: v.headline, body: v.body })),
+      dropped: ct.dropped,
+      notes: ct.notes,
+      assets: ct.assets.flatMap((x) => {
+        const a = byId.get(x.assetId);
+        return a ? [{ id: a.id, kind: a.kind, ratio: a.ratio, label: a.label, source: a.source, aiPerson: a.aiPerson, url: a.url, thumbnailUrl: a.thumbnail?.url ?? (a.kind === "image" ? a.url : null), durationSec: a.durationSec ?? null }] : [];
+      }),
+    })),
+  };
+}
+
+route("GET", "/api/apps/:id/growth/ads", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json(await adsResponse(app));
+});
+
+/** Link the page/account an app's ads show as on a platform (owners, admins, day2's operator). */
+route("PUT", "/api/apps/:id/growth/ads/identities/:platform", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const platform = params.platform as PlatformId;
+  if (!ALL_PLATFORMS.includes(platform)) throw new HttpError(404, "Unknown platform.");
+  const body = (await req.json().catch(() => null)) as { ref?: unknown; displayName?: unknown } | null;
+  const ref = typeof body?.ref === "string" ? body.ref.trim() : "";
+  if (!REF_RE[platform].test(ref) || !ref) throw new HttpError(400, `That doesn't look like a ${platformInfo(platform).name} reference: ${platformInfo(platform).identityHelp ?? "check the id"}.`);
+  const displayName = typeof body?.displayName === "string" ? body.displayName.trim().slice(0, 80) : "";
+  await platformIdentities().set({ appId: app.id, platform, ref, displayName: displayName || app.name, setBy: (await actorName(t)) ?? null });
+  return json(await adsResponse(app));
+});
+
+route("DELETE", "/api/apps/:id/growth/ads/identities/:platform", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const platform = params.platform as PlatformId;
+  if (!ALL_PLATFORMS.includes(platform)) throw new HttpError(404, "Unknown platform.");
+  await platformIdentities().remove(app.id, platform);
+  return json(await adsResponse(app));
+});
+
+/** Ad images and videos, by unguessable id: ad platforms fetch them from here. */
+route(
+  "GET",
+  "/api/assets/:file",
+  async (req, params) => {
+    const id = (params.file ?? "").replace(/\.[a-z0-9]+$/, "");
+    if (!ASSET_ID_RE.test(id)) throw new HttpError(404, "Not found.");
+    const a = await assetStore().get(id);
+    if (!a || !existsSync(a.path)) throw new HttpError(404, "Not found.");
+    const f = Bun.file(a.path);
+    const size = f.size;
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");
+    const headers = { "content-type": a.mime, "cache-control": "public, max-age=31536000, immutable", "accept-ranges": "bytes", "x-content-type-options": "nosniff" };
+    if (range && (range[1] || range[2])) {
+      const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+      const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+      if (start >= size || start > end) return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
+      return new Response(f.slice(start, end + 1), { status: 206, headers: { ...headers, "content-range": `bytes ${start}-${end}/${size}`, "content-length": String(end - start + 1) } });
+    }
+    return new Response(f, { headers: { ...headers, "content-length": String(size) } });
+  },
+  { public: true },
+);
 
 route("GET", "/api/apps/:id/growth/bets", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);

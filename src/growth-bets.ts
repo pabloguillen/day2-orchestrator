@@ -251,7 +251,9 @@ export function measureBet(bet: Bet, events: EventLike[] | null, opts: { minPerS
     // Only people who first arrived while the bet was running.
     if (first.at < since || first.at > until) continue;
     const reached = list.some((e) => e.type === outcomeEvent);
-    if (first.acquisition?.campaignId === bet.id) betOutcomes.push(reached);
+    // "B-4" (one link) or "B-4.tiktok" (per ad platform).
+    const c = first.acquisition?.campaignId;
+    if (c === bet.id || c?.startsWith(`${bet.id}.`)) betOutcomes.push(reached);
     else otherOutcomes.push(reached);
   }
   const rate = (o: boolean[]) => (o.length ? o.filter(Boolean).length / o.length : null);

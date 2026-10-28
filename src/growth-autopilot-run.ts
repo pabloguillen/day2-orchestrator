@@ -15,6 +15,8 @@ import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } fro
 import { appEvents, pageHealth } from "./field-work";
 import { resolve } from "node:path";
 import { researchRetention } from "./retention";
+import { configuredPlatforms, platformInfo, videoProviders } from "./ads/registry";
+import { assetStore, platformIdentities } from "./tenant";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -62,6 +64,10 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
     metaPageId: async (appId) => (await adIdentities().get(appId))?.metaPageId ?? null,
     events: (a, since) => appEvents(a, since, fieldStore()),
     pageHealth: (a, path) => pageHealth(a, path, fieldStore()),
+    platformAds: (() => {
+      const platforms = configuredPlatforms();
+      return { platforms, infos: new Map([...platforms.keys()].map((id) => [id, platformInfo(id)])), identities: platformIdentities(), assets: assetStore(), providers: videoProviders() };
+    })(),
     retention: {
       store: fieldStore(),
       async research(input) {

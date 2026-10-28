@@ -4,9 +4,9 @@ FROM oven/bun:1.4.2-slim
 
 # git + gh: cloning, branches, PRs (with each account's GitHub App token).
 # bubblewrap + socat: the agent sandbox (agent-sandbox.ts) — it refuses to
-# run agents without them. unzip: .zip uploads.
+# run agents without them. unzip: .zip uploads. ffmpeg: ad videos (src/ads/content.ts).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git unzip bubblewrap socat gnupg \
+ && apt-get install -y --no-install-recommends ca-certificates curl git unzip bubblewrap socat gnupg ffmpeg \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update && apt-get install -y --no-install-recommends gh \

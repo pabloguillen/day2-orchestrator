@@ -29,6 +29,7 @@ import { billAdSpend, type AdPlatform } from "./ads";
 import type { CompetitorAngleInsight } from "./competitor-feed";
 import type { EventLike } from "./metrics/types";
 import { retentionPass, type RetentionDeps } from "./retention-pass";
+import { pausePlatformAds, runPlatformAds, type PlatformAdsDeps } from "./ads/autopilot";
 
 /**
  * The growth autopilot: day2 growing an app with nobody triggering anything.
@@ -141,6 +142,12 @@ export type AutopilotDeps = {
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
   /** Whether a page passes its field checks (field-work.ts); absent = assume fine. */
   pageHealth?: (app: AppEntry, path: string) => Promise<{ ok: boolean; reason: string }>;
+  /**
+   * Ads on every connected platform (ads/autopilot.ts). When it has at
+   * least one platform, new experiments launch there; the older Meta-via-
+   * agent path (`ads`) only keeps running the campaigns it already started.
+   */
+  platformAds?: Omit<PlatformAdsDeps, "credits" | "events" | "pageHealth" | "paidGate">;
   /** Retention (retention.ts): the field store and the research agent; absent = skipped. */
   retention?: RetentionDeps;
   now?: Date;
@@ -165,8 +172,10 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
 
   // Paid campaigns must stop when the autopilot or spending is switched off.
   if (!settings.enabled || killSwitch) {
-    const paused = await pauseAll(app, deps, logPath, at, killSwitch ? "the kill switch is on" : "the growth autopilot is off");
+    const why = killSwitch ? "the kill switch is on" : "the growth autopilot is off";
+    const paused = await pauseAll(app, deps, logPath, at, why);
     report.paused.push(...paused);
+    if (deps.platformAds) report.paused.push(...(await pausePlatformAds(app, deps.platformAds.platforms, (text) => log(logPath, { at, step: "ads", text }), why)));
     return report;
   }
 
@@ -265,7 +274,25 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
   saveBets(betsPath, bets);
 
   // 4. Paid traffic.
-  await runAds(app, profile, deps, logPath, at, now, report);
+  const multi = Boolean(deps.platformAds && deps.platformAds.platforms.size > 0);
+  await runAds(app, profile, deps, logPath, at, now, report, { launchNew: !multi });
+  if (deps.platformAds && multi) {
+    try {
+      const monthlyGrowth = loadGrowthConfig(file(GROWTH_CONFIG_FILENAME)).budget.monthlyBudgetUsd;
+      const r = await runPlatformAds(
+        app,
+        profile,
+        { ...deps.platformAds, credits: deps.credits, events: deps.events, ...(deps.pageHealth ? { pageHealth: deps.pageHealth } : {}), paidGate: deps.paidGate },
+        { monthlyAdsUsd: monthlyAdBudgetUsd(monthlyGrowth), now, log: (text, credits) => log(logPath, { at, step: "ads", text, ...(credits ? { credits } : {}) }) },
+      );
+      report.launched.push(...r.launched);
+      report.paused.push(...r.paused);
+      report.scaled.push(...r.scaled);
+      report.skipped.push(...r.skipped);
+    } catch (err) {
+      report.skipped.push(`ads: ${(err as Error).message}`);
+    }
+  }
   return report;
 }
 
@@ -373,10 +400,10 @@ async function pauseAll(app: AppEntry, deps: AutopilotDeps, logPath: string, at:
   return paused;
 }
 
-async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, logPath: string, at: string, now: Date, report: AutopilotReport) {
+async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, logPath: string, at: string, now: Date, report: AutopilotReport, opts: { launchNew: boolean } = { launchNew: true }) {
   const betsPath = resolve(app.repoPath, BETS_FILENAME);
   let file = loadBets(betsPath);
-  const needsAds = file.bets.some((b) => (b.status === "live" && !b.campaign) || b.campaign?.status === "active" || (b.campaign?.heldFor && b.status === "live"));
+  const needsAds = file.bets.some((b) => (opts.launchNew && b.status === "live" && !b.campaign) || b.campaign?.status === "active" || (b.campaign?.heldFor && b.status === "live"));
   if (!needsAds) return;
   if (!deps.ads || !deps.adAccountId) {
     report.skipped.push("ads: day2's Meta Ads isn't connected on this server yet.");
@@ -483,6 +510,7 @@ async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, l
   }
 
   // Live experiments without an ad yet: launch when everything allows it.
+  if (!opts.launchNew) return;
   const waiting = file.bets.filter((b) => b.status === "live" && !b.campaign);
   if (!waiting.length) return;
   if (monthlyAds <= 0) {
