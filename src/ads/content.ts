@@ -32,8 +32,9 @@ export const SIZE: Record<Ratio, { w: number; h: number }> = {
 export type Brand = { name: string; colors: string[]; logoPath?: string; font?: string };
 export type FrameCopy = { headline: string; cta: string };
 
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-const dataUri = (path: string) => {
+/** HTML-escapes text from copy. */
+export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+export const dataUri = (path: string) => {
   const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml" }[extname(path).toLowerCase()];
   return mime && existsSync(path) ? `data:${mime};base64,${readFileSync(path).toString("base64")}` : null;
 };
@@ -124,9 +125,9 @@ ${layer === "background" ? "" : '<div class="phone"></div>'}
 }
 
 /** A phone the size the frame's screen expects (390×844 CSS px). */
-const PHONE = { ...devices["iPhone 13"], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 }, userAgent: `${devices["iPhone 13"].userAgent} day2-ads` };
+export const PHONE = { ...devices["iPhone 13"], viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 }, userAgent: `${devices["iPhone 13"].userAgent} day2-ads` };
 
-async function withBrowser<T>(fn: (b: Browser) => Promise<T>, browser?: Browser): Promise<T> {
+export async function withBrowser<T>(fn: (b: Browser) => Promise<T>, browser?: Browser): Promise<T> {
   if (browser) return fn(browser);
   const exe = chromiumPath();
   const b = await chromium.launch(exe ? { executablePath: exe } : {});
@@ -206,11 +207,11 @@ function ffmpeg(args: string[]): Promise<void> {
   });
 }
 
-const ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-movflags", "+faststart"];
+export const ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-movflags", "+faststart"];
 
-/** A cover image from a video (1 second in). */
-export async function coverFrom(video: string, out: string): Promise<string> {
-  await ffmpeg(["-ss", "1", "-i", video, "-frames:v", "1", "-q:v", "3", out]);
+/** A cover image from a video (1 second in, or `atSec`). */
+export async function coverFrom(video: string, out: string, atSec = 1): Promise<string> {
+  await ffmpeg(["-ss", String(atSec), "-i", video, "-frames:v", "1", "-q:v", "3", out]);
   return out;
 }
 

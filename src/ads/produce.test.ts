@@ -82,7 +82,7 @@ describe("what to make", () => {
 });
 
 describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
-  test("images per variant and ratio, walkthrough videos per ratio with covers, an AI presenter fitted to size", async () => {
+  test("images per variant and ratio, walkthrough and Motion videos per ratio with covers, an AI presenter fitted to size", async () => {
     const store = fileAssetStore(join(root, "assets"), "https://day2.example");
     let generated = 0;
     const creatify: VideoProvider = {
@@ -106,6 +106,8 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
       providers: { creatify, runway: null },
       generativeBudgetUsd: 5,
       videoSeconds: 4,
+      motionSeconds: 2,
+      motionFps: 10,
     });
     expect(generated).toBe(1);
     expect(r.costUsd).toBeCloseTo(0.99, 2);
@@ -119,6 +121,20 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
       expect(p.hasAudio).toBe(true);
       expect(w.asset.thumbnail?.kind).toBe("image");
     }
+    // Motion videos: every variant × video ratio (4 = the cap), in-house, real screenshots, no AI.
+    const motion = by("video", "motion_template");
+    expect(motion.map((a) => `${a.asset.ratio}/${a.variant}`).sort()).toEqual(["1:1/0", "1:1/1", "9:16/0", "9:16/1"]);
+    expect(motion.map((a) => a.asset.label)).toContain("Motion video 9:16 · variant 2");
+    for (const m of motion) {
+      expect(m.asset.aiGenerated || m.asset.aiPerson).toBe(false);
+      expect(m.asset.costUsd).toBe(0);
+      expect(m.asset.thumbnail?.kind).toBe("image");
+      const p = await probe(m.asset.path);
+      expect([p.width, p.height]).toEqual([m.asset.width, m.asset.height]);
+      expect(p.hasAudio).toBe(true);
+      expect(p.durationSec).toBeCloseTo(2, 0);
+    }
+    expect(r.notes.filter((n) => n.includes("Motion"))).toEqual([]);
     const presenter = by("video", "creatify");
     expect(presenter.map((a) => a.asset.ratio).sort()).toEqual(["1:1", "9:16"]);
     expect(presenter.every((a) => a.asset.aiPerson && a.asset.aiGenerated)).toBe(true);
@@ -131,7 +147,7 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
   test("generated video is skipped when it would exceed its budget", async () => {
     const store = fileAssetStore(join(root, "assets2"), "https://day2.example");
     const pricey: VideoProvider = { id: "creatify", kinds: ["avatar_ad"], estimateUsd: () => 50, generate: async () => { throw new Error("must not run"); } };
-    const r = await produceContent({ appId: "app_p", purpose: "B-2", pageUrl: `http://localhost:${server.port}/`, brand: { name: "Buddy", colors: ["#111111"] }, copy: COPY, platforms: [PLATFORMS[0]!], store, providers: { creatify: pricey, runway: null }, generativeBudgetUsd: 5, videoSeconds: 3 });
+    const r = await produceContent({ appId: "app_p", purpose: "B-2", pageUrl: `http://localhost:${server.port}/`, brand: { name: "Buddy", colors: ["#111111"] }, copy: COPY, platforms: [PLATFORMS[0]!], store, providers: { creatify: pricey, runway: null }, generativeBudgetUsd: 5, videoSeconds: 3, skipMotion: true });
     expect(r.notes[0]).toContain("skipped");
     expect(r.assets.some((a) => a.asset.source === "creatify")).toBe(false);
   }, 120_000);

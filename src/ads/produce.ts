@@ -6,6 +6,7 @@ import { chromiumPath } from "../simulation";
 import type { AssetStore, StoredAsset } from "./assets";
 import { composeVideoAd, coverFrom, download, normalizeVideo, probe, recordPage, renderImageAd, screenshotPage, SIZE, type Brand } from "./content";
 import type { AdCopyPlan } from "./copy";
+import { captureScreens, pickTemplate, renderMotionAd } from "./motion";
 import type { VideoProvider } from "./providers/video";
 import type { AssetSpec, PlatformInfo, Ratio } from "./types";
 
@@ -16,6 +17,9 @@ import type { AssetSpec, PlatformInfo, Ratio } from "./types";
  *    image format needed, per copy variant;
  *  - videos: a real screen recording of the page in the same frame, one per
  *    video format needed (first variant);
+ *  - Motion videos (motion.ts): kinetic text + the app's real screenshots on
+ *    a phone + CTA end card, rendered in-house — per variant and video
+ *    format, at most MAX_MOTION_VIDEOS;
  *  - AI presenter video (Creatify), when connected and the script passed
  *    both checks: 9:16, plus 1:1 when needed;
  *  - generated motion shot (Runway) of the 9:16 image, when enabled.
@@ -39,8 +43,18 @@ export type ProduceInput = {
   generativeBudgetUsd: number;
   /** Don't make app walkthrough videos (they kept losing). */
   skipWalkthrough?: boolean;
+  /** Don't make Motion videos. */
+  skipMotion?: boolean;
+  /** More same-origin pages of the app to show in Motion videos (read only: loaded, never tapped). */
+  screens?: string[];
   videoSeconds?: number;
+  /** Motion video length (default 12 s) and render rate (default 30 fps; lower only for tests). */
+  motionSeconds?: number;
+  motionFps?: number;
 };
+
+/** Motion videos per experiment, at most. */
+export const MAX_MOTION_VIDEOS = 4;
 
 /** The image and video ratios the platforms need, most widely accepted first. */
 export function neededRatios(platforms: PlatformInfo[]): { image: Ratio[]; video: Ratio[] } {
@@ -90,6 +104,33 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
         const { w, h } = SIZE[r];
         const thumb = await i.store.put(cover, { appId: i.appId, purpose: i.purpose, label: label("Cover", r), kind: "image", ratio: r, width: w, height: h, mime: "image/jpeg", source: "screen_recording", aiGenerated: false, aiPerson: false });
         await store(f, { appId: i.appId, purpose: i.purpose, label: label("App walkthrough video", r), kind: "video", ratio: r, width: w, height: h, durationSec: seconds, mime: "video/mp4", source: "screen_recording", aiGenerated: false, aiPerson: false, thumbnailId: thumb.id }, 0);
+      }
+    }
+
+    // Motion videos: per variant and video format (every format gets variant 1 first), in-house, no cost.
+    if (need.video.length && !i.skipMotion) {
+      try {
+        const screens = await captureScreens(i.pageUrl, dir, { screens: i.screens, landingShot: shot, browser });
+        const jobs = i.copy.variants.flatMap((variant, v) => need.video.map((r) => ({ variant, v, r }))).slice(0, MAX_MOTION_VIDEOS);
+        const mSeconds = i.motionSeconds ?? 12;
+        for (const { variant, v, r } of jobs) {
+          const what = label("Motion video", r, v);
+          try {
+            const tag = `${v}-${r.replace(/[:.]/g, "x")}`;
+            const f = join(dir, `motion-${tag}.mp4`);
+            await renderMotionAd({ ratio: r, template: pickTemplate(r, v), copy: variant, brand: i.brand, screenshots: screens, out: f, seconds: mSeconds, fps: i.motionFps, browser });
+            const p = await probe(f);
+            // Cover from the middle: phone and screens on show, not the half-built opening.
+            const cover = await coverFrom(f, join(dir, `motion-cover-${tag}.jpg`), Math.round(mSeconds * 0.45 * 10) / 10);
+            const { w, h } = SIZE[r];
+            const thumb = await i.store.put(cover, { appId: i.appId, purpose: i.purpose, label: label("Cover", r, v), kind: "image", ratio: r, width: w, height: h, mime: "image/jpeg", source: "motion_template", aiGenerated: false, aiPerson: false });
+            await store(f, { appId: i.appId, purpose: i.purpose, label: what, kind: "video", ratio: r, width: w, height: h, durationSec: p.durationSec, mime: "video/mp4", source: "motion_template", aiGenerated: false, aiPerson: false, costUsd: 0, thumbnailId: thumb.id }, v);
+          } catch (err) {
+            out.notes.push(`${what} failed: ${(err as Error).message.slice(0, 200)}`);
+          }
+        }
+      } catch (err) {
+        out.notes.push(`Motion videos failed: ${(err as Error).message.slice(0, 200)}`);
       }
     }
 

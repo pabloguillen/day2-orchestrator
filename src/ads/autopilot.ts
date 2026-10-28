@@ -708,6 +708,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           providers: { creatify: skip.includes("presenter") ? null : deps.providers.creatify, runway: skip.includes("generated") ? null : deps.providers.runway },
           generativeBudgetUsd: genOk.ok ? GENERATIVE_BUDGET_USD : 0,
           ...(skip.includes("walkthrough") ? { skipWalkthrough: true } : {}),
+          ...(skip.includes("motion") ? { skipMotion: true } : {}),
         });
         if (r.costUsd > 0) await recordCharge(deps.credits, { id: `adgen:${app.id}:${b.id}`, appId: app.id, service: "content_generation", costUsd: r.costUsd, description: `Ad videos for ${b.id}` }, now);
         produced = r.assets;
