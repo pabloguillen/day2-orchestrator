@@ -69,7 +69,7 @@ Each adapter in `src/ads/platforms/<id>.ts` talks to the platform's official API
 | LinkedIn | Marketing API 202610 | image or video (one kind per campaign) | the app's company page (`urn:li:organization:…`), with day2's member as Sponsored Content Poster | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REFRESH_TOKEN`, `LINKEDIN_AD_ACCOUNT_ID` |
 | Snapchat | Marketing API v1 | video, image (9:16) | the app's Public Profile, shared with day2's organization | `SNAP_CLIENT_ID`, `SNAP_CLIENT_SECRET`, `SNAP_REFRESH_TOKEN`, `SNAP_AD_ACCOUNT_ID` |
 | Pinterest | API v5 | image, video pins | none (ads show day2's business profile; the creative carries the app's brand) | `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET`, `PINTEREST_REFRESH_TOKEN`, `PINTEREST_AD_ACCOUNT_ID`, optional `PINTEREST_BOARD_ID` |
-| Reddit | Ads API v3 | image, video | see `platforms/reddit.ts` | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN`, `REDDIT_AD_ACCOUNT_ID` |
+| Reddit | Ads API v3 | image, video (fetched from day2's URL) | the app's Reddit profile (`t2_…`), linked to day2's ad account | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN`, `REDDIT_AD_ACCOUNT_ID`, `REDDIT_USER_AGENT`, optional `REDDIT_FUNDING_INSTRUMENT_ID` (the account also needs a pixel) |
 | X | Ads API v12 | video, image | the app's X account, as a promotable user of day2's ads account | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `X_ADS_ACCOUNT_ID`, optional `X_FUNDING_INSTRUMENT_ID` |
 
 - **Not connected:** a platform without its environment variables is not connected and is skipped.
@@ -93,5 +93,5 @@ The server image includes ffmpeg and Chromium.
 - **Media by URL:** platforms that fetch media by URL need day2's public address (`DAY2_PUBLIC_URL`) to be reachable from the internet. On a laptop it isn't, so those launches fail there.
 - **AI disclosure:**
   - Ads that show an AI presenter say so in their text ("(AI presenter)"). New York requires this disclosure since June 2026, and California from January 2027.
-  - TikTok and Snapchat also get their own AI-content label set.
+  - TikTok and Snapchat also get their own AI-content label set. Reddit shows no caption under image and video posts, so there the disclosure goes into the headline.
   - Meta, LinkedIn and X have no field for it.
