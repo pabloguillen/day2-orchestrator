@@ -6,6 +6,8 @@ import { allApps, dbApps, fileApps, type AppsStore } from "./apps-store";
 import { authConfig, type Role, type Session } from "./auth";
 import { dbAssetStore, fileAssetStore, type AssetStore } from "./ads/assets";
 import { dbPlatformIdentities, filePlatformIdentities, type PlatformIdentityStore } from "./ads/identities";
+import { dbConnections, ensureLocalSecretsKey, fileConnections, type ConnectionStore } from "./ads/connections";
+import { dbSentConversions, fileSentConversions, type SentConversions } from "./ads/conversions";
 import { INTEGRATIONS_FILENAME } from "./backlog-trackers";
 import type { CreditStore } from "./credits";
 import { appsRegistryPath, creditStore, dataDir } from "./day2-paths";
@@ -102,6 +104,18 @@ export function assetStore(): AssetStore {
   const root = join(dataDir(), "ad-assets");
   const url = authConfig().publicUrl;
   return serverMode() === "accounts" ? dbAssetStore(db(), root, url) : fileAssetStore(root, url);
+}
+
+/** Connected ad accounts — day2's own and apps' own (ads/connections.ts). */
+export function adConnections(): ConnectionStore {
+  if (serverMode() === "accounts") return dbConnections(db());
+  ensureLocalSecretsKey(join(dataDir(), ".day2-secrets-key"));
+  return fileConnections(join(dataDir(), ".day2-ad-connections.json"));
+}
+
+/** Conversions already sent to the ad platforms (ads/conversions.ts). */
+export function sentConversions(): SentConversions {
+  return serverMode() === "accounts" ? dbSentConversions(db()) : fileSentConversions(join(dataDir(), ".day2-ad-conversions-sent.json"));
 }
 
 /** Who each app's ads show as on each platform (ads/identities.ts). */

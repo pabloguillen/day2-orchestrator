@@ -17,6 +17,13 @@ const tokenCall: Expect = {
   json: { access_token: "at_1", expires_in: 5184000, refresh_token: "rt_1", refresh_token_expires_in: 31536000 },
 };
 
+const accountCall = (over: Record<string, unknown> = {}): Expect => ({
+  method: "GET",
+  url: "https://api.linkedin.com/rest/adAccounts/5001",
+  check: (r) => versioned(r),
+  json: { id: 5001, name: "day2 ads", currency: "USD", status: "ACTIVE", servingStatuses: ["RUNNABLE"], ...over },
+});
+
 const versioned = (r: { headers: Record<string, string> }) => {
   expect(r.headers.authorization).toBe("Bearer at_1");
   expect(r.headers["linkedin-version"]).toBe("202610");
@@ -85,10 +92,11 @@ describe("linkedin", () => {
     const spec = testSpec({
       identity: { platform: "linkedin", ref: "urn:li:organization:777", displayName: "Buddy" },
       targeting: { countries: ["DE"], languages: ["de"], ageMin: 18, audience: "business", interests: ["Engineering", "unicorns"], keywords: [] },
-      creatives: [{ key: "B-4-v1", copy: { headline: "Split bills (fast)", body: "Add the bill #now", cta: "sign_up" }, asset: testImage({ ratio: "1.91:1", width: 1200, height: 628 }) }],
+      creatives: [{ key: "B-4-v1", copy: { headline: "Split bills (fast)", body: "Add the bill #now", cta: "sign_up" }, asset: testImage({ ratio: "1.91:1", width: 1200, height: 628 }), link: "https://buddy.example/go/split?d2=B-4.li.v1" }],
     });
     const { p, f } = platform([
       tokenCall,
+      accountCall(),
       {
         method: "GET",
         url: "/rest/adTargetingEntities?q=typeahead&queryVersion=QUERY_USES_URNS&facet=urn%3Ali%3AadTargetingFacet%3Alocations&query=Germany&locale=(language:en,country:US)",
@@ -130,7 +138,7 @@ describe("linkedin", () => {
             visibility: "PUBLIC",
             distribution: { feedDistribution: "NONE", targetEntities: [], thirdPartyDistributionChannels: [] },
             content: { media: { title: "Split bills (fast)", id: "urn:li:image:IMG1" } },
-            contentLandingPage: "https://buddy.example/go/split?d2=B-4.x",
+            contentLandingPage: "https://buddy.example/go/split?d2=B-4.li.v1",
             contentCallToActionLabel: "SIGN_UP",
             lifecycleState: "PUBLISHED",
             isReshareDisabledByAuthor: true,
@@ -218,14 +226,18 @@ describe("linkedin", () => {
     expect(out).toEqual({
       platform: "linkedin",
       campaignId: "222",
-      refs: { account: "5001", campaignGroup: "111", startDate: "2026-10-28", posts: "urn:li:share:9" },
+      refs: { account: "5001", campaignGroup: "111", startDate: "2026-10-28", posts: "urn:li:share:9", optimizeFor: "clicks" },
       ads: { "B-4-v1": "urn:li:sponsoredCreative:333" },
     });
   });
 
-  test("launch: video with two upload parts and a thumbnail", async () => {
+  test("launch: video, optimised for sign-ups, in a EUR account", async () => {
     const video = testAsset({ ratio: "9:16", bytes: 20 });
     const spec = testSpec({
+      currency: "EUR",
+      dailyBudget: 25,
+      optimizeFor: "signups",
+      conversion: { platform: "linkedin", refs: { account: "5001", signup: "urn:lla:llaPartnerConversion:701", activated: "urn:lla:llaPartnerConversion:702" } },
       identity: { platform: "linkedin", ref: "urn:li:organization:777", displayName: "Buddy" },
       targeting: { countries: ["US", "AT"], languages: ["en", "de"], ageMin: 18, audience: "consumer", interests: ["Engineering"], keywords: [] },
       creatives: [{ key: "B-4-v1", copy: { headline: "Split a dinner bill", body: "Done in 10 seconds.", cta: "get_started" }, asset: video }],
@@ -233,6 +245,7 @@ describe("linkedin", () => {
     const { p, f } = platform(
       [
         tokenCall,
+        accountCall({ currency: "EUR" }),
         { method: "GET", url: "query=Austria", json: { elements: [{ urn: "urn:li:geo:103883259", name: "Austria" }] } },
         {
           method: "POST",
@@ -297,8 +310,13 @@ describe("linkedin", () => {
           method: "POST",
           url: "/rest/adAccounts/5001/adCampaigns",
           check: (r) => {
-            const j = r.json as { targetingCriteria: unknown; locale: unknown; status: string };
+            const j = r.json as Record<string, unknown>;
             expect(j.status).toBe("DRAFT");
+            expect(j.objectiveType).toBe("WEBSITE_CONVERSION");
+            expect(j.optimizationTargetType).toBe("MAX_CONVERSION");
+            expect(j.costType).toBe("CPM");
+            expect(j.dailyBudget).toEqual({ amount: "25.00", currencyCode: "EUR" });
+            expect(j.unitCost).toEqual({ amount: "0.00", currencyCode: "EUR" });
             expect(j.locale).toEqual({ country: "US", language: "en" });
             expect(j.targetingCriteria).toEqual({
               include: {
@@ -312,6 +330,15 @@ describe("linkedin", () => {
           status: 201,
           headers: { "x-restli-id": "222" },
         },
+        {
+          method: "PUT",
+          url: "/rest/campaignConversions/(campaign:urn%3Ali%3AsponsoredCampaign%3A222,conversion:urn%3Alla%3AllaPartnerConversion%3A701)",
+          check: (r) => {
+            versioned(r);
+            expect(r.json).toEqual({ campaign: "urn:li:sponsoredCampaign:222", conversion: "urn:lla:llaPartnerConversion:701" });
+          },
+        },
+        { method: "PUT", url: "/rest/campaignConversions/(campaign:urn%3Ali%3AsponsoredCampaign%3A222,conversion:urn%3Alla%3AllaPartnerConversion%3A702)" },
         {
           method: "POST",
           url: "/rest/adAccounts/5001/creatives",
@@ -339,6 +366,7 @@ describe("linkedin", () => {
     const del = (url: string): Expect => ({ method: "DELETE", url, check: (r) => expect(r.headers["x-restli-method"]).toBe("DELETE") });
     const { p, f } = platform([
       tokenCall,
+      accountCall(),
       { method: "POST", url: "/rest/images?action=initializeUpload", json: { value: { uploadUrl: "https://www.linkedin.com/dms-uploads/IMG1", image: "urn:li:image:IMG1" } } },
       { method: "PUT", url: "/dms-uploads/IMG1" },
       { method: "GET", url: "/rest/images/", json: { status: "AVAILABLE" } },
@@ -373,20 +401,21 @@ describe("linkedin", () => {
   test("stats via adAnalytics (campaign + creative pivots) with a rejection", async () => {
     const analytics = (pivot: string): Expect => ({
       method: "GET",
-      url: `/rest/adAnalytics?q=analytics&timeGranularity=ALL&dateRange=(start:(year:2026,month:10,day:28))&campaigns=List(urn%3Ali%3AsponsoredCampaign%3A222)&fields=costInUsd,impressions,clicks,pivotValues&pivot=${pivot}`,
+      url: `/rest/adAnalytics?q=analytics&timeGranularity=ALL&dateRange=(start:(year:2026,month:10,day:28))&campaigns=List(urn%3Ali%3AsponsoredCampaign%3A222)&fields=costInLocalCurrency,impressions,clicks,pivotValues&pivot=${pivot}`,
       check: versioned,
       json:
         pivot === "CAMPAIGN"
-          ? { elements: [{ costInUsd: "12.345", impressions: 3000, clicks: 40, pivotValues: ["urn:li:sponsoredCampaign:222"] }] }
+          ? { elements: [{ costInLocalCurrency: "12.345", impressions: 3000, clicks: 40, pivotValues: ["urn:li:sponsoredCampaign:222"] }] }
           : {
               elements: [
-                { costInUsd: "10.0", impressions: 2500, clicks: 35, pivotValues: ["urn:li:sponsoredCreative:333"] },
-                { costInUsd: "2.345", impressions: 500, clicks: 5, pivotValues: ["urn:li:sponsoredCreative:334"] },
+                { costInLocalCurrency: "10.0", impressions: 2500, clicks: 35, pivotValues: ["urn:li:sponsoredCreative:333"] },
+                { costInLocalCurrency: "2.345", impressions: 500, clicks: 5, pivotValues: ["urn:li:sponsoredCreative:334"] },
               ],
             },
     });
     const { p, f } = platform([
       tokenCall,
+      accountCall(),
       analytics("CAMPAIGN"),
       analytics("CREATIVE"),
       { method: "GET", url: "/rest/adAccounts/5001/adCampaigns/222", json: { status: "ACTIVE", servingStatuses: ["RUNNABLE"] } },
@@ -405,14 +434,15 @@ describe("linkedin", () => {
     const s = await p.stats(launched);
     expect(f.done()).toBe(true);
     expect(s).toEqual({
-      spendUsd: 12.35,
+      spend: 12.35,
+      currency: "USD",
       impressions: 3000,
       clicks: 40,
       status: "active",
       rejection: "B-4-v2: CLICKBAIT",
       byCreative: {
-        "B-4-v1": { spendUsd: 10, impressions: 2500, clicks: 35, status: "active" },
-        "B-4-v2": { spendUsd: 2.345, impressions: 500, clicks: 5, status: "rejected" },
+        "B-4-v1": { spend: 10, impressions: 2500, clicks: 35, status: "active" },
+        "B-4-v2": { spend: 2.35, impressions: 500, clicks: 5, status: "rejected" },
       },
     });
   });
@@ -420,6 +450,7 @@ describe("linkedin", () => {
   test("stats: all creatives in review", async () => {
     const { p } = platform([
       tokenCall,
+      accountCall(),
       { method: "GET", url: "pivot=CAMPAIGN", json: { elements: [] } },
       { method: "GET", url: "pivot=CREATIVE", json: { elements: [] } },
       { method: "GET", url: "/adCampaigns/222", json: { status: "ACTIVE", servingStatuses: ["RUNNABLE"] } },
@@ -431,7 +462,7 @@ describe("linkedin", () => {
     ]);
     const s = await p.stats(launched);
     expect(s.status).toBe("in_review");
-    expect(s.spendUsd).toBe(0);
+    expect(s.spend).toBe(0);
   });
 
   test("pause / resume", async () => {
@@ -448,6 +479,7 @@ describe("linkedin", () => {
   test("setDailyBudget", async () => {
     const { p, f } = platform([
       tokenCall,
+      accountCall(),
       {
         method: "POST",
         url: "/rest/adAccounts/5001/adCampaigns/222",
@@ -478,5 +510,188 @@ describe("linkedin", () => {
     expect(err).toBeInstanceOf(PlatformError);
     expect(err.retryable).toBe(false);
     expect(err.message).not.toContain("at_1");
+  });
+
+  test("info.clickIdParam is li_fat_id", () => {
+    expect(info.clickIdParam).toBe("li_fat_id");
+  });
+
+  test("launch refuses a budget in another currency than the account's, before creating anything", async () => {
+    const { p, f } = platform([tokenCall, accountCall({ currency: "EUR" })]);
+    const spec = testSpec({ identity: { platform: "linkedin", ref: "urn:li:organization:777", displayName: "Buddy" }, currency: "USD" });
+    await expect(p.launch(spec)).rejects.toThrow(/bills in EUR/);
+    expect(f.done()).toBe(true);
+  });
+
+  test("launch refuses when the ad account can't spend", async () => {
+    const { p } = platform([tokenCall, accountCall({ servingStatuses: ["BILLING_HOLD"] })]);
+    const spec = testSpec({ identity: { platform: "linkedin", ref: "urn:li:organization:777", displayName: "Buddy" } });
+    await expect(p.launch(spec)).rejects.toThrow(/BILLING_HOLD/);
+  });
+
+  test("accountInfo", async () => {
+    const { p } = platform([tokenCall, accountCall({ currency: "GBP" }), accountCall({ status: "CANCELED" })]);
+    expect(await p.accountInfo()).toEqual({ id: "5001", name: "day2 ads", currency: "GBP", canSpend: true });
+    expect(await p.accountInfo()).toEqual({ id: "5001", name: "day2 ads", currency: "USD", canSpend: false, problem: "ad account status is CANCELED" });
+  });
+
+  test("setAdActive pauses / re-activates one creative", async () => {
+    const { p, f } = platform([
+      tokenCall,
+      {
+        method: "POST",
+        url: "/rest/adAccounts/5001/creatives/urn%3Ali%3AsponsoredCreative%3A334",
+        check: (r) => (partial(r), expect(r.json).toEqual({ patch: { $set: { intendedStatus: "PAUSED" } } })),
+      },
+      {
+        method: "POST",
+        url: "/rest/adAccounts/5001/creatives/urn%3Ali%3AsponsoredCreative%3A334",
+        check: (r) => expect(r.json).toEqual({ patch: { $set: { intendedStatus: "ACTIVE" } } }),
+      },
+    ]);
+    await p.setAdActive(launched, "B-4-v2", false);
+    await p.setAdActive(launched, "B-4-v2", true);
+    await expect(p.setAdActive(launched, "nope", true)).rejects.toBeInstanceOf(PlatformError);
+    expect(f.done()).toBe(true);
+  });
+
+  test("checkIdentity reads day2's Page roles", async () => {
+    const id = { platform: "linkedin" as const, ref: "urn:li:organization:777", displayName: "Buddy" };
+    const acls = (elements: unknown[]): Expect => ({
+      method: "GET",
+      url: "/rest/organizationAcls?q=roleAssignee&start=0&count=100",
+      check: versioned,
+      json: { elements },
+    });
+    const { p } = platform([
+      tokenCall,
+      acls([
+        { role: "ANALYST", organization: "urn:li:organization:777", roleAssignee: "urn:li:person:d2", state: "APPROVED" },
+        { role: "DIRECT_SPONSORED_CONTENT_POSTER", organization: "urn:li:organization:777", roleAssignee: "urn:li:person:d2", state: "APPROVED" },
+      ]),
+      acls([{ role: "DIRECT_SPONSORED_CONTENT_POSTER", organizationTarget: "urn:li:organization:777", roleAssignee: "urn:li:person:d2", state: "REQUESTED" }]),
+      acls([{ role: "ADMINISTRATOR", organization: "urn:li:organization:888", roleAssignee: "urn:li:person:d2", state: "APPROVED" }]),
+      { method: "GET", url: "/rest/organizationAcls?q=roleAssignee", status: 403, json: { message: "Not enough permissions" } },
+    ]);
+    expect(await p.checkIdentity!(id)).toEqual({ ok: true });
+    const pending = await p.checkIdentity!(id);
+    expect(pending.ok).toBe(false);
+    expect(!pending.ok && pending.problem).toMatch(/waiting for a Page super admin/);
+    const none = await p.checkIdentity!(id);
+    expect(!none.ok && none.problem).toMatch(/no Sponsored Content Poster/);
+    const denied = await p.checkIdentity!(id);
+    expect(!denied.ok && denied.problem).toMatch(/403/);
+  });
+
+  test("ensureConversions finds by name (re-enabling) and creates what's missing", async () => {
+    const { p, f } = platform([
+      tokenCall,
+      {
+        method: "GET",
+        url: "/rest/conversions?q=account&account=urn%3Ali%3AsponsoredAccount%3A5001&start=0&count=100",
+        check: versioned,
+        json: {
+          elements: [
+            { id: 701, name: "day2 sign-up (Conversions API)", conversionMethod: "CONVERSIONS_API", enabled: false, type: "SIGN_UP" },
+            { id: 699, name: "day2 activation (Conversions API)", conversionMethod: "INSIGHT_TAG", enabled: true },
+          ],
+        },
+      },
+      { method: "POST", url: "/rest/conversions/701", check: (r) => (partial(r), expect(r.json).toEqual({ patch: { $set: { enabled: true } } })) },
+      {
+        method: "POST",
+        url: "/rest/conversions",
+        check: (r) => {
+          versioned(r);
+          expect(r.json).toEqual({
+            name: "day2 activation (Conversions API)",
+            account: "urn:li:sponsoredAccount:5001",
+            conversionMethod: "CONVERSIONS_API",
+            type: "OTHER",
+            attributionType: "LAST_TOUCH_BY_CAMPAIGN",
+            postClickAttributionWindowSize: 30,
+            viewThroughAttributionWindowSize: 7,
+          });
+        },
+        status: 201,
+        headers: { "x-restli-id": "702" },
+        json: { id: 702 },
+      },
+    ]);
+    expect(await p.ensureConversions!()).toEqual({
+      platform: "linkedin",
+      refs: { account: "5001", signup: "urn:lla:llaPartnerConversion:701", activated: "urn:lla:llaPartnerConversion:702" },
+    });
+    expect(f.done()).toBe(true);
+  });
+
+  const setup = { platform: "linkedin" as const, refs: { account: "5001", signup: "urn:lla:llaPartnerConversion:701", activated: "urn:lla:llaPartnerConversion:702" } };
+  const conv = (eventId: string, over: Record<string, unknown> = {}) => ({
+    eventId,
+    name: "signup" as const,
+    at: "2026-10-28T11:00:00Z",
+    click: { param: "li_fat_id", value: `fat-${eventId}` },
+    pageUrl: "https://buddy.example/go/split",
+    ...over,
+  });
+
+  test("sendConversions batches valid events and rejects the rest locally", async () => {
+    const { p, f } = platform([
+      tokenCall,
+      {
+        method: "POST",
+        url: "/rest/conversionEvents",
+        check: (r) => {
+          versioned(r);
+          expect(r.headers["x-restli-method"]).toBe("BATCH_CREATE");
+          expect(r.json).toEqual({
+            elements: [
+              {
+                conversion: "urn:lla:llaPartnerConversion:701",
+                conversionHappenedAt: Date.parse("2026-10-28T11:00:00Z"),
+                user: {
+                  userIds: [
+                    { idType: "LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID", idValue: "fat-e1" },
+                    { idType: "PLAINTEXT_IP_ADDRESS", idValue: "203.0.113.7" },
+                  ],
+                  externalIds: ["hash-u1"],
+                },
+                eventId: "e1",
+              },
+              {
+                conversion: "urn:lla:llaPartnerConversion:702",
+                conversionHappenedAt: Date.parse("2026-10-28T11:00:00Z"),
+                user: { userIds: [{ idType: "LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID", idValue: "fat-e2" }] },
+                eventId: "e2",
+              },
+            ],
+          });
+        },
+        status: 201,
+      },
+    ]);
+    const out = await p.sendConversions!(setup, [
+      conv("e1", { externalId: "hash-u1", clientIp: "203.0.113.7", userAgent: "Mozilla/5.0" }),
+      conv("e2", { name: "activated", clientIp: "2001:db8::1" }),
+      conv("e3", { click: { param: "gclid", value: "x" } }),
+      conv("e4", { at: "2026-06-01T00:00:00Z" }),
+    ]);
+    expect(f.done()).toBe(true);
+    expect(out.sent).toBe(2);
+    expect(out.rejected.map((r) => r.eventId)).toEqual(["e3", "e4"]);
+  });
+
+  test("sendConversions isolates a bad event when the batch is refused", async () => {
+    const { p, f } = platform([
+      tokenCall,
+      { method: "POST", url: "/rest/conversionEvents", status: 400, json: { message: "batchIndex 1: invalid idValue" } },
+      { method: "POST", url: "/rest/conversionEvents", check: (r) => expect(r.headers["x-restli-method"]).toBeUndefined(), status: 201 },
+      { method: "POST", url: "/rest/conversionEvents", status: 400, json: { message: "invalid idValue" } },
+    ]);
+    const out = await p.sendConversions!(setup, [conv("e1"), conv("e2")]);
+    expect(f.done()).toBe(true);
+    expect(out.sent).toBe(1);
+    expect(out.rejected).toHaveLength(1);
+    expect(out.rejected[0]!.eventId).toBe("e2");
   });
 });

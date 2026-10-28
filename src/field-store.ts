@@ -202,6 +202,16 @@ export function fileFieldStore(root: string): FieldStore {
       for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify({ type: e.type, at: e.at, deviceId, ...(e.user ? { userId: e.user } : {}), ...(e.acquisition ? { acquisition: e.acquisition } : {}) })}\n`);
       const active = userDays(batch);
       if (active.size) {
+        // Visitors' IP and browser (kept only for sending ad conversions) go after 7 days.
+        const ipCut = new Date(now.getTime() - 7 * DAY).toISOString();
+        const evPath = join(d, "events.jsonl");
+        if (existsSync(evPath)) {
+          const evs = readLines<EventLike>(evPath);
+          if (evs.some((e) => e.at < ipCut && (e.acquisition?.click?.ip || e.acquisition?.click?.ua))) {
+            const cleaned = evs.map((e) => (e.at < ipCut && e.acquisition?.click ? { ...e, acquisition: { ...e.acquisition, click: { param: e.acquisition.click.param, value: e.acquisition.click.value } } } : e));
+            writeFileSync(evPath, cleaned.map((x) => JSON.stringify(x)).join("\n") + (cleaned.length ? "\n" : ""));
+          }
+        }
         const users = readJson<FileUsers>(join(d, "users.json"), {});
         for (const [u, days] of active) {
           const cur = (users[u] ??= { first: [...days].sort()[0]!, days: [] });
@@ -299,6 +309,16 @@ export function fileFieldStore(root: string): FieldStore {
           if (!existsSync(p)) continue;
           const keep = readLines<{ at: string }>(p).filter((x) => x.at >= cut);
           writeFileSync(p, keep.map((x) => JSON.stringify(x)).join("\n") + (keep.length ? "\n" : ""));
+        }
+        // Visitors' IP and browser (kept only for sending ad conversions) go after 7 days.
+        const ipCut = new Date(now.getTime() - 7 * DAY).toISOString();
+        const evPath = join(d, "events.jsonl");
+        if (existsSync(evPath)) {
+          const evs = readLines<EventLike>(evPath);
+          if (evs.some((e) => e.at < ipCut && (e.acquisition?.click?.ip || e.acquisition?.click?.ua))) {
+            const cleaned = evs.map((e) => (e.at < ipCut && e.acquisition?.click ? { ...e, acquisition: { ...e.acquisition, click: { param: e.acquisition.click.param, value: e.acquisition.click.value } } } : e));
+            writeFileSync(evPath, cleaned.map((x) => JSON.stringify(x)).join("\n") + (cleaned.length ? "\n" : ""));
+          }
         }
         const users = readJson<FileUsers>(join(d, "users.json"), {});
         if (Object.keys(users).length) {
@@ -447,6 +467,7 @@ export function dbFieldStore(sql: SQL): FieldStore {
       return rows[0] ? parse(rows[0].snapshot) : null;
     },
     async prune(now) {
+      await sql`UPDATE field_events SET acquisition = acquisition #- '{click,ip}' #- '{click,ua}' WHERE at < ${new Date(now.getTime() - 7 * DAY).toISOString()} AND acquisition ? 'click' AND (acquisition->'click' ? 'ip' OR acquisition->'click' ? 'ua')`;
       await sql`DELETE FROM field_user_days WHERE day < ${dayOf(new Date(now.getTime() - USER_DAY_DAYS * DAY).toISOString())}`;
       await sql`DELETE FROM field_users WHERE last_seen < ${dayOf(new Date(now.getTime() - USER_DAYS * DAY).toISOString())}`;
       await sql`DELETE FROM field_failures WHERE at < ${new Date(now.getTime() - FAILURE_DAYS * DAY).toISOString()}`;

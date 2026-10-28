@@ -29,7 +29,8 @@ import { billAdSpend, type AdPlatform } from "./ads";
 import type { CompetitorAngleInsight } from "./competitor-feed";
 import type { EventLike } from "./metrics/types";
 import { retentionPass, type RetentionDeps } from "./retention-pass";
-import { pausePlatformAds, runPlatformAds, type PlatformAdsDeps } from "./ads/autopilot";
+import { ADS_FILENAME, loadAds, pausePlatformAds, runPlatformAds, type PlatformAdsDeps } from "./ads/autopilot";
+import { researchHint } from "./ads/learnings";
 
 /**
  * The growth autopilot: day2 growing an app with nobody triggering anything.
@@ -227,7 +228,9 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
   const due = !lastRun || now.getTime() - new Date(lastRun.at).getTime() >= settings.researchEveryDays * 86_400_000;
   if (due) {
     try {
-      const topic = researchTopic(profile);
+      // What this app's own ads taught: research builds on it.
+      const learned = researchHint(loadAds(file(ADS_FILENAME)).learnings);
+      const topic = learned ? `${researchTopic(profile)}. In this app's own ads so far, ${learned.slice(0, 400)}` : researchTopic(profile);
       const r = await deps.research(topic);
       recordResearch(researchPath, { at, topic, usedTools: r.usedTools, findings: r.findings, credits: r.credits });
       log(logPath, { at, step: "research", text: `Researched what's working for competitors: ${r.findings.length} cited idea${r.findings.length === 1 ? "" : "s"}.`, credits: r.credits });

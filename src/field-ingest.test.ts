@@ -79,6 +79,21 @@ function suite(name: string, make: () => Promise<{ store: FieldStore; deps: Inge
       expect(await ctx.store.failures(ctx.appId, "cart.continue", 1)).toHaveLength(1);
     });
 
+    test("ad clicks: the click id kept with the visitor's IP and browser (for sending conversions), which go after 7 days", async () => {
+      const events = [
+        { type: "visit", at: "2026-10-15T11:58:00Z", acquisition: { campaignId: "B-3.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.abc123" } } },
+        { type: "visit", at: "2026-10-15T11:58:30Z", acquisition: { campaignId: "B-3", channel: "paid", click: { param: "ttclid", value: "<script>" } } },
+        { type: "visit", at: "2026-10-15T11:59:00Z", acquisition: { campaignId: "B-3", channel: "paid", click: { param: "utm_evil", value: "abcdef" } } },
+      ];
+      const b = batch({ device: { ...batch().device, id: "dev-clicks01" }, events: events as Batch["events"] });
+      expect((await handleIngest(post(ctx.key, b, { "x-forwarded-for": "203.0.113.7, 10.0.0.1", "user-agent": "Mozilla/5.0 (iPhone)" }), ctx.deps)).status).toBe(204);
+      const mine = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).filter((e) => e.deviceId === "dev-clicks01");
+      expect(mine.map((e) => e.acquisition?.click ?? null)).toEqual([{ param: "ttclid", value: "E.C.P.abc123", ip: "203.0.113.7", ua: "Mozilla/5.0 (iPhone)" }, null, null]);
+      await ctx.store.prune(new Date("2026-10-23T12:00:00Z"));
+      const later = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).find((e) => e.deviceId === "dev-clicks01")!;
+      expect(later.acquisition!.click).toEqual({ param: "ttclid", value: "E.C.P.abc123" });
+    });
+
     test("identified users: hashed ids only, active days per user, a stored snapshot", async () => {
       const u1 = `u_${"a".repeat(32)}`;
       const u2 = `u_${"b".repeat(32)}`;

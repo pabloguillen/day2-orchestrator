@@ -1,6 +1,7 @@
 import { assetBytes, fit, poll, redact, request, tokenCache, type RequestInit2 } from "../http";
 import {
   PlatformError,
+  type AdAccountInfo,
   type AdCreativeInput,
   type AdPlatform,
   type AdStats,
@@ -8,6 +9,9 @@ import {
   type AssetSpec,
   type CallToAction,
   type CampaignStatus,
+  type Conversion,
+  type ConversionSetup,
+  type Identity,
   type Launched,
   type LaunchSpec,
   type PlatformDeps,
@@ -19,21 +23,31 @@ import {
  *
  * Structure per launch, all in day2's own ad account:
  *   dark post(s) authored by the app's organization (Posts API, feedDistribution NONE + adContext)
- *   → campaign group (DRAFT) → campaign (DRAFT, SPONSORED_UPDATES / WEBSITE_VISIT)
- *   → creative(s) referencing the posts → activate group, then campaign (last).
+ *   → campaign group (DRAFT) → campaign (DRAFT, SPONSORED_UPDATES; WEBSITE_VISIT/MAX_CLICK or
+ *     WEBSITE_CONVERSION/MAX_CONVERSION) → conversion rules associated → creative(s) referencing the posts
+ *   → activate group, then campaign (last).
  * Any failure before the campaign is ACTIVE deletes what was created and rethrows.
+ * Money is always in the ad account's own currency (adAccounts.currency, costInLocalCurrency).
  *
  * Identity: Identity.ref is the app's LinkedIn Page as `urn:li:organization:{id}`. day2's
  * LinkedIn member (the one whose refresh token is in LINKEDIN_REFRESH_TOKEN) needs the Page role
  * "Sponsored Content Poster" (DIRECT_SPONSORED_CONTENT_POSTER) or Super admin (ADMINISTRATOR) on that
  * Page, plus Account Manager / Campaign Manager on day2's ad account. OAuth scopes: rw_ads, r_ads_reporting,
- * w_organization_social (dark posts + image/video uploads).
+ * w_organization_social (dark posts + image/video uploads), rw_conversions (conversion rules + Conversions API).
  */
 
 const ID = "linkedin" as const;
-const API = "https://api.linkedin.com/rest";
-const OAUTH = "https://www.linkedin.com/oauth/v2/accessToken";
-const DEFAULT_VERSION = "202610";
+export const LINKEDIN_API = "https://api.linkedin.com/rest";
+export const LINKEDIN_OAUTH = "https://www.linkedin.com/oauth/v2";
+const API = LINKEDIN_API;
+const OAUTH = `${LINKEDIN_OAUTH}/accessToken`;
+export const DEFAULT_VERSION = "202610";
+/** Conversion rules day2 keeps on its ad account (found by name, so ensureConversions is idempotent). */
+const CONVERSION_RULES = {
+  signup: { name: "day2 sign-up (Conversions API)", type: "SIGN_UP" },
+  activated: { name: "day2 activation (Conversions API)", type: "OTHER" },
+} as const;
+const PAGE_ROLES_FOR_ADS = ["DIRECT_SPONSORED_CONTENT_POSTER", "ADMINISTRATOR"];
 
 export type LinkedInCreds = {
   clientId: string;
@@ -80,6 +94,7 @@ export const info: PlatformInfo = {
   // untruncated. No description: the Audience Network (which uses it) is disabled.
   copyLimits: { headline: 70, body: 600 },
   minDailyUsd: 10,
+  clickIdParam: "li_fat_id",
   identity: "app_account",
   identityHelp:
     "The app's LinkedIn Page admin grants day2's LinkedIn member the Page role 'Sponsored Content Poster' (or Super admin), and day2 stores the Page as urn:li:organization:{id}.",
@@ -151,7 +166,37 @@ type Creative = {
   servingHoldReasons?: string[];
   review?: { status?: string; rejectionReasons?: string[] };
 };
-type AnalyticsRow = { costInUsd?: string | number; impressions?: number; clicks?: number; pivotValues?: string[] };
+type AnalyticsRow = { costInLocalCurrency?: string | number; impressions?: number; clicks?: number; pivotValues?: string[] };
+type Account = { id?: number | string; name?: string; currency?: string; status?: string; servingStatuses?: string[] };
+type ConversionRule = { id?: number | string; name?: string; conversionMethod?: string; enabled?: boolean; type?: string };
+type Acl = { role?: string; state?: string; roleAssignee?: string; organization?: string; organizationTarget?: string };
+
+/** Amount string with the currency's usual number of decimals (e.g. "20.00" USD, "2000" JPY). */
+export function moneyAmount(n: number, currency: string): string {
+  let digits = 2;
+  try {
+    digits = new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  } catch {
+    /* unknown currency code: keep 2 */
+  }
+  return n.toFixed(digits);
+}
+
+/** Whether a LinkedIn ad account can spend, and why not. */
+export function accountProblem(a: Account): string | undefined {
+  if (a.status && a.status !== "ACTIVE") return `ad account status is ${a.status}`;
+  const s = a.servingStatuses ?? [];
+  if (s.length && !s.includes("RUNNABLE")) return `ad account is not serving (${s.join(", ")})`;
+  return undefined;
+}
+
+export const orgUrn = (ref: string) => {
+  const r = ref.trim();
+  return /^\d+$/.test(r) ? `urn:li:organization:${r}` : r;
+};
+/** LinkedIn's Conversions API only accepts IPv4 addresses. */
+export const isIpv4 = (ip: string) => /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(ip.trim());
+const conversionUrn = (id: string | number) => (String(id).startsWith("urn:") ? String(id) : `urn:lla:llaPartnerConversion:${id}`);
 
 export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatform {
   const nowMs = () => (deps.now ? deps.now() : new Date()).getTime();
@@ -209,7 +254,31 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
   const patch = (path: string, set: Record<string, unknown>) => api(path, { method: "POST", restliMethod: "PARTIAL_UPDATE", json: { patch: { $set: set } } });
   const campaignPath = (id: string) => `/adAccounts/${account}/adCampaigns/${id}`;
   const groupPath = (id: string) => `/adAccounts/${account}/adCampaignGroups/${id}`;
-  const usd = (n: number) => ({ amount: n.toFixed(2), currencyCode: "USD" });
+  const money = (n: number, currency: string) => ({ amount: moneyAmount(n, currency), currencyCode: currency });
+
+  // ---------- account ----------
+
+  let accountCache: AdAccountInfo | null = null;
+  async function accountInfo(fresh = false): Promise<AdAccountInfo> {
+    if (accountCache && !fresh) return accountCache;
+    const a = await api<Account>(`/adAccounts/${account}`);
+    if (!a?.currency) throw new PlatformError(ID, `ad account ${account} returned no currency`);
+    const problem = accountProblem(a);
+    accountCache = { id: account, name: a.name ?? account, currency: a.currency, canSpend: !problem, ...(problem ? { problem } : {}) };
+    return accountCache;
+  }
+
+  async function checkBudget(amount: number, currency: string) {
+    if (!(amount > 0) || !Number.isFinite(amount)) throw new PlatformError(ID, `invalid daily budget ${amount}`);
+    // LinkedIn's documented minimum is USD 10/day; other currencies are enforced by LinkedIn itself.
+    if (currency === "USD" && amount < info.minDailyUsd) throw new PlatformError(ID, `daily budget ${amount} USD is below LinkedIn's ${info.minDailyUsd} USD minimum`);
+  }
+
+  /** Associates a conversion rule with a campaign (idempotent PUT). */
+  async function associateConversion(campaignId: string, conversion: string) {
+    const campaign = `urn:li:sponsoredCampaign:${campaignId}`;
+    await api(`/campaignConversions/(campaign:${enc(campaign)},conversion:${enc(conversion)})`, { method: "PUT", json: { campaign, conversion } });
+  }
 
   // ---------- targeting ----------
 
@@ -380,11 +449,12 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
     async launch(spec: LaunchSpec): Promise<Launched> {
       // ---- validate everything before anything is created ----
       if (!spec.identity?.ref) throw new PlatformError(ID, "LinkedIn needs the app's organization (identity.ref = urn:li:organization:{id})");
-      const ref = spec.identity.ref.trim();
-      const org = /^\d+$/.test(ref) ? `urn:li:organization:${ref}` : ref;
-      if (!/^urn:li:organization:\d+$/.test(org)) throw new PlatformError(ID, `identity.ref must be urn:li:organization:{id}, got ${ref}`);
+      const org = orgUrn(spec.identity.ref);
+      if (!/^urn:li:organization:\d+$/.test(org)) throw new PlatformError(ID, `identity.ref must be urn:li:organization:{id}, got ${spec.identity.ref}`);
       if (!spec.creatives.length) throw new PlatformError(ID, "no creatives");
-      if (spec.dailyBudgetUsd < info.minDailyUsd) throw new PlatformError(ID, `daily budget $${spec.dailyBudgetUsd} is below LinkedIn's $${info.minDailyUsd} minimum`);
+      const signupRule = spec.conversion?.refs.signup;
+      if (spec.optimizeFor === "signups" && !signupRule) throw new PlatformError(ID, "optimizeFor signups needs spec.conversion from ensureConversions()");
+      const conversionRules = spec.conversion ? [spec.conversion.refs.signup, spec.conversion.refs.activated].filter((r): r is string => !!r) : [];
       for (const c of spec.creatives) {
         if (!c.asset) throw new PlatformError(ID, `creative ${c.key}: LinkedIn sponsored content needs an image or video`);
         checkAsset(c.asset);
@@ -392,6 +462,13 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
       const kinds = new Set(spec.creatives.map((c) => c.asset!.kind));
       if (kinds.size > 1) throw new PlatformError(ID, "a LinkedIn campaign can't mix image and video ads; launch them as separate campaigns");
       if (!spec.targeting.countries.length) throw new PlatformError(ID, "no countries to target");
+
+      const acct = await accountInfo(true);
+      if (!acct.canSpend) throw new PlatformError(ID, `ad account ${account} can't spend: ${acct.problem}`);
+      if (spec.currency && spec.currency.toUpperCase() !== acct.currency)
+        throw new PlatformError(ID, `budget is in ${spec.currency} but ad account ${account} bills in ${acct.currency}`);
+      const currency = acct.currency;
+      await checkBudget(spec.dailyBudget, currency);
 
       const geos: string[] = [];
       for (const cc of spec.targeting.countries) {
@@ -423,7 +500,7 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
         for (const c of spec.creatives) {
           const a = c.asset!;
           const media = a.kind === "image" ? await uploadImage(a, org) : await uploadVideo(a, org);
-          const post = await darkPost(c, media, org, spec.link);
+          const post = await darkPost(c, media, org, c.link || spec.link);
           posts.push(post);
           postByKey[c.key] = post;
         }
@@ -444,12 +521,13 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
               campaignGroup: `urn:li:sponsoredCampaignGroup:${groupId}`,
               name: spec.campaignName.slice(0, 100),
               type: "SPONSORED_UPDATES",
-              objectiveType: "WEBSITE_VISIT",
-              // Automated bidding for clicks (LinkedIn bills CPM for MAX_CLICK); the daily budget caps spend.
+              // Automated bidding (LinkedIn bills CPM for MAX_CLICK / MAX_CONVERSION); the daily budget caps spend.
+              ...(spec.optimizeFor === "signups"
+                ? { objectiveType: "WEBSITE_CONVERSION", optimizationTargetType: "MAX_CONVERSION" }
+                : { objectiveType: "WEBSITE_VISIT", optimizationTargetType: "MAX_CLICK" }),
               costType: "CPM",
-              optimizationTargetType: "MAX_CLICK",
-              unitCost: usd(0),
-              dailyBudget: usd(spec.dailyBudgetUsd),
+              unitCost: money(0, currency),
+              dailyBudget: money(spec.dailyBudget, currency),
               locale: { country: localeCountry, language: lang },
               targetingCriteria: { include: { and } },
               runSchedule: { start },
@@ -463,7 +541,10 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
           ),
         );
 
-        // 3. Creatives (serve only once the campaign is ACTIVE).
+        // 3. Conversion rules (required before a WEBSITE_CONVERSION campaign can run; also reports sign-ups for click campaigns).
+        for (const rule of conversionRules) await associateConversion(campaignId, conversionUrn(rule));
+
+        // 4. Creatives (serve only once the campaign is ACTIVE).
         const ads: Record<string, string> = {};
         for (const c of spec.creatives) {
           const urn = await createEntity(
@@ -476,7 +557,7 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
           ads[c.key] = creativeUrn;
         }
 
-        // 4. Activate: group first, campaign last.
+        // 5. Activate: group first, campaign last.
         await patch(groupPath(groupId), { status: "ACTIVE" });
         await patch(campaignPath(campaignId), { status: "ACTIVE" });
         campaignActive = true;
@@ -484,7 +565,7 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
         return {
           platform: ID,
           campaignId,
-          refs: { account, campaignGroup: groupId, startDate, posts: posts.join(",") },
+          refs: { account, campaignGroup: groupId, startDate, posts: posts.join(","), optimizeFor: spec.optimizeFor },
           ads,
         };
       } catch (err) {
@@ -506,11 +587,13 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
       }
     },
 
+
     async stats(c: Launched): Promise<AdStats> {
+      const { currency } = await accountInfo();
       const campaignUrn = `urn:li:sponsoredCampaign:${c.campaignId}`;
       const [y, m, d] = (c.refs.startDate ?? "2020-01-01").split("-").map(Number);
       const range = `(start:(year:${y},month:${m},day:${d}))`;
-      const base = `/adAnalytics?q=analytics&timeGranularity=ALL&dateRange=${range}&campaigns=${restliList([campaignUrn])}&fields=costInUsd,impressions,clicks,pivotValues`;
+      const base = `/adAnalytics?q=analytics&timeGranularity=ALL&dateRange=${range}&campaigns=${restliList([campaignUrn])}&fields=costInLocalCurrency,impressions,clicks,pivotValues`;
 
       const byCampaign = await api<{ elements?: AnalyticsRow[] }>(`${base}&pivot=CAMPAIGN`);
       const byCreativeRows = await api<{ elements?: AnalyticsRow[] }>(`${base}&pivot=CREATIVE`);
@@ -523,21 +606,22 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
         const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : 0;
         return Number.isFinite(n) ? n : 0;
       };
-      const total = { spendUsd: 0, impressions: 0, clicks: 0 };
+      const round = (n: number) => Math.round(n * 100) / 100;
+      const total = { spend: 0, impressions: 0, clicks: 0 };
       for (const r of byCampaign?.elements ?? []) {
-        total.spendUsd += num(r.costInUsd);
+        total.spend += num(r.costInLocalCurrency);
         total.impressions += num(r.impressions);
         total.clicks += num(r.clicks);
       }
 
       const keyByUrn = new Map(Object.entries(c.ads).map(([k, urn]) => [urn, k]));
       const byCreative: NonNullable<AdStats["byCreative"]> = {};
-      for (const k of Object.keys(c.ads)) byCreative[k] = { spendUsd: 0, impressions: 0, clicks: 0 };
+      for (const k of Object.keys(c.ads)) byCreative[k] = { spend: 0, impressions: 0, clicks: 0 };
       for (const r of byCreativeRows?.elements ?? []) {
         const key = keyByUrn.get(r.pivotValues?.[0] ?? "");
         if (!key) continue;
         const s = byCreative[key]!;
-        s.spendUsd += num(r.costInUsd);
+        s.spend = round(s.spend + num(r.costInLocalCurrency));
         s.impressions += num(r.impressions);
         s.clicks += num(r.clicks);
       }
@@ -565,7 +649,7 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
         else status = "unknown";
       } else status = "unknown";
 
-      const out: AdStats = { spendUsd: Math.round(total.spendUsd * 100) / 100, impressions: total.impressions, clicks: total.clicks, status, byCreative };
+      const out: AdStats = { spend: round(total.spend), currency, impressions: total.impressions, clicks: total.clicks, status, byCreative };
       if (rejections.length) out.rejection = rejections.join("; ");
       return out;
     },
@@ -578,9 +662,132 @@ export function create(creds: LinkedInCreds, deps: PlatformDeps = {}): AdPlatfor
       await patch(campaignPath(c.campaignId), { status: "ACTIVE" });
     },
 
-    async setDailyBudget(c: Launched, amountUsd: number) {
-      if (!(amountUsd >= info.minDailyUsd)) throw new PlatformError(ID, `daily budget $${amountUsd} is below LinkedIn's $${info.minDailyUsd} minimum`);
-      await patch(campaignPath(c.campaignId), { dailyBudget: usd(amountUsd) });
+    async setDailyBudget(c: Launched, amount: number) {
+      const { currency } = await accountInfo();
+      await checkBudget(amount, currency);
+      await patch(campaignPath(c.campaignId), { dailyBudget: money(amount, currency) });
+    },
+
+    async setAdActive(c: Launched, key: string, active: boolean) {
+      const urn = c.ads[key];
+      if (!urn) throw new PlatformError(ID, `no ad with key ${key} in campaign ${c.campaignId}`);
+      // LinkedIn refuses (400) to pause a creative that is still in review.
+      await patch(`/adAccounts/${account}/creatives/${enc(urn)}`, { intendedStatus: active ? "ACTIVE" : "PAUSED" });
+    },
+
+    accountInfo: () => accountInfo(true),
+
+    async checkIdentity(identity: Identity) {
+      const org = orgUrn(identity.ref);
+      if (!/^urn:li:organization:\d+$/.test(org)) return { ok: false as const, problem: `not a LinkedIn organization: ${identity.ref}` };
+      const mine: Acl[] = [];
+      try {
+        for (let start = 0, page = 0; page < 20; page++, start += 100) {
+          const r = await api<{ elements?: Acl[] }>(`/organizationAcls?q=roleAssignee&start=${start}&count=100`);
+          const els = r?.elements ?? [];
+          mine.push(...els.filter((a) => (a.organization ?? a.organizationTarget) === org));
+          if (els.length < 100) break;
+        }
+      } catch (err) {
+        if (err instanceof PlatformError && !err.retryable)
+          return { ok: false as const, problem: `LinkedIn wouldn't show day2's Page roles (${err.status ?? "error"}); reconnect day2's LinkedIn account` };
+        throw err;
+      }
+      if (mine.some((a) => a.state === "APPROVED" && PAGE_ROLES_FOR_ADS.includes(a.role ?? ""))) return { ok: true as const };
+      if (mine.some((a) => a.state === "REQUESTED" && a.role === "DIRECT_SPONSORED_CONTENT_POSTER"))
+        return { ok: false as const, problem: `day2's Sponsored Content Poster request on ${identity.displayName || org} is waiting for a Page super admin to approve it` };
+      return {
+        ok: false as const,
+        problem: `day2's LinkedIn member has no Sponsored Content Poster (or Super admin) role on ${identity.displayName || org}; a Page super admin must grant it`,
+      };
+    },
+
+    async ensureConversions(): Promise<ConversionSetup> {
+      const existing: ConversionRule[] = [];
+      for (let start = 0, page = 0; page < 20; page++, start += 100) {
+        const r = await api<{ elements?: ConversionRule[] }>(`/conversions?q=account&account=${enc(accountUrn)}&start=${start}&count=100`);
+        const els = r?.elements ?? [];
+        existing.push(...els);
+        if (els.length < 100) break;
+      }
+      const refs: Record<string, string> = { account };
+      for (const [key, rule] of Object.entries(CONVERSION_RULES)) {
+        const found = existing.find((e) => e.name === rule.name && e.conversionMethod === "CONVERSIONS_API" && e.id !== undefined);
+        if (found) {
+          if (found.enabled === false) await patch(`/conversions/${found.id}`, { enabled: true });
+          refs[key] = conversionUrn(found.id!);
+          continue;
+        }
+        const id = await createEntity(
+          "/conversions",
+          {
+            name: rule.name,
+            account: accountUrn,
+            conversionMethod: "CONVERSIONS_API",
+            type: rule.type,
+            attributionType: "LAST_TOUCH_BY_CAMPAIGN",
+            postClickAttributionWindowSize: 30,
+            viewThroughAttributionWindowSize: 7,
+          },
+          `conversion rule ${rule.name}`,
+        );
+        refs[key] = conversionUrn(lastSegment(id));
+      }
+      return { platform: ID, refs };
+    },
+
+    async sendConversions(setup: ConversionSetup, events: Conversion[]) {
+      const rejected: Array<{ eventId: string; why: string }> = [];
+      const valid: Array<{ eventId: string; body: Record<string, unknown> }> = [];
+      const now = nowMs();
+      for (const e of events) {
+        const rule = setup.refs[e.name];
+        const at = Date.parse(e.at);
+        if (!rule) rejected.push({ eventId: e.eventId, why: `no LinkedIn conversion rule for ${e.name}; run ensureConversions` });
+        else if (e.click?.param !== info.clickIdParam || !e.click.value) rejected.push({ eventId: e.eventId, why: `no ${info.clickIdParam} click id` });
+        else if (!Number.isFinite(at) || at > now + 5 * 60_000 || at < now - 90 * 86_400_000)
+          rejected.push({ eventId: e.eventId, why: "conversion time must be within the past 90 days" });
+        else
+          valid.push({
+            eventId: e.eventId,
+            body: {
+              conversion: conversionUrn(rule),
+              conversionHappenedAt: at,
+              user: {
+                // li_fat_id is the main match key; LinkedIn also matches on IPv4 (it salts and hashes it itself).
+                // There is no user-agent field in the conversionEvents schema, so e.userAgent isn't sent.
+                userIds: [
+                  { idType: "LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID", idValue: e.click.value },
+                  ...(e.clientIp && isIpv4(e.clientIp) ? [{ idType: "PLAINTEXT_IP_ADDRESS", idValue: e.clientIp.trim() }] : []),
+                ],
+                // day2's id is already a hash; LinkedIn uses at most one external id.
+                ...(e.externalId ? { externalIds: [e.externalId] } : {}),
+              },
+              eventId: e.eventId,
+            },
+          });
+      }
+      let sent = 0;
+      for (let i = 0; i < valid.length; i += 5000) {
+        const chunk = valid.slice(i, i + 5000);
+        try {
+          await api(`/conversionEvents`, { method: "POST", restliMethod: "BATCH_CREATE", json: { elements: chunk.map((v) => v.body) } });
+          sent += chunk.length;
+        } catch (err) {
+          // A bad element fails the whole batch (400 with batchIndex): resend one by one to isolate it.
+          if (!(err instanceof PlatformError) || err.retryable || (err.status !== 400 && err.status !== 422)) throw err;
+          for (const v of chunk) {
+            try {
+              await api(`/conversionEvents`, { method: "POST", json: v.body });
+              sent++;
+            } catch (e1) {
+              if (!(e1 instanceof PlatformError) || e1.retryable) throw e1;
+              rejected.push({ eventId: v.eventId, why: e1.message });
+            }
+          }
+        }
+      }
+      return { sent, rejected };
     },
   };
 }

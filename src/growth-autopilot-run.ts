@@ -15,8 +15,11 @@ import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } fro
 import { appEvents, pageHealth } from "./field-work";
 import { resolve } from "node:path";
 import { researchRetention } from "./retention";
-import { configuredPlatforms, platformInfo, videoProviders } from "./ads/registry";
-import { assetStore, platformIdentities } from "./tenant";
+import { resolvePlatforms, videoProviders } from "./ads/registry";
+import { recheckIdentities } from "./ads/connect-flow";
+import { refreshRates } from "./ads/fx";
+import { USER_DAY_DAYS } from "./field-store";
+import { adConnections, assetStore, platformIdentities, sentConversions } from "./tenant";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -64,9 +67,23 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
     metaPageId: async (appId) => (await adIdentities().get(appId))?.metaPageId ?? null,
     events: (a, since) => appEvents(a, since, fieldStore()),
     pageHealth: (a, path) => pageHealth(a, path, fieldStore()),
-    platformAds: (() => {
-      const platforms = configuredPlatforms();
-      return { platforms, infos: new Map([...platforms.keys()].map((id) => [id, platformInfo(id)])), identities: platformIdentities(), assets: assetStore(), providers: videoProviders() };
+    platformAds: await (async () => {
+      await refreshRates();
+      const store = adConnections();
+      // Pages/profiles waiting on the owner's approval: ready yet?
+      await recheckIdentities({ store, identities: platformIdentities() }, app.id).catch(() => []);
+      const resolved = await resolvePlatforms(app.id, store);
+      const ids = [...resolved.keys()];
+      return {
+        platforms: new Map(ids.map((id) => [id, resolved.get(id)!.adapter])),
+        infos: new Map(ids.map((id) => [id, resolved.get(id)!.info])),
+        accounts: new Map(ids.map((id) => [id, { billing: resolved.get(id)!.billing, currency: resolved.get(id)!.currency }])),
+        identities: platformIdentities(),
+        assets: assetStore(),
+        providers: videoProviders(),
+        sentConversions: sentConversions(),
+        users: async (a: AppEntry) => (await fieldStore().activity(a.id, new Date(Date.now() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users,
+      };
     })(),
     retention: {
       store: fieldStore(),

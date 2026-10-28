@@ -26,6 +26,7 @@ const info = (id: PlatformId, over: Partial<PlatformInfo> = {}): PlatformInfo =>
   textOnly: false,
   copyLimits: { headline: 40, body: 125 },
   minDailyUsd: 1,
+  clickIdParam: "fbclid",
   identity: "none",
   audiences: ["consumer", "business"],
   env: [],
@@ -35,7 +36,7 @@ const info = (id: PlatformId, over: Partial<PlatformInfo> = {}): PlatformInfo =>
 
 const INFOS: Record<string, PlatformInfo> = {
   meta: info("meta", { identity: "app_account", identityHelp: "the app's Facebook Page" }),
-  tiktok: info("tiktok", { minDailyUsd: 20, identity: "custom", audiences: ["consumer"] }),
+  tiktok: info("tiktok", { minDailyUsd: 20, identity: "custom", audiences: ["consumer"], clickIdParam: "ttclid" }),
   google: info("google", { textOnly: true, copyLimits: { headline: 30, body: 90 }, formats: [{ kind: "image", ratio: "1.91:1", width: 1200, height: 628, maxBytes: 5_000_000, mimes: ["image/jpeg"] }] }),
   snapchat: info("snapchat", { minDailyUsd: 5, audiences: ["consumer"] }),
   linkedin: info("linkedin", { minDailyUsd: 10, audiences: ["business"], identity: "app_account", formats: [{ kind: "image", ratio: "1:1", width: 1080, height: 1080, maxBytes: 5_000_000, mimes: ["image/jpeg"] }] }),
@@ -137,6 +138,9 @@ const camp = (platform: PlatformId, over: Partial<PlatformCampaign> = {}): Platf
   review: null,
   month: { id: "2026-10", spendAtStart: 0 },
   creatives: [],
+  billing: "credits",
+  currency: "USD",
+  optimizeFor: "clicks",
   ...over,
 });
 const visit = (device: string, c: string, signup: boolean): EventLike[] => [
@@ -182,7 +186,8 @@ describe("comparing platforms by what they bring", () => {
 class FakePlatform implements AdPlatform {
   launches: LaunchSpec[] = [];
   calls: string[] = [];
-  stat: AdStats = { spendUsd: 0, impressions: 0, clicks: 0, status: "active" };
+  stat: AdStats = { spend: 0, currency: "USD", impressions: 0, clicks: 0, status: "active" };
+  conversionsSent: string[] = [];
   identities = 0;
   constructor(public id: PlatformId) {}
   async launch(spec: LaunchSpec): Promise<Launched> {
@@ -201,6 +206,20 @@ class FakePlatform implements AdPlatform {
   }
   async setDailyBudget(c: Launched, usd: number) {
     this.calls.push(`budget ${c.campaignId} ${usd}`);
+  }
+  async setAdActive(c: Launched, key: string, active: boolean) {
+    this.calls.push(`ad ${c.campaignId} ${key} ${active ? "on" : "off"}`);
+  }
+  async accountInfo() {
+    return { id: "acc", name: "acc", currency: "USD", canSpend: true };
+  }
+  async ensureConversions() {
+    this.calls.push("ensureConversions");
+    return { platform: this.id, refs: { pixel: "px1" } };
+  }
+  async sendConversions(_s: unknown, events: Array<{ eventId: string }>) {
+    this.conversionsSent.push(...events.map((e) => e.eventId));
+    return { sent: events.length, rejected: [] };
   }
 }
 
@@ -267,20 +286,22 @@ describe("a pass", () => {
     const r = await run(NOW);
     expect(r.launched).toEqual(["B-1:tiktok", "B-1:google"]);
     expect(r.skipped.some((s) => s.includes("Meta (needs the app's Facebook Page)"))).toBe(true);
-    expect(tiktok.launches[0]).toMatchObject({ link: "https://buddy.example/go/split?d2=B-1.tiktok", identity: { ref: "ident-1", displayName: "Buddy" }, targeting: { countries: ["DE"], keywords: COPY.keywords } });
+    expect(tiktok.launches[0]).toMatchObject({ link: "https://buddy.example/go/split?d2=B-1.tiktok", currency: "USD", optimizeFor: "clicks", identity: { ref: "ident-1", displayName: "Buddy" }, targeting: { countries: ["DE"], keywords: COPY.keywords } });
+    // Every ad carries its own tag, so day2 knows which one brought whom.
+    expect(tiktok.launches[0]!.creatives[0]!.link).toBe("https://buddy.example/go/split?d2=B-1.tiktok.v1");
     expect(tiktok.launches[0]!.creatives.map((c) => c.asset?.kind)).toEqual(["video"]);
     expect(google.launches[0]).toMatchObject({ link: "https://buddy.example/go/split?d2=B-1.google", identity: null });
     expect(google.launches[0]!.creatives.map((c) => c.asset)).toEqual([null]); // search ads from the keywords
     expect(await identities.get("app_a", "tiktok")).toMatchObject({ ref: "ident-1", setBy: "day2" });
     expect(logs).toContain("Left out the variant 2 for B-1: overstates.");
     // Budget: half of an equal share, split at the platforms' minimums.
-    expect(tiktok.launches[0]!.dailyBudgetUsd + google.launches[0]!.dailyBudgetUsd).toBeCloseTo(25, 0);
+    expect(tiktok.launches[0]!.dailyBudget + google.launches[0]!.dailyBudget).toBeCloseTo(25, 0);
     expect(produced).toBe(1);
   });
 
   test("next pass: results billed in credits; a rejected ad is stopped with its reason", async () => {
-    tiktok.stat = { spendUsd: 42.5, impressions: 9000, clicks: 300, status: "active" };
-    google.stat = { spendUsd: 3, impressions: 100, clicks: 4, status: "rejected", rejection: "Destination not working" };
+    tiktok.stat = { spend: 42.5, currency: "USD", impressions: 9000, clicks: 300, status: "active" };
+    google.stat = { spend: 3, currency: "USD", impressions: 100, clicks: 4, status: "rejected", rejection: "Destination not working" };
     const before = (await readCredits(credits, NOW)).events.length;
     const r = await run(new Date(NOW.getTime() + 7 * 3_600_000));
     expect(r.stopped).toEqual(["B-1:google"]);
@@ -301,7 +322,7 @@ describe("a pass", () => {
   });
 
   test("the month's budget: everything holds until the new month", async () => {
-    tiktok.stat = { spendUsd: 60, impressions: 1, clicks: 1, status: "active" };
+    tiktok.stat = { spend: 60, currency: "USD", impressions: 1, clicks: 1, status: "active" };
     await run(new Date(NOW.getTime() + 20 * 3_600_000), 50);
     expect(loadAds(join(repo, ADS_FILENAME)).campaigns.find((c) => c.platform === "tiktok")).toMatchObject({ status: "paused", heldFor: "this month's ad budget is used up" });
     await run(new Date("2026-11-01T08:00:00Z"), 50);

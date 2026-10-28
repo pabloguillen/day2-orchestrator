@@ -51,6 +51,8 @@ export type CopyInput = {
   /** Markets the owner set, if any (ISO codes); otherwise the writer proposes them from the app. */
   countries?: string[];
   languages?: string[];
+  /** What worked and failed in this app's earlier ads (learnings.ts). */
+  learned?: string;
 };
 
 const MARKER = "AD_COPY_JSON:";
@@ -70,7 +72,7 @@ Audience for this experiment: ${i.audience || i.profile.targetUsers}
 Landing page: ${i.link}
 ${i.countries?.length ? `Markets (fixed): ${i.countries.join(", ")}; languages: ${(i.languages ?? []).join(", ")}` : "Markets: propose the countries and languages the app is clearly built for (from its language and audience); at most 5 countries."}
 
-Write 2 variants that take different angles on the idea. Each has: headline (≤40 chars), shortHeadline (≤30), body (≤125, the primary text), description (≤90), cta (one of ${CTAS.join(", ")}), frameHeadline (≤45, printed on the image/video), frameCta (≤18, the button on the image/video, e.g. "Try it free" only if it is free), and claims (every factual claim the variant makes).
+${i.learned ? `What this app's earlier ads taught (build on what worked, avoid what didn't — don't copy it):\n${i.learned}\n\n` : ""}Write 2 variants that take different angles on the idea. Each has: headline (≤40 chars), shortHeadline (≤30), body (≤125, the primary text), description (≤90), cta (one of ${CTAS.join(", ")}), frameHeadline (≤45, printed on the image/video), frameCta (≤18, the button on the image/video, e.g. "Try it free" only if it is free), and claims (every factual claim the variant makes).
 Also: a script (≤75 words) for an AI presenter who speaks as a narrator showing the app — never pretending to be a real customer, no invented results, numbers or reviews; keywords (8–15 search terms people with this need type); interests (3–8 interests or job functions of the audience); audience: "consumer" or "business".
 Rules: specific and truthful; no invented numbers, testimonials, rankings or awards; no superlatives you can't prove; no shaming; nothing about health, finance or politics beyond what the app does.
 

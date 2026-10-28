@@ -75,6 +75,17 @@ function time(v: unknown, now: Date): string | null {
   return Math.abs(t - now.getTime()) > 86_400_000 ? now.toISOString() : new Date(t).toISOString();
 }
 
+const CLICK_PARAMS = new Set(["fbclid", "ttclid", "gclid", "gbraid", "wbraid", "li_fat_id", "ScCid", "epik", "rdt_cid", "twclid"]);
+
+/** An ad platform's click id, if it's one day2 knows and looks like an id. */
+function clickOf(v: unknown): { param: string; value: string } | null {
+  if (!v || typeof v !== "object") return null;
+  const c = v as Record<string, unknown>;
+  if (typeof c.param !== "string" || !CLICK_PARAMS.has(c.param) || typeof c.value !== "string") return null;
+  const value = c.value.trim().slice(0, 500);
+  return /^[A-Za-z0-9._~%:=-]{4,500}$/.test(value) ? { param: c.param, value } : null;
+}
+
 export function cleanBatch(raw: unknown, now: Date): Batch | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -138,6 +149,7 @@ export function cleanBatch(raw: unknown, now: Date): Batch | null {
         ? {
             ...(str(a.campaignId, 40) ? { campaignId: str(a.campaignId, 40) } : {}),
             ...(typeof a.channel === "string" && CHANNELS.has(a.channel) ? { channel: a.channel } : {}),
+            ...(clickOf(a.click) ? { click: clickOf(a.click)! } : {}),
           }
         : undefined;
     // Users arrive hashed by the library (hashUser); anything else is dropped.
@@ -195,6 +207,11 @@ export async function handleIngest(req: Request, deps: IngestDeps): Promise<Resp
   }
   const batch = cleanBatch(raw, now);
   if (!batch) return reply(400, { error: "Not a day2 batch." });
+  // Ad platforms match conversions by click id plus the visitor's IP and
+  // browser. Kept only on visits that came from an ad, and removed after
+  // 7 days (field-store prune) — it's only needed to send the conversion.
+  const ua = (req.headers.get("user-agent") ?? "").slice(0, 300);
+  if (ip !== "?") for (const e of batch.events) if (e.acquisition?.click) e.acquisition.click = { ...e.acquisition.click, ip: ip.slice(0, 64), ...(ua ? { ua } : {}) };
   await deps.store.record(owner.appId, batch, now);
   return reply(204);
 }

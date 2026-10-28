@@ -81,6 +81,7 @@ describe("pinterest info & env", () => {
   test("info", () => {
     expect(info.id).toBe("pinterest");
     expect(info.identity).toBe("none");
+    expect(info.clickIdParam).toBe("epik");
     expect(info.formats.map((f) => `${f.kind} ${f.ratio}`)).toEqual(["image 2:3", "image 1:1", "video 9:16", "video 1:1", "video 2:3"]);
     expect(info.copyLimits).toEqual({ headline: 100, body: 500 });
     expect(info.audiences).toEqual(["consumer"]);
@@ -254,11 +255,82 @@ describe("pinterest launch", () => {
     expect(f.done()).toBe(true);
   });
 
-  test("refuses a non-USD ad account before creating anything", async () => {
+  test("refuses a budget in a currency other than the account's, before creating anything", async () => {
     const f = scriptedFetch([oauth, { ...account, json: { id: "549755885175", currency: "EUR" } }]);
     const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
-    await expect(p.launch(testSpec())).rejects.toBeInstanceOf(PlatformError);
+    await expect(p.launch(testSpec({ currency: "USD" }))).rejects.toThrow("bills in EUR");
     expect(f.done()).toBe(true);
+  });
+
+  test("EUR account: budget in micro-EUR, per-ad links, signups → WEB_CONVERSION with the tag", async () => {
+    const f = scriptedFetch([
+      oauth,
+      { ...account, json: { id: "549755885175", currency: "EUR" } },
+      { method: "POST", url: `${API}/pins?`, check: (r) => expect((r.json as { link: string }).link).toBe("https://buddy.example/go?d2=B-4.pinterest.v1"), json: { id: "11" } },
+      { method: "POST", url: `${API}/pins?`, check: (r) => expect((r.json as { link: string }).link).toBe("https://buddy.example/go/split?d2=B-4.x"), json: { id: "12" } },
+      {
+        method: "POST",
+        url: `${ACCT}/campaigns`,
+        check: (r) => {
+          const [c] = r.json as Array<Record<string, unknown>>;
+          expect(c!.objective_type).toBe("WEB_CONVERSION");
+          expect(c!.daily_spend_cap).toBe(12_500_000);
+          expect(c!.status).toBe("PAUSED");
+        },
+        json: { items: [{ data: { id: "626736533506" } }] },
+      },
+      {
+        method: "POST",
+        url: `${ACCT}/ad_groups`,
+        check: (r) => {
+          const [g] = r.json as Array<Record<string, unknown>>;
+          expect(g!.billable_event).toBe("IMPRESSION");
+          expect(g!.budget_type).toBe("CBO_ADGROUP");
+          expect(g!.optimization_goal_metadata).toEqual({
+            conversion_tag_v3_goal_metadata: {
+              conversion_tag_id: "2612345678901",
+              conversion_event: "SIGNUP",
+              attribution_windows: { click_window_days: 30, engagement_window_days: 30, view_window_days: 1 },
+            },
+          });
+        },
+        json: { items: [{ data: { id: "2680059592705" } }] },
+      },
+      {
+        method: "POST",
+        url: `${ACCT}/ads`,
+        check: (r) =>
+          expect((r.json as Array<{ destination_url: string }>).map((a) => a.destination_url)).toEqual([
+            "https://buddy.example/go?d2=B-4.pinterest.v1",
+            "https://buddy.example/go/split?d2=B-4.x",
+          ]),
+        json: { items: [{ data: { id: "a1" } }, { data: { id: "a2" } }] },
+      },
+      activate(),
+    ]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    const base = testSpec().creatives[0]!;
+    const launched = await p.launch(
+      testSpec({
+        currency: "EUR",
+        dailyBudget: 12.5,
+        optimizeFor: "signups",
+        conversion: { platform: "pinterest", refs: { adAccountId: "549755885175", conversionTagId: "2612345678901" } },
+        creatives: [
+          { ...base, key: "v1", link: "https://buddy.example/go?d2=B-4.pinterest.v1", asset: testImage() },
+          { ...base, key: "v2", asset: testImage({ id: "as_img2" }) },
+        ],
+      }),
+    );
+    expect(launched.ads).toEqual({ v1: "a1", v2: "a2" });
+    expect(f.done()).toBe(true);
+  });
+
+  test("signups without a conversion setup is refused before any call", async () => {
+    const f = scriptedFetch([]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    await expect(p.launch(testSpec({ optimizeFor: "signups" }))).rejects.toThrow("conversion setup");
+    expect(f.calls.length).toBe(0);
   });
 
   test("a 429 is retried after Retry-After", async () => {
@@ -331,14 +403,15 @@ describe("pinterest operate", () => {
     const s = await p.stats(launched);
     expect(f.done()).toBe(true);
     expect(s).toEqual({
-      spendUsd: 13,
+      spend: 13,
+      currency: "USD",
       impressions: 4100,
       clicks: 56,
       status: "active",
       rejection: "Landing page doesn't work",
       byCreative: {
-        "B-4-v1": { spendUsd: 12.34, impressions: 4000, clicks: 55, status: "active" },
-        "B-4-v2": { spendUsd: 0.66, impressions: 100, clicks: 1, status: "rejected" },
+        "B-4-v1": { spend: 12.34, impressions: 4000, clicks: 55, status: "active" },
+        "B-4-v2": { spend: 0.66, impressions: 100, clicks: 1, status: "rejected" },
       },
     });
   });
@@ -359,23 +432,27 @@ describe("pinterest operate", () => {
     const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
     const s = await p.stats({ ...launched, refs: { startDate: "2026-01-01" }, ads: { "B-4-v1": "687195134316" } });
     expect(s.status).toBe("in_review");
-    expect(s.spendUsd).toBe(0);
+    expect(s.spend).toBe(0);
     expect(f.done()).toBe(true);
   });
 
-  test("pause / resume / setDailyBudget patch the campaign", async () => {
+  test("pause / resume / setDailyBudget / setAdActive", async () => {
     const ok = { items: [{ data: { id: "626736533506" } }] };
     const f = scriptedFetch([
       oauth,
       { method: "PATCH", url: `${ACCT}/campaigns`, check: (r) => expect(r.json).toEqual([{ id: "626736533506", ad_account_id: "549755885175", status: "PAUSED" }]), json: ok },
       { method: "PATCH", url: `${ACCT}/campaigns`, check: (r) => expect(r.json).toEqual([{ id: "626736533506", ad_account_id: "549755885175", status: "ACTIVE" }]), json: ok },
-      account,
+      { method: "PATCH", url: `${ACCT}/ads`, check: (r) => expect(r.json).toEqual([{ id: "687195134317", status: "PAUSED" }]), json: { items: [{ data: { id: "687195134317" } }] } },
+      { method: "PATCH", url: `${ACCT}/ads`, check: (r) => expect(r.json).toEqual([{ id: "687195134316", status: "ACTIVE" }]), json: { items: [{ data: { id: "687195134316" } }] } },
       { method: "PATCH", url: `${ACCT}/campaigns`, check: (r) => expect(r.json).toEqual([{ id: "626736533506", ad_account_id: "549755885175", daily_spend_cap: 37_500_000 }]), json: ok },
     ]);
     const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
     await p.pause(launched);
     await p.resume(launched);
+    await p.setAdActive(launched, "B-4-v2", false);
+    await p.setAdActive(launched, "B-4-v1", true);
     await p.setDailyBudget(launched, 37.5);
+    await expect(p.setAdActive(launched, "nope", true)).rejects.toBeInstanceOf(PlatformError);
     expect(f.done()).toBe(true);
   });
 
@@ -391,5 +468,108 @@ describe("pinterest operate", () => {
     const err = await p.pause(launched).catch((e) => e);
     expect(err).toBeInstanceOf(PlatformError);
     expect(String(err.message)).not.toContain("at_1");
+  });
+});
+
+describe("pinterest account & conversions", () => {
+  test("accountInfo: name, currency, canSpend from Business Access roles", async () => {
+    const f = scriptedFetch([
+      oauth,
+      { method: "GET", url: ACCT, json: { id: "549755885175", name: "day2 ads", currency: "EUR", permissions: ["ADMIN"] } },
+      { method: "GET", url: ACCT, json: { id: "549755885175", name: "day2 ads", currency: "EUR", permissions: ["ANALYST"] } },
+    ]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    expect(await p.accountInfo()).toEqual({ id: "549755885175", name: "day2 ads", currency: "EUR", canSpend: true });
+    const ro = await p.accountInfo();
+    expect(ro.canSpend).toBe(false);
+    expect(ro.problem).toContain("ANALYST");
+  });
+
+  test("ensureConversions reuses an existing day2 tag", async () => {
+    const f = scriptedFetch([
+      oauth,
+      {
+        method: "GET",
+        url: `${ACCT}/conversion_tags?filter_deleted=true`,
+        json: { items: [{ id: "1", name: "old", status: "ARCHIVED" }, { id: "2612345678901", name: "day2", status: "ACTIVE" }] },
+      },
+    ]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    expect(await p.ensureConversions!()).toEqual({ platform: "pinterest", refs: { adAccountId: "549755885175", conversionTagId: "2612345678901" } });
+    expect(f.done()).toBe(true);
+  });
+
+  test("ensureConversions creates a tag when the account has none", async () => {
+    const f = scriptedFetch([
+      oauth,
+      { method: "GET", url: `${ACCT}/conversion_tags`, json: { items: [] } },
+      { method: "POST", url: `${ACCT}/conversion_tags`, check: (r) => expect(r.json).toEqual({ name: "day2" }), json: { id: "2619999", name: "day2", status: "ACTIVE", ad_account_id: "549755885175" } },
+    ]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    expect((await p.ensureConversions!()).refs.conversionTagId).toBe("2619999");
+    expect(f.done()).toBe(true);
+  });
+
+  test("sendConversions: signup + custom activation with epik click id, event_id, hashed external_id", async () => {
+    const setup = { platform: "pinterest" as const, refs: { adAccountId: "549755885175", conversionTagId: "2612345678901" } };
+    const hashed = "a".repeat(64);
+    const f = scriptedFetch([
+      oauth,
+      {
+        method: "POST",
+        url: `${ACCT}/events`,
+        check: (r) =>
+          expect(r.json).toEqual({
+            data: [
+              {
+                event_name: "signup",
+                action_source: "web",
+                event_time: 1793016000,
+                event_id: "dev-1:signup",
+                event_source_url: "https://buddy.example/go",
+                user_data: { client_ip_address: "203.0.113.7", client_user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", click_id: "dj0yJnU9", external_id: [hashed] },
+              },
+              {
+                event_name: "custom",
+                action_source: "web",
+                event_time: 1793019600,
+                event_id: "dev-1:activated",
+                event_source_url: "https://buddy.example/go",
+                user_data: { client_ip_address: "2001:db8::1", client_user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", click_id: "dj0yJnU9", external_id: ["c6c289e49e9c05b2145860387b73bcb18df43fb09a1e4a4a9713c76c88bb541b"] },
+              },
+            ],
+          }),
+        json: {
+          num_events_received: 2,
+          num_events_processed: 1,
+          events: [{ status: "processed" }, { status: "failed", error_message: "Invalid event_source_url" }],
+        },
+      },
+    ]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    const res = await p.sendConversions!(setup, [
+      { eventId: "dev-1:signup", name: "signup", at: "2026-10-26T12:00:00Z", click: { param: "epik", value: "dj0yJnU9" }, pageUrl: "https://buddy.example/go", externalId: hashed, clientIp: "203.0.113.7", userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)" },
+      { eventId: "dev-1:activated", name: "activated", at: "2026-10-26T13:00:00Z", click: { param: "epik", value: "dj0yJnU9" }, pageUrl: "https://buddy.example/go", externalId: "user-1", clientIp: "2001:db8::1", userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)" },
+      { eventId: "dev-3:signup", name: "signup", at: "2026-10-26T13:00:00Z", click: { param: "epik", value: "v3" }, pageUrl: "https://buddy.example/go" },
+      { eventId: "dev-4:signup", name: "signup", at: "2026-10-26T13:00:00Z", click: { param: "epik", value: "v4" }, pageUrl: "https://buddy.example/go", clientIp: "203.0.113.9" },
+      { eventId: "dev-2:signup", name: "signup", at: "2026-10-26T13:00:00Z", click: { param: "fbclid", value: "x" }, pageUrl: "https://buddy.example/go" },
+    ]);
+    expect(res.sent).toBe(1);
+    expect(res.rejected).toEqual([
+      { eventId: "dev-3:signup", why: expect.stringContaining("IP address and user agent") },
+      { eventId: "dev-4:signup", why: expect.stringContaining("IP address and user agent") },
+      { eventId: "dev-2:signup", why: "not a Pinterest click (fbclid)" },
+      { eventId: "dev-1:activated", why: "Invalid event_source_url" },
+    ]);
+    expect(f.done()).toBe(true);
+  });
+
+  test("sendConversions: a rejected batch is reported per event, not thrown", async () => {
+    const setup = { platform: "pinterest" as const, refs: { adAccountId: "549755885175", conversionTagId: "1" } };
+    const f = scriptedFetch([oauth, { method: "POST", url: `${ACCT}/events`, status: 422, json: { code: 4162, message: "Invalid event_time" } }]);
+    const p = create(creds, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    const res = await p.sendConversions!(setup, [{ eventId: "e1", name: "signup", at: "2026-10-26T12:00:00Z", click: { param: "epik", value: "v" }, pageUrl: "https://x.example", clientIp: "203.0.113.7", userAgent: "UA" }]);
+    expect(res.sent).toBe(0);
+    expect(res.rejected[0]!.why).toContain("Invalid event_time");
   });
 });

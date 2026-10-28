@@ -10,12 +10,23 @@ import type { PlatformId } from "./types";
  * ("custom"), otherwise linked by the app's owner or day2's operator.
  */
 
-export type PlatformIdentity = { appId: string; platform: PlatformId; ref: string; displayName: string; setBy: string | null; setAt: string };
+export type PlatformIdentity = {
+  appId: string;
+  platform: PlatformId;
+  ref: string;
+  displayName: string;
+  setBy: string | null;
+  setAt: string;
+  /** "pending": waiting for the owner to approve something on the platform (`todo`). */
+  status?: "ready" | "pending";
+  todo?: string | null;
+};
 
 export interface PlatformIdentityStore {
   forApp(appId: string): Promise<PlatformIdentity[]>;
   get(appId: string, platform: PlatformId): Promise<PlatformIdentity | undefined>;
   set(i: Omit<PlatformIdentity, "setAt">): Promise<PlatformIdentity>;
+  setStatus(appId: string, platform: PlatformId, status: "ready" | "pending", todo: string | null): Promise<void>;
   remove(appId: string, platform: PlatformId): Promise<void>;
 }
 
@@ -63,6 +74,13 @@ export function filePlatformIdentities(path: string, legacyMetaPath?: string): P
       save(all);
       return v;
     },
+    async setStatus(appId, platform, status, todo) {
+      const all = load();
+      const cur = all[key(appId, platform)];
+      if (!cur) return;
+      all[key(appId, platform)] = { ...cur, status, todo };
+      save(all);
+    },
     async remove(appId, platform) {
       const all = load();
       delete all[key(appId, platform)];
@@ -71,8 +89,8 @@ export function filePlatformIdentities(path: string, legacyMetaPath?: string): P
   };
 }
 
-type Row = { app_id: string; platform: PlatformId; ref: string; display_name: string; set_by: string | null; set_at: Date | string };
-const toIdentity = (r: Row): PlatformIdentity => ({ appId: r.app_id, platform: r.platform, ref: r.ref, displayName: r.display_name, setBy: r.set_by, setAt: new Date(r.set_at).toISOString() });
+type Row = { app_id: string; platform: PlatformId; ref: string; display_name: string; set_by: string | null; set_at: Date | string; status?: string; todo?: string | null };
+const toIdentity = (r: Row): PlatformIdentity => ({ appId: r.app_id, platform: r.platform, ref: r.ref, displayName: r.display_name, setBy: r.set_by, setAt: new Date(r.set_at).toISOString(), status: r.status === "pending" ? "pending" : "ready", todo: r.todo ?? null });
 
 export function dbPlatformIdentities(sql: SQL): PlatformIdentityStore {
   // Meta Pages are still assigned on the Platform page (app_ad_identities); they count here too.
@@ -92,10 +110,13 @@ export function dbPlatformIdentities(sql: SQL): PlatformIdentityStore {
       return rows[0] ? toIdentity(rows[0]) : platform === "meta" ? legacyMeta(appId) : undefined;
     },
     async set(i) {
-      const [r] = (await sql`INSERT INTO app_platform_identities (app_id, platform, ref, display_name, set_by) VALUES (${i.appId}, ${i.platform}, ${i.ref}, ${i.displayName}, ${i.setBy})
-        ON CONFLICT (app_id, platform) DO UPDATE SET ref = EXCLUDED.ref, display_name = EXCLUDED.display_name, set_by = EXCLUDED.set_by, set_at = now()
+      const [r] = (await sql`INSERT INTO app_platform_identities (app_id, platform, ref, display_name, set_by, status, todo) VALUES (${i.appId}, ${i.platform}, ${i.ref}, ${i.displayName}, ${i.setBy}, ${i.status ?? "ready"}, ${i.todo ?? null})
+        ON CONFLICT (app_id, platform) DO UPDATE SET ref = EXCLUDED.ref, display_name = EXCLUDED.display_name, set_by = EXCLUDED.set_by, status = EXCLUDED.status, todo = EXCLUDED.todo, set_at = now()
         RETURNING *`) as Row[];
       return toIdentity(r!);
+    },
+    async setStatus(appId, platform, status, todo) {
+      await sql`UPDATE app_platform_identities SET status = ${status}, todo = ${todo} WHERE app_id = ${appId} AND platform = ${platform}`;
     },
     async remove(appId, platform) {
       await sql`DELETE FROM app_platform_identities WHERE app_id = ${appId} AND platform = ${platform}`;

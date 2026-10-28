@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { noSleep, scriptedFetch, testAsset, testImage, testSpec, type Expect, type Recorded } from "../test-helpers";
-import { PlatformError, type Identity, type Launched } from "../types";
-import { ageGroups, create, credentialsFromEnv, info } from "./tiktok";
+import { PlatformError, type Conversion, type Identity, type Launched } from "../types";
+import { ageGroups, create, credentialsFromEnv, hashExternalId, info } from "./tiktok";
 
 const BASE = "https://business-api.tiktok.com/open_api/v1.3";
 const creds = { accessToken: "tok_secret_123", advertiserId: "7000000000000000001" };
@@ -21,6 +22,18 @@ function platform(script: Expect[]) {
   return { p, f };
 }
 
+const advertiser = (currency = "USD", status = "STATUS_ENABLE"): Expect => ({
+  method: "GET",
+  url: `${BASE}/advertiser/info/`,
+  check: (r) => {
+    authed(r);
+    expect(JSON.parse(q(r, "advertiser_ids")!)).toEqual([creds.advertiserId]);
+    expect(JSON.parse(q(r, "fields")!)).toEqual(["advertiser_id", "name", "currency", "status"]);
+  },
+  json: ok({ list: [{ advertiser_id: creds.advertiserId, name: "day2 ads", currency, status }] }),
+});
+const region: Expect = { url: `${BASE}/tool/region/`, json: ok({ region_info: [{ location_id: "2921044", region_code: "DE", level: "COUNTRY", name: "Germany" }, { location_id: "2782113", region_code: "AT", level: "COUNTRY" }] }) };
+
 const identity: Identity = { platform: "tiktok", ref: "ident_42", displayName: "Buddy" };
 const launched: Launched = { platform: "tiktok", campaignId: "cmp_1", refs: { adgroupId: "ag_1" }, ads: { "B-4-v1": "ad_1", "B-4-v2": "ad_2" } };
 
@@ -28,6 +41,7 @@ describe("info / credentials", () => {
   test("info", () => {
     expect(info.id).toBe("tiktok");
     expect(info.identity).toBe("custom");
+    expect(info.clickIdParam).toBe("ttclid");
     expect(info.formats[0]).toMatchObject({ kind: "video", ratio: "9:16", minDurationSec: 5, maxDurationSec: 60 });
     expect(info.minDailyUsd).toBe(20);
     expect(info.apiVersion).toBe("v1.3");
@@ -46,6 +60,27 @@ describe("info / credentials", () => {
     expect(ageGroups(18)).toEqual(["AGE_18_24", "AGE_25_34", "AGE_35_44", "AGE_45_54", "AGE_55_100"]);
     expect(ageGroups(25, 44)).toEqual(["AGE_25_34", "AGE_35_44"]);
     expect(ageGroups(21, 23)).toEqual(["AGE_18_24"]);
+  });
+
+  test("hashExternalId", () => {
+    const digest = createHash("sha256").update("user-1").digest("hex");
+    expect(hashExternalId("User-1")).toBe(digest);
+    expect(hashExternalId(digest)).toBe(digest);
+  });
+});
+
+describe("accountInfo", () => {
+  test("enabled account can spend", async () => {
+    const { p, f } = platform([advertiser("EUR")]);
+    expect(await p.accountInfo()).toEqual({ id: creds.advertiserId, name: "day2 ads", currency: "EUR", canSpend: true });
+    expect(f.done()).toBe(true);
+  });
+
+  test("account under review cannot spend, with the problem", async () => {
+    const { p } = platform([advertiser("USD", "STATUS_PENDING_CONFIRM")]);
+    const acc = await p.accountInfo();
+    expect(acc.canSpend).toBe(false);
+    expect(acc.problem).toContain("under review");
   });
 });
 
@@ -99,11 +134,11 @@ describe("ensureIdentity", () => {
 });
 
 describe("launch", () => {
-  const region = { url: `${BASE}/tool/region/`, json: ok({ region_info: [{ location_id: "2921044", region_code: "DE", level: "COUNTRY", name: "Germany" }, { location_id: "2782113", region_code: "AT", level: "COUNTRY" }] }) };
-
-  test("9:16 video: uploads by URL with cover, creates disabled campaign, ad group, ad, then enables", async () => {
+  test("9:16 video, clicks: uploads by URL with cover, disabled campaign, ad group, ad (own link), then enables", async () => {
     const spec = testSpec({ identity, aiContent: true });
+    spec.creatives[0]!.link = "https://buddy.example/go/split?d2=B-4.tiktok.v1";
     const { p, f } = platform([
+      advertiser(),
       {
         method: "GET",
         ...region,
@@ -188,7 +223,7 @@ describe("launch", () => {
                 image_ids: ["img_cover"],
                 ad_text: "Add the bill, pick who was there, done.",
                 call_to_action: "SIGN_UP",
-                landing_page_url: "https://buddy.example/go/split?d2=B-4.x",
+                landing_page_url: "https://buddy.example/go/split?d2=B-4.tiktok.v1",
                 aigc_disclosure_type: "SELF_DISCLOSURE",
               },
             ],
@@ -207,7 +242,35 @@ describe("launch", () => {
     expect(f.done()).toBe(true);
   });
 
-  test("fits long copy, maps CTA, no AI label when not AI, caches location ids", async () => {
+  test("signups in EUR: WEB_CONVERSIONS campaign, ad group optimises for the pixel's registration event", async () => {
+    const spec = testSpec({ identity, currency: "EUR", dailyBudget: 25.5, optimizeFor: "signups", conversion: { platform: "tiktok", refs: { pixelId: "px_1", pixelCode: "CODE1" } } });
+    const { p, f } = platform([
+      advertiser("EUR"),
+      region,
+      { url: "/file/video/ad/upload/", json: ok([{ video_id: "v_1" }]) },
+      { url: "/file/image/ad/upload/", json: ok({ image_id: "img_c" }) },
+      { url: "/campaign/create/", check: (r) => expect((r.json as Record<string, unknown>).objective_type).toBe("WEB_CONVERSIONS"), json: ok({ campaign_id: "cmp_1" }) },
+      {
+        url: "/adgroup/create/",
+        check: (r) => {
+          const b = r.json as Record<string, unknown>;
+          expect(b.optimization_goal).toBe("CONVERT");
+          expect(b.pixel_id).toBe("px_1");
+          expect(b.optimization_event).toBe("ON_WEB_REGISTER");
+          expect(b.billing_event).toBe("OCPM");
+          expect(b.budget).toBe(25.5);
+          expect(b.promotion_type).toBe("WEBSITE");
+        },
+        json: ok({ adgroup_id: "ag_1" }),
+      },
+      { url: "/ad/create/", check: (r) => expect((r.json as { creatives: Array<Record<string, unknown>> }).creatives[0]!.landing_page_url).toBe(spec.link), json: ok({ ad_ids: ["ad_1"] }) },
+      { url: "/campaign/status/update/", json: ok({}) },
+    ]);
+    await p.launch(spec);
+    expect(f.done()).toBe(true);
+  });
+
+  test("fits long copy, maps CTA, no AI label when not AI, caches account currency and location ids", async () => {
     const long = "word ".repeat(40);
     const spec = testSpec({
       identity,
@@ -222,6 +285,7 @@ describe("launch", () => {
       { url: "/campaign/status/update/", json: ok({}) },
     ];
     const { p, f } = platform([
+      advertiser(),
       region,
       ...happy((r) => {
         const c = (r.json as { creatives: Array<Record<string, unknown>> }).creatives[0]!;
@@ -230,7 +294,7 @@ describe("launch", () => {
         expect(c.call_to_action).toBe("DOWNLOAD_NOW");
         expect(c.aigc_disclosure_type).toBeUndefined();
       }),
-      ...happy(), // second launch: no tool/region call
+      ...happy(), // second launch: no advertiser/info, no tool/region
     ]);
     await p.launch(spec);
     await p.launch(spec);
@@ -239,6 +303,7 @@ describe("launch", () => {
 
   test("deletes the disabled campaign and rethrows when ad creation fails", async () => {
     const { p, f } = platform([
+      advertiser(),
       region,
       { url: "/file/video/ad/upload/", json: ok([{ video_id: "v_1" }]) },
       { url: "/file/image/ad/upload/", json: ok({ image_id: "img_c" }) },
@@ -259,19 +324,22 @@ describe("launch", () => {
     expect(f.done()).toBe(true);
   });
 
-  test("validates before any call: identity, budget minimum, video, unknown country", async () => {
-    const { p, f } = platform([region]);
+  test("validates before creating anything: identity, USD minimum, pixel, video, currency, country", async () => {
+    const { p, f } = platform([advertiser("EUR"), region]);
     await expect(p.launch(testSpec())).rejects.toThrow(/identity/);
-    await expect(p.launch(testSpec({ identity, dailyBudgetUsd: 10 }))).rejects.toThrow(/minimum/);
+    await expect(p.launch(testSpec({ identity, dailyBudget: 10 }))).rejects.toThrow(/minimum/);
+    await expect(p.launch(testSpec({ identity, optimizeFor: "signups" }))).rejects.toThrow(/pixel/);
     await expect(p.launch(testSpec({ identity, creatives: [{ key: "i", copy: testSpec().creatives[0]!.copy, asset: testImage() }] }))).rejects.toThrow(/video/);
-    await expect(p.launch(testSpec({ identity, targeting: { ...testSpec().targeting, countries: ["DE", "ZZ"] } }))).rejects.toThrow(/ZZ/);
-    expect(f.done()).toBe(true); // only tool/region was called
+    await expect(p.launch(testSpec({ identity, currency: "USD" }))).rejects.toThrow(/bills in EUR/);
+    await expect(p.launch(testSpec({ identity, currency: "EUR", targeting: { ...testSpec().targeting, countries: ["DE", "ZZ"] } }))).rejects.toThrow(/ZZ/);
+    expect(f.done()).toBe(true); // only advertiser/info and tool/region were called
   });
 });
 
 describe("stats", () => {
-  test("maps spend/impressions/clicks per creative, status, and the rejection reason", async () => {
+  test("maps spend (account currency)/impressions/clicks per creative, status, and the rejection reason", async () => {
     const { p, f } = platform([
+      advertiser("EUR"),
       {
         method: "GET",
         url: `${BASE}/report/integrated/get/`,
@@ -312,14 +380,15 @@ describe("stats", () => {
     ]);
     const s = await p.stats(launched);
     expect(s).toEqual({
-      spendUsd: 13,
+      spend: 13,
+      currency: "EUR",
       impressions: 5100,
       clicks: 82,
       status: "active",
       rejection: "Misleading claims; Suggestion: Remove the time claim",
       byCreative: {
-        "B-4-v1": { spendUsd: 12.34, impressions: 5000, clicks: 80, status: "active" },
-        "B-4-v2": { spendUsd: 0.66, impressions: 100, clicks: 2, status: "rejected" },
+        "B-4-v1": { spend: 12.34, impressions: 5000, clicks: 80, status: "active" },
+        "B-4-v2": { spend: 0.66, impressions: 100, clicks: 2, status: "rejected" },
       },
     });
     expect(f.done()).toBe(true);
@@ -327,17 +396,19 @@ describe("stats", () => {
 
   test("all in review, no delivery yet → in_review with zeros", async () => {
     const { p } = platform([
+      advertiser(),
       { url: "/report/integrated/get/", json: ok({ list: [] }) },
       { url: "/ad/get/", json: ok({ list: [{ ad_id: "ad_1", secondary_status: "AD_STATUS_AUDIT" }, { ad_id: "ad_2", secondary_status: "AD_STATUS_NOT_START" }] }) },
     ]);
     const s = await p.stats(launched);
     expect(s.status).toBe("in_review");
-    expect(s.spendUsd).toBe(0);
-    expect(s.byCreative?.["B-4-v1"]).toEqual({ spendUsd: 0, impressions: 0, clicks: 0, status: "in_review" });
+    expect(s.spend).toBe(0);
+    expect(s.byCreative?.["B-4-v1"]).toEqual({ spend: 0, impressions: 0, clicks: 0, status: "in_review" });
   });
 
   test("paused campaign", async () => {
     const { p } = platform([
+      advertiser(),
       { url: "/report/integrated/get/", json: ok({ list: [] }) },
       { url: "/ad/get/", json: ok({ list: [{ ad_id: "ad_1", secondary_status: "AD_STATUS_CAMPAIGN_DISABLE" }, { ad_id: "ad_2", secondary_status: "AD_STATUS_CAMPAIGN_DISABLE" }] }) },
     ]);
@@ -345,7 +416,7 @@ describe("stats", () => {
   });
 });
 
-describe("pause / resume / budget", () => {
+describe("pause / resume / ads / budget", () => {
   test("pause and resume toggle the campaign", async () => {
     const { p, f } = platform([
       { method: "POST", url: `${BASE}/campaign/status/update/`, check: (r) => expect(r.json).toEqual({ advertiser_id: creds.advertiserId, campaign_ids: ["cmp_1"], operation_status: "DISABLE" }), json: ok({}) },
@@ -356,13 +427,124 @@ describe("pause / resume / budget", () => {
     expect(f.done()).toBe(true);
   });
 
-  test("setDailyBudget updates the ad group", async () => {
+  test("setAdActive toggles one ad by creative key", async () => {
     const { p, f } = platform([
+      { method: "POST", url: `${BASE}/ad/status/update/`, check: (r) => expect(r.json).toEqual({ advertiser_id: creds.advertiserId, ad_ids: ["ad_2"], operation_status: "DISABLE" }), json: ok({}) },
+      { method: "POST", url: `${BASE}/ad/status/update/`, check: (r) => expect(r.json).toEqual({ advertiser_id: creds.advertiserId, ad_ids: ["ad_2"], operation_status: "ENABLE" }), json: ok({}) },
+    ]);
+    await p.setAdActive(launched, "B-4-v2", false);
+    await p.setAdActive(launched, "B-4-v2", true);
+    await expect(p.setAdActive(launched, "nope", false)).rejects.toThrow(/nope/);
+    expect(f.done()).toBe(true);
+  });
+
+  test("setDailyBudget updates the ad group (USD minimum enforced)", async () => {
+    const { p, f } = platform([
+      advertiser(),
       { method: "POST", url: `${BASE}/adgroup/update/`, check: (r) => expect(r.json).toEqual({ advertiser_id: creds.advertiserId, adgroup_id: "ag_1", budget: 35.5 }), json: ok({ adgroup_id: "ag_1" }) },
     ]);
     await p.setDailyBudget(launched, 35.499);
     await expect(p.setDailyBudget(launched, 5)).rejects.toThrow(/minimum/);
     expect(f.done()).toBe(true);
+  });
+
+  test("setDailyBudget in another currency: no USD minimum", async () => {
+    const { p, f } = platform([advertiser("JPY"), { url: "/adgroup/update/", check: (r) => expect((r.json as Record<string, unknown>).budget).toBe(5000), json: ok({}) }]);
+    await p.setDailyBudget(launched, 5000);
+    expect(f.done()).toBe(true);
+  });
+});
+
+describe("conversions", () => {
+  test("ensureConversions reuses the day2 pixel by name", async () => {
+    const { p, f } = platform([
+      {
+        method: "GET",
+        url: `${BASE}/pixel/list/`,
+        check: (r) => expect(q(r, "name")).toBe("day2 conversions"),
+        json: ok({ pixels: [{ pixel_id: "px_other", pixel_code: "OTHER", pixel_name: "day2 conversions old" }, { pixel_id: 777, pixel_code: "CODE7", pixel_name: "day2 conversions" }], page_info: { total_page: 1 } }),
+      },
+    ]);
+    expect(await p.ensureConversions!()).toEqual({ platform: "tiktok", refs: { pixelId: "777", pixelCode: "CODE7" } });
+    expect(f.done()).toBe(true);
+  });
+
+  test("ensureConversions creates the pixel when missing", async () => {
+    const { p, f } = platform([
+      { url: "/pixel/list/", json: ok({ pixels: [], page_info: { total_page: 0 } }) },
+      {
+        method: "POST",
+        url: `${BASE}/pixel/create/`,
+        check: (r) => expect(r.json).toEqual({ advertiser_id: creds.advertiserId, pixel_name: "day2 conversions" }),
+        json: ok({ pixel_id: "px_new", pixel_code: "CNEW", pixel_name: "day2 conversions" }),
+      },
+    ]);
+    expect(await p.ensureConversions!()).toEqual({ platform: "tiktok", refs: { pixelId: "px_new", pixelCode: "CNEW" } });
+    expect(f.done()).toBe(true);
+  });
+
+  const setup = { platform: "tiktok" as const, refs: { pixelId: "px_1", pixelCode: "CODE1" } };
+  const ev = (over: Partial<Conversion> = {}): Conversion => ({
+    eventId: "dev-1:signup",
+    name: "signup",
+    at: "2026-10-28T09:00:00Z",
+    click: { param: "ttclid", value: "E.C.P.abc" },
+    pageUrl: "https://buddy.example/go/split",
+    externalId: "user-1",
+    ...over,
+  });
+
+  test("sendConversions posts Events API 2.0 payloads and rejects non-TikTok clicks", async () => {
+    const { p, f } = platform([
+      {
+        method: "POST",
+        url: `${BASE}/event/track/`,
+        check: (r) => {
+          authed(r);
+          expect(r.json).toEqual({
+            event_source: "web",
+            event_source_id: "CODE1",
+            data: [
+              {
+                event: "CompleteRegistration",
+                event_time: Math.floor(Date.parse("2026-10-28T09:00:00Z") / 1000),
+                event_id: "dev-1:signup",
+                user: { ttclid: "E.C.P.abc", external_id: createHash("sha256").update("user-1").digest("hex"), ip: "203.0.113.7", user_agent: "Mozilla/5.0 (iPhone)" },
+                page: { url: "https://buddy.example/go/split" },
+              },
+              {
+                event: "Activated",
+                event_time: Math.floor(Date.parse("2026-10-28T09:05:00Z") / 1000),
+                event_id: "dev-1:activated",
+                user: { ttclid: "E.C.P.abc" },
+                page: { url: "https://buddy.example/go/split" },
+              },
+            ],
+          });
+        },
+        json: ok({}),
+      },
+    ]);
+    const res = await p.sendConversions!(setup, [
+      ev({ clientIp: "203.0.113.7", userAgent: "Mozilla/5.0 (iPhone)" }),
+      ev({ eventId: "dev-1:activated", name: "activated", at: "2026-10-28T09:05:00Z", externalId: undefined }),
+      ev({ eventId: "dev-2:signup", click: { param: "fbclid", value: "x" } }),
+    ]);
+    expect(res).toEqual({ sent: 2, rejected: [{ eventId: "dev-2:signup", why: "not a TikTok click (fbclid)" }] });
+    expect(f.done()).toBe(true);
+  });
+
+  test("sendConversions: a permanent error rejects the batch; a rate limit throws retryable", async () => {
+    const bad = platform([{ url: "/event/track/", json: { code: 40002, message: "Invalid pixel code" } }]);
+    const res = await bad.p.sendConversions!(setup, [ev()]);
+    expect(res.sent).toBe(0);
+    expect(res.rejected[0]!.why).toContain("Invalid pixel code");
+
+    const limited = { url: "/event/track/", json: { code: 40100, message: "Requests made too frequently" } };
+    const slow = platform([limited, limited, limited]);
+    const err = await slow.p.sendConversions!(setup, [ev()]).catch((e) => e);
+    expect(err).toBeInstanceOf(PlatformError);
+    expect(err.retryable).toBe(true);
   });
 });
 
@@ -396,7 +578,7 @@ describe("error envelope", () => {
   });
 
   test("system error codes are retryable", async () => {
-    const { p } = platform([{ url: "/adgroup/update/", json: { code: 50000, message: "System error" } }]);
+    const { p } = platform([advertiser(), { url: "/adgroup/update/", json: { code: 50000, message: "System error" } }]);
     const err = await p.setDailyBudget(launched, 30).catch((e) => e);
     expect(err.retryable).toBe(true);
   });

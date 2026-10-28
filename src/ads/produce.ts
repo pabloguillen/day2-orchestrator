@@ -37,6 +37,8 @@ export type ProduceInput = {
   providers: { creatify?: VideoProvider | null; runway?: VideoProvider | null };
   /** Spend limit for generative video in this run, USD (0 = none). */
   generativeBudgetUsd: number;
+  /** Don't make app walkthrough videos (they kept losing). */
+  skipWalkthrough?: boolean;
   videoSeconds?: number;
 };
 
@@ -78,7 +80,7 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
     }
 
     // Screen recording videos: every needed ratio, first variant's words.
-    if (need.video.length) {
+    if (need.video.length && !i.skipWalkthrough) {
       const v0 = i.copy.variants[0]!;
       const rec = await recordPage(i.pageUrl, dir, seconds, browser);
       for (const r of need.video) {

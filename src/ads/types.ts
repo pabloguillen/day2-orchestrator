@@ -67,10 +67,12 @@ export type AdCopy = {
 
 /** One ad variant. `asset` is null for text-only ads (where the platform supports them). */
 export type AdCreativeInput = {
-  /** Stable key for this variant, e.g. "B-4-v1-9x16" — returned in stats. */
+  /** Stable key for this variant, e.g. "B-4-tiktok-v1" — returned in stats. */
   key: string;
   copy: AdCopy;
   asset: Asset | null;
+  /** This ad's own tracked landing URL (…?d2=B-4.tiktok.v1). Use it instead of LaunchSpec.link when present. */
+  link?: string;
 };
 
 export type Targeting = {
@@ -102,9 +104,19 @@ export type LaunchSpec = {
   appName: string;
   /** Unique, human-readable: "day2 buddy B-4". */
   campaignName: string;
-  /** Tracked landing URL — use exactly as given. */
+  /** Tracked landing URL — use exactly as given (each creative may carry its own `link`). */
   link: string;
-  dailyBudgetUsd: number;
+  /** Daily budget in the ad account's currency (`currency`). */
+  dailyBudget: number;
+  /** ISO 4217 currency of the ad account, e.g. "USD", "EUR". */
+  currency: string;
+  /**
+   * "clicks": optimise for landing-page clicks/visits (always possible).
+   * "signups": optimise for the conversion in `conversion` (set up with
+   * ensureConversions) — used once the platform has enough conversions.
+   */
+  optimizeFor: "clicks" | "signups";
+  conversion?: ConversionSetup;
   targeting: Targeting;
   creatives: AdCreativeInput[];
   /** null when the platform needs none (info.identity === "none"). */
@@ -126,14 +138,16 @@ export type Launched = {
 export type CampaignStatus = "active" | "paused" | "in_review" | "rejected" | "ended" | "unknown";
 
 export type AdStats = {
-  spendUsd: number;
+  /** Lifetime spend in the ad account's currency. */
+  spend: number;
+  currency: string;
   impressions: number;
   clicks: number;
   status: CampaignStatus;
   /** Why the platform rejected an ad, when it did. */
   rejection?: string;
   /** Per creative key. */
-  byCreative?: Record<string, { spendUsd: number; impressions: number; clicks: number; status?: CampaignStatus }>;
+  byCreative?: Record<string, { spend: number; impressions: number; clicks: number; status?: CampaignStatus }>;
 };
 
 export interface AdPlatform {
@@ -144,7 +158,26 @@ export interface AdPlatform {
   stats(c: Launched): Promise<AdStats>;
   pause(c: Launched): Promise<void>;
   resume(c: Launched): Promise<void>;
-  setDailyBudget(c: Launched, usd: number): Promise<void>;
+  /** In the ad account's currency. */
+  setDailyBudget(c: Launched, amount: number): Promise<void>;
+  /** Pauses or re-activates one ad (by its creative key) inside a launched campaign. */
+  setAdActive(c: Launched, key: string, active: boolean): Promise<void>;
+  /** The ad account this adapter operates: id, name, currency, whether it can spend. */
+  accountInfo(): Promise<AdAccountInfo>;
+  /**
+   * For info.identity === "app_account": whether day2 can run ads as this
+   * identity on this ad account right now (page role granted, profile
+   * linked, promotable user…), and what's missing if not.
+   */
+  checkIdentity?(identity: Identity): Promise<{ ok: true } | { ok: false; problem: string }>;
+  /**
+   * Creates (or finds) what the platform needs to receive day2's sign-up
+   * and activation conversions for this ad account — pixel / dataset /
+   * conversion action / conversion rule. Idempotent.
+   */
+  ensureConversions?(): Promise<ConversionSetup>;
+  /** Sends conversions (server-to-server), deduplicated by eventId on the platform where it supports that. */
+  sendConversions?(setup: ConversionSetup, events: Conversion[]): Promise<{ sent: number; rejected: Array<{ eventId: string; why: string }> }>;
   /**
    * Only for info.identity === "custom": creates (or finds, by display
    * name) the identity the app's ads show as. day2 stores the result and
@@ -152,6 +185,29 @@ export interface AdPlatform {
    */
   ensureIdentity?(app: { appId: string; displayName: string; logo: Asset }): Promise<Identity>;
 }
+
+export type AdAccountInfo = { id: string; name: string; currency: string; canSpend: boolean; problem?: string };
+
+/** What a platform needs to receive conversions, as created by ensureConversions. */
+export type ConversionSetup = { platform: PlatformId; refs: Record<string, string> };
+
+/** The platform click id captured when the visitor landed (fbclid, ttclid, gclid, li_fat_id, ScCid, epik, rdt_cid, twclid). */
+export type ClickId = { param: string; value: string };
+
+export type Conversion = {
+  /** Stable id for deduplication, e.g. "dev-123:signup". */
+  eventId: string;
+  name: "signup" | "activated";
+  at: string;
+  click: ClickId;
+  /** The landing page the visitor arrived on (no query string). */
+  pageUrl: string;
+  /** day2's hashed user id when known (never an email or name). */
+  externalId?: string;
+  /** The visitor's IP address and browser when they clicked (kept by day2 only 7 days; required by some platforms to match). */
+  clientIp?: string;
+  userAgent?: string;
+};
 
 export type PlatformInfo = {
   id: PlatformId;
@@ -161,8 +217,10 @@ export type PlatformInfo = {
   /** Can run an ad without an image or video (e.g. Google search ads). */
   textOnly: boolean;
   copyLimits: { headline: number; body: number; description?: number };
-  /** The platform's practical minimum daily budget per campaign/ad group, USD. */
+  /** The platform's practical minimum daily budget per campaign/ad group, in USD (converted for other currencies). */
   minDailyUsd: number;
+  /** The URL parameter the platform appends to ad clicks (fbclid, ttclid, gclid, …). */
+  clickIdParam: string;
   /**
    * "none": no identity needed. "custom": the adapter creates one from the
    * app's name and logo. "app_account": the app's own page/account must be

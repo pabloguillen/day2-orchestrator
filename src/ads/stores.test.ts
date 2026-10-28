@@ -1,17 +1,25 @@
+import { randomBytes } from "node:crypto";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDatabase } from "../db/test-db";
 import { ASSET_ID_RE, dbAssetStore, fileAssetStore, type AssetStore } from "./assets";
+import { dbConnections, fileConnections, type ConnectionStore } from "./connections";
+import { dbSentConversions, fileSentConversions, type SentConversions } from "./conversions";
 import { dbPlatformIdentities, filePlatformIdentities, REF_RE, type PlatformIdentityStore } from "./identities";
 
 /** Ad assets and platform identities: the same behaviour on files (local) and Postgres (production). */
 
 const root = mkdtempSync(join(tmpdir(), "day2-ads-stores-"));
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+const prevKey = process.env.DAY2_SECRETS_KEY;
+process.env.DAY2_SECRETS_KEY ??= randomBytes(32).toString("base64");
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  if (prevKey === undefined) delete process.env.DAY2_SECRETS_KEY;
+});
 
-function suite(name: string, make: () => Promise<{ assets: AssetStore; ids: PlatformIdentityStore; appId: string; cleanup: () => Promise<void> }>) {
+function suite(name: string, make: () => Promise<{ assets: AssetStore; ids: PlatformIdentityStore; conns: ConnectionStore; sent: SentConversions; appId: string; cleanup: () => Promise<void> }>) {
   describe(name, () => {
     let ctx: Awaited<ReturnType<typeof make>>;
     test("assets: stored with an unguessable public URL; a video carries its cover", async () => {
@@ -29,6 +37,34 @@ function suite(name: string, make: () => Promise<{ assets: AssetStore; ids: Plat
       expect((await ctx.assets.list(ctx.appId, "B-1")).map((a) => a.id).sort()).toEqual([cover.id, v.id].sort());
       expect(await ctx.assets.list("other")).toEqual([]);
       expect(await ctx.assets.get("as_aaaaaaaaaaaaaaaaaaaaaaaa")).toBeNull();
+    });
+    test("connections: one per scope and platform, tokens sealed; half-done ones carry their sign-in", async () => {
+      const a = await ctx.conns.save({ scope: "day2", platform: "tiktok", adAccountId: "1", accountName: "day2", currency: "USD", tokens: { accessToken: "t1" }, connectedBy: "op" });
+      const b = await ctx.conns.save({ scope: { appId: ctx.appId }, platform: "tiktok", adAccountId: "2", accountName: "Buddy", currency: "EUR", tokens: { accessToken: "t2", refreshToken: "r" }, connectedBy: "ana" });
+      await ctx.conns.save({ scope: { appId: ctx.appId }, platform: "tiktok", adAccountId: "3", accountName: "Buddy 2", currency: "EUR", tokens: { accessToken: "t3" }, connectedBy: "ana" });
+      expect((await ctx.conns.list("day2")).map((c) => c.id)).toEqual([a.id]);
+      const mine = await ctx.conns.get({ appId: ctx.appId }, "tiktok");
+      expect(mine).toMatchObject({ adAccountId: "3", tokens: { accessToken: "t3" } });
+      expect(b.id).not.toBe(mine!.id);
+      await ctx.conns.updateTokens(mine!.id, { accessToken: "t4" });
+      expect((await ctx.conns.get({ appId: ctx.appId }, "tiktok"))!.tokens.accessToken).toBe("t4");
+      await ctx.conns.remove({ appId: ctx.appId }, "tiktok");
+      expect(await ctx.conns.get({ appId: ctx.appId }, "tiktok")).toBeNull();
+      const p = await ctx.conns.startPending({ state: "st", scope: { appId: ctx.appId }, platform: "x", purpose: "account", appId: ctx.appId, pending: null, createdBy: "ana" });
+      await ctx.conns.setPendingData(p.id, { oauth_token: "rt" });
+      await ctx.conns.setPendingTokens(p.id, { accessToken: "at", tokenSecret: "ts" });
+      expect(await ctx.conns.pendingByState("st")).toMatchObject({ id: p.id, scope: { appId: ctx.appId }, pending: { oauth_token: "rt" }, tokens: { tokenSecret: "ts" } });
+      await ctx.conns.endPending(p.id);
+      expect(await ctx.conns.pending(p.id)).toBeNull();
+    });
+    test("conversions sent: remembered per app and platform", async () => {
+      const at = new Date("2026-10-20T00:00:00Z");
+      await ctx.sent.markSent(ctx.appId, "tiktok", ["d1:signup", "d2:signup"], at);
+      await ctx.sent.markSent(ctx.appId, "tiktok", ["d1:signup"], at);
+      expect([...(await ctx.sent.sent(ctx.appId, "tiktok"))].sort()).toEqual(["d1:signup", "d2:signup"]);
+      expect((await ctx.sent.sent(ctx.appId, "meta")).size).toBe(0);
+      expect(await ctx.sent.countSince(ctx.appId, "tiktok", new Date("2026-10-19T00:00:00Z"))).toBe(2);
+      expect(await ctx.sent.countSince(ctx.appId, "tiktok", new Date("2026-10-21T00:00:00Z"))).toBe(0);
     });
     test("identities: one per app and platform", async () => {
       await ctx.ids.set({ appId: ctx.appId, platform: "linkedin", ref: "urn:li:organization:42", displayName: "Buddy", setBy: "Pablo" });
@@ -49,7 +85,7 @@ suite("files", async () => {
   const ids = filePlatformIdentities(join(root, "ids.json"), legacy);
   // The Meta Page assigned before carries over.
   expect(await ids.get("app_f", "meta")).toMatchObject({ ref: "1234567890" });
-  return { assets: fileAssetStore(join(root, "assets"), "https://day2.example"), ids, appId: "app_f", cleanup: async () => {} };
+  return { assets: fileAssetStore(join(root, "assets"), "https://day2.example"), ids, conns: fileConnections(join(root, "conn.json")), sent: fileSentConversions(join(root, "sent.json")), appId: "app_f", cleanup: async () => {} };
 });
 
 if (process.env.DAY2_TEST_DATABASE_URL) {
@@ -62,7 +98,7 @@ if (process.env.DAY2_TEST_DATABASE_URL) {
     expect(await dbPlatformIdentities(t.sql).get("app_d", "meta")).toMatchObject({ ref: "1234567890" });
     const dbRoot = join(root, "db-assets");
     mkdirSync(dbRoot, { recursive: true });
-    return { assets: dbAssetStore(t.sql, dbRoot, "https://day2.example"), ids: dbPlatformIdentities(t.sql), appId: "app_d", cleanup: async () => t.drop() };
+    return { assets: dbAssetStore(t.sql, dbRoot, "https://day2.example"), ids: dbPlatformIdentities(t.sql), conns: dbConnections(t.sql), sent: dbSentConversions(t.sql), appId: "app_d", cleanup: async () => t.drop() };
   });
 }
 

@@ -4,43 +4,56 @@ import { join, resolve } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import { billAdSpend } from "../ads";
 import { authorize, creditsForCost, recordCharge, type CreditStore } from "../credits";
+import type { UserActivity } from "../field-store";
+import { loadAllocatorState, saveAllocatorState } from "../growth-allocator";
 import { betLink, BETS_FILENAME, loadBets, measureBet, saveBets, type Bet } from "../growth-bets";
 import type { EventLike } from "../metrics/types";
 import type { AppProfile } from "../onboarding";
 import type { AssetStore, StoredAsset } from "./assets";
 import { renderImageAd, SIZE, type Brand } from "./content";
-import { checkAdCopy, toAdCopy, writeAdCopy, type AdCopyPlan, type CopyInput, type CopyVariant } from "./copy";
+import { checkAdCopy, writeAdCopy, type AdCopyPlan, type CopyInput, type CopyVariant } from "./copy";
+import { collectConversions, OPTIMIZE_FOR_SIGNUPS_AFTER, type SentConversions } from "./conversions";
+import { fromUsd, toUsd } from "./fx";
 import { fit } from "./http";
 import type { PlatformIdentityStore } from "./identities";
+import { computeLearnings, copyHints, formatOf, formatsToSkip, platformOrder, recordInAllocator, type Format, type Learnings } from "./learnings";
 import { produceContent, type ProduceInput, type Produced } from "./produce";
 import type { VideoProvider } from "./providers/video";
-import type { AdCreativeInput, AdPlatform, AdStats, Identity, Launched, PlatformId, PlatformInfo, Ratio } from "./types";
+import { judgeBy, platformResults, retentionFrom, shortKey, type PlatformResult, type Retention } from "./results";
+import type { AdCreativeInput, AdPlatform, AdStats, ConversionSetup, Identity, Launched, PlatformId, PlatformInfo, Ratio } from "./types";
+
+export { platformResults } from "./results";
 
 /**
- * day2 running an app's paid ads on every platform it can, by itself.
+ * day2 running an app's paid ads on every platform it can, by itself — on
+ * day2's own ad accounts (spend billed in credits) or the app's own (the
+ * customer pays the platform), per platform.
  *
  * For each live experiment (growth-bets.ts) without ads:
- *  1. Pick platforms: the ones day2 has an ad account on, where the app's
- *     identity is ready, that fit the audience (consumer / business), as
- *     many as the budget covers at each platform's minimum (at most 4).
- *  2. Write the copy once (2 variants, a presenter script, keywords) and run
- *     both independent checks; produce images and videos once, in every
- *     format those platforms need.
- *  3. Launch on each platform with its own tracked link (?d2=B-4.tiktok),
- *     so day2 sees which platform brought whom — in its own usage events,
- *     the same yardstick everywhere.
+ *  1. Pick platforms: those connected, where the app's identity is ready,
+ *     that fit the audience — in the order this app's own results rank
+ *     them — as many as the budget covers at their minimums (≤ 4).
+ *  2. Write the copy once (with what worked and failed before), run both
+ *     independent checks; make images and videos in every format needed,
+ *     skipping formats that keep losing.
+ *  3. Launch with a tag per ad (?d2=B-4.tiktok.v1), optimising for sign-ups
+ *     where the platform already gets enough conversions from day2, else for
+ *     clicks.
  *
- * On every pass (results read every 6 hours):
- *  - bill spend in credits; hold ads whose page is broken, and ads over the
- *    month's ad budget, until it's fixed / the new month;
- *  - a platform that rejects an ad is stopped, with its reason;
- *  - per experiment, compare platforms by cost per outcome (sign-up or
- *    first value): stop one that spent without a single outcome, cut one
- *    that costs far more than the best, give the best more (weekly);
- *  - an experiment measured as worse stops everywhere.
+ * Every pass (results every 6 hours):
+ *  - spend: billed in credits (day2's accounts), converted from the account's
+ *    currency; broken pages and an exhausted monthly budget hold ads;
+ *  - conversions: sign-ups and first value go back to the platform that
+ *    brought them (with its click id), so it learns who to show ads to;
+ *  - judging, per experiment: by users who stayed once enough could have,
+ *    else by sign-ups / first value: losing ads paused inside a platform,
+ *    platforms stopped/cut/scaled, a worse experiment stopped everywhere;
+ *  - learnings: platforms, formats, copy and angles ranked, fed into the
+ *    next round (and the growth allocator).
  */
 
 export const ADS_FILENAME = "day2-ads.json";
+const ALLOCATOR_FILENAME = "day2-allocator-state.json";
 const DAY = 86_400_000;
 const STATS_EVERY_MS = 6 * 3_600_000;
 const SCALE_EVERY_MS = 7 * DAY;
@@ -49,14 +62,22 @@ const MAX_PLATFORMS = 4;
 /** Before judging a platform: running this long and spending at least this. */
 const JUDGE_AFTER_DAYS = 3;
 const JUDGE_MIN_SPEND_USD = 30;
+/** Before judging an ad inside a platform. */
+const AD_MIN_SPEND_USD = 15;
 /** Generated video per experiment, USD (before markup). */
 export const GENERATIVE_BUDGET_USD = 12;
+
+export type Billing = "credits" | "own";
 
 export type PlatformCampaign = {
   betId: string;
   platform: PlatformId;
   launched: Launched;
   status: "active" | "paused" | "stopped";
+  /** Whose ad account: day2's (billed in credits) or the app's own. */
+  billing: Billing;
+  /** The ad account's currency; amounts below are converted to USD. */
+  currency: string;
   dailyBudgetUsd: number;
   launchedAt: string;
   spendUsd: number;
@@ -69,21 +90,39 @@ export type PlatformCampaign = {
   heldFor: string | null;
   stopReason: string | null;
   review: AdStats["status"] | null;
+  optimizeFor: "clicks" | "signups";
   /** The month spend is counted from ("2026-10") and the lifetime spend when it started. */
   month: { id: string; spendAtStart: number };
-  creatives: Array<{ key: string; variant: number; assetId: string | null; kind: "image" | "video" | "text" }>;
+  creatives: Array<{ key: string; variant: number; assetId: string | null; kind: "image" | "video" | "text"; format?: Format; headline?: string; paused?: string | null }>;
+  /** Spend per ad (creative key), USD. */
+  adSpendUsd?: Record<string, number>;
 };
 
 export type ContentSet = { betId: string; at: string; copy: AdCopyPlan; dropped: Array<{ what: string; why: string }>; assets: Array<{ assetId: string; variant: number }>; costUsd: number; notes: string[] };
-export type AdsFile = { campaigns: PlatformCampaign[]; content: ContentSet[] };
+export type AdsFile = {
+  campaigns: PlatformCampaign[];
+  content: ContentSet[];
+  learnings: Learnings | null;
+  /** Per platform: what receives day2's conversions (pixel, conversion action…). */
+  conversions: Partial<Record<PlatformId, { setup: ConversionSetup; at: string }>>;
+  /** What was already counted into the growth allocator, per ad. */
+  allocatorRecorded: Record<string, { people: number; outcomes: number; spendUsd: number }>;
+};
 
 export function loadAds(path: string): AdsFile {
-  if (!existsSync(path)) return { campaigns: [], content: [] };
+  const empty: AdsFile = { campaigns: [], content: [], learnings: null, conversions: {}, allocatorRecorded: {} };
+  if (!existsSync(path)) return empty;
   try {
     const p = JSON.parse(readFileSync(path, "utf-8")) as Partial<AdsFile>;
-    return { campaigns: Array.isArray(p.campaigns) ? p.campaigns : [], content: Array.isArray(p.content) ? p.content : [] };
+    return {
+      campaigns: (Array.isArray(p.campaigns) ? p.campaigns : []).map((c) => ({ ...c, billing: c.billing ?? "credits", currency: c.currency ?? "USD", optimizeFor: c.optimizeFor ?? "clicks" })),
+      content: Array.isArray(p.content) ? p.content : [],
+      learnings: p.learnings ?? null,
+      conversions: p.conversions ?? {},
+      allocatorRecorded: p.allocatorRecorded ?? {},
+    };
   } catch {
-    return { campaigns: [], content: [] };
+    return empty;
   }
 }
 
@@ -109,18 +148,17 @@ export const FIT_ORDER: Record<"consumer" | "business", PlatformId[]> = {
 
 /**
  * Which platforms an experiment runs on, and each one's daily budget: in
- * fit order, as many as the budget covers at their minimums (≤ 4); what's
- * left over is shared equally.
+ * `order` (this app's results first, else the usual fit order), as many as
+ * the budget covers at their minimums (≤ 4); what's left is shared equally.
  */
-export function choosePlatforms(ready: PlatformInfo[], audience: "consumer" | "business", dailyUsd: number, max = MAX_PLATFORMS): { chosen: Array<{ id: PlatformId; dailyUsd: number }>; skipped: Array<{ id: PlatformId; why: string }> } {
+export function choosePlatforms(ready: PlatformInfo[], audience: "consumer" | "business", dailyUsd: number, max = MAX_PLATFORMS, order: PlatformId[] = FIT_ORDER[audience]): { chosen: Array<{ id: PlatformId; dailyUsd: number }>; skipped: Array<{ id: PlatformId; why: string }> } {
   const byId = new Map(ready.map((p) => [p.id, p]));
   const chosen: PlatformInfo[] = [];
   const skipped: Array<{ id: PlatformId; why: string }> = [];
   let committed = 0;
-  for (const id of FIT_ORDER[audience]) {
+  for (const id of order) {
     const p = byId.get(id);
-    if (!p) continue;
-    if (!p.audiences.includes(audience)) continue;
+    if (!p || !p.audiences.includes(audience)) continue;
     if (chosen.length >= max) {
       skipped.push({ id, why: `at most ${max} platforms per experiment` });
       continue;
@@ -136,103 +174,119 @@ export function choosePlatforms(ready: PlatformInfo[], audience: "consumer" | "b
   return { chosen: chosen.map((p) => ({ id: p.id, dailyUsd: Math.floor((p.minDailyUsd + extra) * 100) / 100 })), skipped };
 }
 
-/** The ads for one platform from the experiment's content: videos where the platform takes them, else images, else text. */
-export function creativesFor(info: PlatformInfo, betId: string, copy: AdCopyPlan, assets: Array<{ asset: StoredAsset; variant: number }>, opts: { preferText?: boolean } = {}): Array<AdCreativeInput & { variant: number }> {
+/** "https://…/go?d2=B-4" + "B-4.tiktok.v1" → the same link carrying that ad's tag. */
+export function taggedLink(base: string, tag: string): string {
+  const u = new URL(base);
+  u.searchParams.set("d2", tag);
+  return u.toString();
+}
+
+/** The ads for one platform from the experiment's content: videos where the platform takes them, else images, else text — each with its own tagged link. */
+export function creativesFor(info: PlatformInfo, betId: string, copy: AdCopyPlan, assets: Array<{ asset: StoredAsset; variant: number }>, opts: { preferText?: boolean; baseLink?: string; skip?: Format[] } = {}): Array<AdCreativeInput & { variant: number; format: Format }> {
   const limits = info.copyLimits;
+  const skip = new Set(opts.skip ?? []);
   const words = (v: CopyVariant, aiPerson: boolean) => {
     const headline = fit(limits.headline <= 30 ? v.shortHeadline : v.headline, limits.headline);
     // Synthetic performers are disclosed in the ad's own text (e.g. New York's law; California from 2027).
     const body = fit(aiPerson ? `${v.body} (AI presenter)` : v.body, limits.body);
     return { headline, body, ...(limits.description ? { description: fit(v.description, limits.description) } : {}), cta: v.cta };
   };
+  const withLink = <T extends { key: string }>(c: T): T & { link?: string } => (opts.baseLink ? { ...c, link: taggedLink(opts.baseLink, `${betId}.${info.id}.${shortKey(betId, info.id, c.key)}`) } : c);
   const fits = (a: StoredAsset) => info.formats.some((f) => f.kind === a.kind && f.ratio === a.ratio && a.bytes <= f.maxBytes && (a.kind === "image" || ((f.maxDurationSec ?? Infinity) >= (a.durationSec ?? 0) && (f.minDurationSec ?? 0) <= (a.durationSec ?? Infinity))));
   const order = (r: Ratio) => {
     const i = info.formats.findIndex((f) => f.ratio === r);
     return i === -1 ? 99 : i;
   };
-  if (opts.preferText && info.textOnly) {
-    return copy.variants.map((v, n) => ({ key: `${betId}-${info.id}-t${n + 1}`, variant: n, copy: words(v, false), asset: null }));
-  }
+  const text = () => copy.variants.map((v, n) => withLink({ key: `${betId}-${info.id}-t${n + 1}`, variant: n, format: "text" as Format, copy: words(v, false), asset: null }));
+  if (opts.preferText && info.textOnly && !skip.has("text")) return text();
   // Videos: one ad per kind of video (walkthrough, presenter, generated), best ratio for the platform.
-  const videos = assets.filter((a) => a.asset.kind === "video" && fits(a.asset));
+  const videos = assets.filter((a) => a.asset.kind === "video" && fits(a.asset) && !skip.has(formatOf(a.asset.source, "video")));
   if (videos.length) {
     const bySource = new Map<string, { asset: StoredAsset; variant: number }>();
     for (const a of [...videos].sort((x, y) => order(x.asset.ratio) - order(y.asset.ratio))) if (!bySource.has(a.asset.source)) bySource.set(a.asset.source, a);
-    return [...bySource.values()].slice(0, 3).map((a, n) => ({ key: `${betId}-${info.id}-v${n + 1}`, variant: 0, copy: words(copy.variants[0]!, a.asset.aiPerson), asset: a.asset }));
+    return [...bySource.values()].slice(0, 3).map((a, n) => withLink({ key: `${betId}-${info.id}-v${n + 1}`, variant: 0, format: formatOf(a.asset.source, "video"), copy: words(copy.variants[0]!, a.asset.aiPerson), asset: a.asset }));
   }
-  const images = assets.filter((a) => a.asset.kind === "image" && !a.asset.label.startsWith("Cover") && fits(a.asset));
+  const images = skip.has("image") ? [] : assets.filter((a) => a.asset.kind === "image" && !a.asset.label.startsWith("Cover") && fits(a.asset));
   if (images.length) {
-    const out: Array<AdCreativeInput & { variant: number }> = [];
+    const out: Array<AdCreativeInput & { variant: number; format: Format }> = [];
     for (const [n, v] of copy.variants.entries()) {
       const best = images.filter((a) => a.variant === n).sort((x, y) => order(x.asset.ratio) - order(y.asset.ratio))[0];
-      if (best) out.push({ key: `${betId}-${info.id}-i${n + 1}`, variant: n, copy: words(v, best.asset.aiPerson), asset: best.asset });
+      if (best) out.push(withLink({ key: `${betId}-${info.id}-i${n + 1}`, variant: n, format: "image" as Format, copy: words(v, best.asset.aiPerson), asset: best.asset }));
     }
     return out;
   }
-  return info.textOnly ? copy.variants.map((v, n) => ({ key: `${betId}-${info.id}-t${n + 1}`, variant: n, copy: words(v, false), asset: null })) : [];
-}
-
-export type PlatformResult = { platform: PlatformId; people: number; outcomes: number; spendUsd: number; costPerOutcome: number | null };
-
-/** What each platform brought for an experiment, from day2's own events: people who first arrived through its link, and how many reached the outcome. */
-export function platformResults(bet: Bet, campaigns: PlatformCampaign[], events: EventLike[]): PlatformResult[] {
-  const outcome = bet.metric === "signup" ? "signup" : "activated";
-  const byDevice = new Map<string, EventLike[]>();
-  for (const e of events) {
-    const l = byDevice.get(e.deviceId);
-    if (l) l.push(e);
-    else byDevice.set(e.deviceId, [e]);
-  }
-  const tally = new Map<string, { people: number; outcomes: number }>();
-  for (const list of byDevice.values()) {
-    list.sort((a, b) => a.at.localeCompare(b.at));
-    const c = list[0]!.acquisition?.campaignId;
-    if (!c?.startsWith(`${bet.id}.`)) continue;
-    const t = tally.get(c.slice(bet.id.length + 1)) ?? { people: 0, outcomes: 0 };
-    t.people++;
-    if (list.some((e) => e.type === outcome)) t.outcomes++;
-    tally.set(c.slice(bet.id.length + 1), t);
-  }
-  return campaigns.map((c) => {
-    const t = tally.get(c.platform) ?? { people: 0, outcomes: 0 };
-    return { platform: c.platform, ...t, spendUsd: c.spendUsd, costPerOutcome: t.outcomes ? c.spendUsd / t.outcomes : null };
-  });
+  return info.textOnly && !skip.has("text") ? text() : [];
 }
 
 export type Decision = { platform: PlatformId; action: "stop" | "cut" | "scale"; dailyUsd?: number; why: string };
 
+const countOf = (r: { outcomes: number; retained: number }, by: "retained" | "outcome") => (by === "retained" ? r.retained : r.outcomes);
+const costOf = (r: { costPerOutcome: number | null; costPerRetained: number | null }, by: "retained" | "outcome") => (by === "retained" ? r.costPerRetained : r.costPerOutcome);
+
 /**
  * Per experiment, comparing its platforms (pure). A platform is judged once
- * it ran JUDGE_AFTER_DAYS and spent enough to tell.
+ * it ran JUDGE_AFTER_DAYS and spent enough to tell; by users who stayed when
+ * `by` is "retained", else by sign-ups / first value.
  */
-export function rebalance(campaigns: PlatformCampaign[], results: PlatformResult[], infos: Map<PlatformId, PlatformInfo>, now: Date, room: { dailyUsd: number }, outcomeWord: string): Decision[] {
+export function rebalance(campaigns: PlatformCampaign[], results: PlatformResult[], infos: Map<PlatformId, PlatformInfo>, now: Date, room: { dailyUsd: number }, outcomeWord: string, by: "retained" | "outcome" = "outcome"): Decision[] {
   const decisions: Decision[] = [];
+  const word = by === "retained" ? "user who stayed" : outcomeWord;
   const active = campaigns.filter((c) => c.status === "active");
   const res = new Map(results.map((r) => [r.platform, r]));
   const judged = active.filter((c) => {
     const min = infos.get(c.platform)?.minDailyUsd ?? 5;
     return now.getTime() - Date.parse(c.launchedAt) >= JUDGE_AFTER_DAYS * DAY && c.spendUsd >= Math.max(JUDGE_MIN_SPEND_USD, 3 * min);
   });
-  const withCpa = judged.filter((c) => res.get(c.platform)?.costPerOutcome != null).sort((a, b) => res.get(a.platform)!.costPerOutcome! - res.get(b.platform)!.costPerOutcome!);
-  const best = withCpa[0];
-  const bestCpa = best ? res.get(best.platform)!.costPerOutcome! : null;
+  const withCost = judged.filter((c) => costOf(res.get(c.platform)!, by) != null).sort((a, b) => costOf(res.get(a.platform)!, by)! - costOf(res.get(b.platform)!, by)!);
+  const best = withCost[0];
+  const bestCost = best ? costOf(res.get(best.platform)!, by)! : null;
   for (const c of judged) {
     const r = res.get(c.platform)!;
     const min = infos.get(c.platform)?.minDailyUsd ?? 5;
-    if (r.outcomes === 0 && c.spendUsd >= Math.max(2 * JUDGE_MIN_SPEND_USD, 5 * min, bestCpa ? 3 * bestCpa : 0)) {
-      decisions.push({ platform: c.platform, action: "stop", why: `spent ${money(c.spendUsd)} without a single ${outcomeWord}` });
-    } else if (best && c !== best && r.costPerOutcome !== null && bestCpa !== null && r.costPerOutcome > 2.5 * bestCpa) {
-      const times = (r.costPerOutcome / bestCpa).toFixed(1);
-      if (c.dailyBudgetUsd > min) decisions.push({ platform: c.platform, action: "cut", dailyUsd: min, why: `each ${outcomeWord} costs ${times}× more than on ${infos.get(best.platform)?.name ?? best.platform}` });
-      else decisions.push({ platform: c.platform, action: "stop", why: `each ${outcomeWord} costs ${times}× more than on ${infos.get(best.platform)?.name ?? best.platform}, already at its minimum budget` });
+    const n = countOf(r, by);
+    const cost = costOf(r, by);
+    if (n === 0 && c.spendUsd >= Math.max(2 * JUDGE_MIN_SPEND_USD, 5 * min, bestCost ? 3 * bestCost : 0)) {
+      decisions.push({ platform: c.platform, action: "stop", why: `spent ${money(c.spendUsd)} without a single ${word}` });
+    } else if (best && c !== best && cost !== null && bestCost !== null && cost > 2.5 * bestCost) {
+      const times = (cost / bestCost).toFixed(1);
+      const than = infos.get(best.platform)?.name ?? best.platform;
+      if (c.dailyBudgetUsd > min) decisions.push({ platform: c.platform, action: "cut", dailyUsd: min, why: `each ${word} costs ${times}× more than on ${than}` });
+      else decisions.push({ platform: c.platform, action: "stop", why: `each ${word} costs ${times}× more than on ${than}, already at its minimum budget` });
     }
   }
   if (best && (!best.lastScaledAt || now.getTime() - Date.parse(best.lastScaledAt) >= SCALE_EVERY_MS)) {
-    const freed = decisions.reduce((n, d) => n + (d.action === "stop" ? (active.find((c) => c.platform === d.platform)?.dailyBudgetUsd ?? 0) : d.action === "cut" ? (active.find((c) => c.platform === d.platform)?.dailyBudgetUsd ?? 0) - (d.dailyUsd ?? 0) : 0), 0);
+    const freed = decisions.reduce((n, d) => {
+      const c = active.find((x) => x.platform === d.platform);
+      return n + (d.action === "stop" ? (c?.dailyBudgetUsd ?? 0) : d.action === "cut" ? (c?.dailyBudgetUsd ?? 0) - (d.dailyUsd ?? 0) : 0);
+    }, 0);
     const target = Math.min(Math.round(best.dailyBudgetUsd * SCALE_FACTOR * 100) / 100, best.dailyBudgetUsd + room.dailyUsd + freed);
-    if (target > best.dailyBudgetUsd + 0.5) decisions.push({ platform: best.platform, action: "scale", dailyUsd: target, why: `the lowest cost per ${outcomeWord} (${money(bestCpa!)})` });
+    if (target > best.dailyBudgetUsd + 0.5) decisions.push({ platform: best.platform, action: "scale", dailyUsd: target, why: `the lowest cost per ${word} (${money(bestCost!)})` });
   }
   return decisions;
+}
+
+/**
+ * Inside one platform: ads to pause (pure). An ad is judged once it spent
+ * enough; it's paused when it brought nothing while another ad did, or when
+ * each result costs 2.5× the best ad's. At least one ad keeps running.
+ */
+export function adDecisions(c: PlatformCampaign, r: PlatformResult, by: "retained" | "outcome"): Array<{ key: string; why: string }> {
+  const live = c.creatives.filter((x) => !x.paused);
+  if (live.length < 2) return [];
+  const rows = r.ads.filter((a) => live.some((x) => x.key === a.key) && a.spendUsd >= AD_MIN_SPEND_USD);
+  const withCost = rows.filter((a) => costOf(a, by) !== null).sort((a, b) => costOf(a, by)! - costOf(b, by)!);
+  const best = withCost[0];
+  if (!best) return [];
+  const bestCost = costOf(best, by)!;
+  const word = by === "retained" ? "user who stayed" : "result";
+  const out: Array<{ key: string; why: string }> = [];
+  for (const a of rows) {
+    if (a === best || live.length - out.length <= 1) continue;
+    const cost = costOf(a, by);
+    if (cost === null && a.spendUsd >= Math.max(2 * AD_MIN_SPEND_USD, 3 * bestCost)) out.push({ key: a.key, why: `spent ${money(a.spendUsd)} without a single ${word}, while another ad brought them` });
+    else if (cost !== null && cost > 2.5 * bestCost) out.push({ key: a.key, why: `each ${word} costs ${(cost / bestCost).toFixed(1)}× more than the best ad's` });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +297,16 @@ export type PlatformAdsDeps = {
   credits: CreditStore;
   platforms: Map<PlatformId, AdPlatform>;
   infos: Map<PlatformId, PlatformInfo>;
+  /** Per platform: whose ad account (default day2's, billed in credits) and its currency (default USD). */
+  accounts?: Map<PlatformId, { billing: Billing; currency: string }>;
   identities: PlatformIdentityStore;
   assets: AssetStore;
   providers: { creatify: VideoProvider | null; runway: VideoProvider | null };
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
+  /** Identified users' active days (retention engine); absent = judge by sign-ups only. */
+  users?: (app: AppEntry) => Promise<UserActivity[]>;
+  /** Conversions already sent; absent = don't send conversions. */
+  sentConversions?: SentConversions;
   pageHealth?: (app: AppEntry, path: string) => Promise<{ ok: boolean; reason: string }>;
   paidGate: (app: AppEntry, profile: AppProfile) => Promise<{ unlocked: boolean; reason: string }>;
   /** Overridable for tests. */
@@ -257,7 +317,7 @@ export type PlatformAdsDeps = {
   markets?: { countries: string[]; languages: string[] } | null;
 };
 
-export type PlatformAdsReport = { launched: string[]; paused: string[]; stopped: string[]; scaled: string[]; skipped: string[] };
+export type PlatformAdsReport = { launched: string[]; paused: string[]; stopped: string[]; scaled: string[]; skipped: string[]; conversionsSent: number };
 
 type Log = (text: string, credits?: number) => void;
 
@@ -292,13 +352,15 @@ export async function pausePlatformAds(app: AppEntry, platforms: Map<PlatformId,
 export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: PlatformAdsDeps, opts: { monthlyAdsUsd: number; now: Date; log: Log }): Promise<PlatformAdsReport> {
   const { now, log } = opts;
   const at = now.toISOString();
-  const report: PlatformAdsReport = { launched: [], paused: [], stopped: [], scaled: [], skipped: [] };
+  const report: PlatformAdsReport = { launched: [], paused: [], stopped: [], scaled: [], skipped: [], conversionsSent: 0 };
   const path = resolve(app.repoPath, ADS_FILENAME);
   const betsPath = resolve(app.repoPath, BETS_FILENAME);
   const file = loadAds(path);
   let bets = loadBets(betsPath);
   const save = () => saveAds(path, file);
   const nameOf = (id: PlatformId) => deps.infos.get(id)?.name ?? id;
+  const account = (id: PlatformId) => deps.accounts?.get(id) ?? { billing: "credits" as Billing, currency: "USD" };
+  const local = (usd: number, currency: string) => (currency === "USD" ? usd : fromUsd(usd, currency));
   const healthOf = async (betId: string) => {
     const b = bets.bets.find((x) => x.id === betId);
     return b && deps.pageHealth ? deps.pageHealth(app, b.landingPath) : { ok: true, reason: "" };
@@ -313,7 +375,6 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
   for (const c of file.campaigns) {
     const p = deps.platforms.get(c.platform);
     if (!p || c.status === "stopped") continue;
-    // Held ads come back when the reason is gone.
     if (c.status === "paused" && c.heldFor) {
       const back = c.heldFor === OVER ? monthSpend() < opts.monthlyAdsUsd : (await healthOf(c.betId)).ok;
       const b = bets.bets.find((x) => x.id === c.betId);
@@ -346,8 +407,12 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     if (c.lastSyncAt && now.getTime() - Date.parse(c.lastSyncAt) < STATS_EVERY_MS) continue;
     try {
       const s = await p.stats(c.launched);
-      c.billedSpendUsd = await billAdSpend(deps.credits, { appId: app.id, campaignId: `${c.platform}:${c.launched.campaignId}`, label: `${c.betId} on ${nameOf(c.platform)}`, reportedSpendUsd: s.spendUsd, billedSpendUsd: c.billedSpendUsd });
-      Object.assign(c, { spendUsd: s.spendUsd, impressions: s.impressions, clicks: s.clicks, lastSyncAt: at, review: s.status });
+      const usd = (amount: number) => (s.currency === "USD" ? amount : toUsd(amount, s.currency));
+      const spendUsd = usd(s.spend);
+      // Only day2's own accounts are billed in credits; the app's own account is paid by the customer.
+      if (c.billing === "credits") c.billedSpendUsd = await billAdSpend(deps.credits, { appId: app.id, campaignId: `${c.platform}:${c.launched.campaignId}`, label: `${c.betId} on ${nameOf(c.platform)}`, reportedSpendUsd: spendUsd, billedSpendUsd: c.billedSpendUsd });
+      Object.assign(c, { spendUsd, impressions: s.impressions, clicks: s.clicks, lastSyncAt: at, review: s.status, currency: s.currency });
+      if (s.byCreative) c.adSpendUsd = Object.fromEntries(Object.entries(s.byCreative).map(([k, v]) => [k, usd(v.spend)]));
       if (s.status === "rejected") {
         await p.pause(c.launched).catch(() => {});
         c.status = "stopped";
@@ -379,20 +444,65 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     save();
   }
 
-  // 3. Per experiment: stopped or measured worse → stop everywhere; otherwise compare its platforms.
-  const sinceIso = bets.bets.map((b) => b.liveAt).filter((x): x is string => Boolean(x)).sort()[0];
+  const sinceIso = [...bets.bets.map((b) => b.liveAt), ...file.campaigns.map((c) => c.launchedAt)].filter((x): x is string => Boolean(x)).sort()[0];
   const events = sinceIso ? await deps.events(app, sinceIso) : null;
+
+  // 3. Conversions back to the platforms that brought them.
+  if (events && deps.sentConversions) {
+    for (const id of [...new Set(file.campaigns.map((c) => c.platform))]) {
+      const p = deps.platforms.get(id);
+      const info = deps.infos.get(id);
+      if (!p?.ensureConversions || !p.sendConversions || !info) continue;
+      try {
+        let setup = file.conversions[id]?.setup;
+        if (!setup) {
+          setup = await p.ensureConversions();
+          file.conversions[id] = { setup, at };
+          save();
+        }
+        const sent = await deps.sentConversions.sent(app.id, id);
+        const todo = collectConversions({
+          platform: id,
+          clickParam: info.clickIdParam,
+          events,
+          sent,
+          pageUrl: (betId) => {
+            const b = bets.bets.find((x) => x.id === betId);
+            return b && app.appBaseUrl ? `${app.appBaseUrl.replace(/\/+$/, "")}${b.landingPath}` : null;
+          },
+        });
+        for (let i = 0; i < todo.length; i += 500) {
+          const batch = todo.slice(i, i + 500);
+          const r = await p.sendConversions(setup, batch);
+          const rejected = new Set(r.rejected.map((x) => x.eventId));
+          await deps.sentConversions.markSent(app.id, id, batch.map((x) => x.eventId).filter((x) => !rejected.has(x)), now);
+          report.conversionsSent += r.sent;
+        }
+      } catch (err) {
+        log(`Couldn't send sign-ups to ${nameOf(id)}: ${(err as Error).message}`);
+      }
+    }
+    if (report.conversionsSent) log(`Told the ad platforms about ${report.conversionsSent} sign-up${report.conversionsSent === 1 ? "" : "s"} and first uses they brought, so they find more people like them.`);
+  }
+
+  // 4. Judge per experiment: stop, pause losing ads, compare platforms.
+  const users = deps.users ? await deps.users(app).catch(() => [] as UserActivity[]) : [];
+  const retention: Retention | undefined = events && users.length ? retentionFrom(events, users, now) : undefined;
+  const allResults = new Map<string, PlatformResult[]>();
+  let judgedBy: "retained" | "outcome" = "outcome";
   const stopAll = async (betId: string, why: string) => {
     for (const c of file.campaigns.filter((x) => x.betId === betId && x.status !== "stopped")) {
-      const p = deps.platforms.get(c.platform);
-      await p?.pause(c.launched).catch(() => {});
+      await deps.platforms.get(c.platform)?.pause(c.launched).catch(() => {});
       c.status = "stopped";
       c.stopReason = why;
       report.stopped.push(`${c.betId}:${c.platform}`);
     }
   };
   for (const b of bets.bets) {
-    const mine = file.campaigns.filter((c) => c.betId === b.id && c.status !== "stopped");
+    const all = file.campaigns.filter((c) => c.betId === b.id);
+    if (!all.length) continue;
+    if (events) allResults.set(b.id, platformResults(b, all, events, retention));
+    const mine = all.filter((c) => c.status !== "stopped");
     if (!mine.length) continue;
     if (b.status === "stopped") {
       await stopAll(b.id, "the experiment was stopped");
@@ -408,11 +518,30 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
       continue;
     }
     if (!events) continue;
-    const results = platformResults(b, mine, events);
+    const results = allResults.get(b.id)!.filter((r) => mine.some((c) => c.platform === r.platform));
+    const by = judgeBy(results);
+    if (by === "retained") judgedBy = "retained";
+    // Inside each platform: losing ads.
+    for (const c of mine.filter((x) => x.status === "active")) {
+      const r = results.find((x) => x.platform === c.platform);
+      const p = deps.platforms.get(c.platform);
+      if (!r || !p) continue;
+      for (const d of adDecisions(c, r, by)) {
+        try {
+          await p.setAdActive(c.launched, d.key, false);
+          const cr = c.creatives.find((x) => x.key === d.key)!;
+          cr.paused = d.why;
+          log(`Paused one of ${b.id}'s ads on ${nameOf(c.platform)} (${cr.format ? cr.format.replace(/_/g, " ") : "ad"}): ${d.why}.`);
+        } catch (err) {
+          log(`Couldn't pause an ad of ${b.id} on ${nameOf(c.platform)}: ${(err as Error).message}`);
+        }
+      }
+    }
+    // Across platforms.
     const activeDaily = file.campaigns.filter((c) => c.status === "active").reduce((n, c) => n + c.dailyBudgetUsd, 0);
     const room = { dailyUsd: Math.max(0, opts.monthlyAdsUsd / 30 - activeDaily) };
     const outcomeWord = b.metric === "signup" ? "sign-up" : "new user reaching first value";
-    for (const d of rebalance(mine, results, deps.infos, now, room, outcomeWord)) {
+    for (const d of rebalance(mine, results, deps.infos, now, room, outcomeWord, by)) {
       const c = mine.find((x) => x.platform === d.platform)!;
       const p = deps.platforms.get(c.platform);
       if (!p) continue;
@@ -424,11 +553,11 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           report.stopped.push(`${b.id}:${c.platform}`);
           log(`Stopped ${b.id} on ${nameOf(c.platform)}: ${d.why}.`);
         } else {
-          if (d.action === "scale") {
+          if (d.action === "scale" && c.billing === "credits") {
             const check = await authorize(deps.credits, { appId: app.id, appName: app.name, service: "paid_ads", maxCostUsd: d.dailyUsd! * 7 }, now);
             if (!check.ok) continue;
           }
-          await p.setDailyBudget(c.launched, d.dailyUsd!);
+          await p.setDailyBudget(c.launched, local(d.dailyUsd!, c.currency));
           log(`${d.action === "scale" ? "Raised" : "Cut"} ${b.id} on ${nameOf(c.platform)} to ${money(d.dailyUsd!)} a day: ${d.why}.`);
           if (d.action === "scale") {
             c.lastScaledAt = at;
@@ -443,7 +572,24 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
   }
   save();
 
-  // 4. Live experiments without ads: launch.
+  // 5. What day2 learned, for the next round (and the growth allocator).
+  if (allResults.size) {
+    const views = file.campaigns.map((c) => ({ betId: c.betId, platform: c.platform, status: c.status, stopReason: c.stopReason, creatives: c.creatives }));
+    file.learnings = computeLearnings(bets.bets, views, allResults, judgedBy, now);
+    const ads = [...allResults.entries()].flatMap(([betId, rs]) =>
+      rs.flatMap((r) => {
+        const c = file.campaigns.find((x) => x.betId === betId && x.platform === r.platform);
+        return r.ads.map((a) => ({ key: a.key, format: c?.creatives.find((x) => x.key === a.key)?.format ?? ("image" as Format), people: a.people, outcomes: a.outcomes, spendUsd: a.spendUsd }));
+      }),
+    );
+    const allocPath = resolve(app.repoPath, ALLOCATOR_FILENAME);
+    const rec = recordInAllocator(loadAllocatorState(allocPath), ads, file.allocatorRecorded);
+    if (rec.state.arms.length) saveAllocatorState(allocPath, rec.state);
+    file.allocatorRecorded = rec.recorded;
+    save();
+  }
+
+  // 6. Live experiments without ads: launch.
   const waiting = bets.bets.filter((b) => b.status === "live" && !b.campaign && !file.campaigns.some((c) => c.betId === b.id));
   if (!waiting.length) return report;
   if (opts.monthlyAdsUsd <= 0) {
@@ -452,7 +598,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
   }
   if (monthSpend() >= opts.monthlyAdsUsd) return report;
   if (!deps.platforms.size) {
-    report.skipped.push("ads: no ad platform is connected on this server yet.");
+    report.skipped.push("ads: no ad platform is connected yet.");
     return report;
   }
   const gate = await deps.paidGate(app, profile);
@@ -474,10 +620,11 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     const activeDaily = file.campaigns.filter((c) => c.status === "active").reduce((n, c) => n + c.dailyBudgetUsd, 0);
     const daily = Math.min(opts.monthlyAdsUsd / 30 - activeDaily, opts.monthlyAdsUsd / 30 / (runningBets + 1) / 2 + 0.01);
 
-    // Words first (they tell the audience), checked.
+    // Words first (they tell the audience), with what worked before, checked.
     let content = file.content.find((x) => x.betId === b.id);
     if (!content) {
-      const plan = await (deps.writeCopy ?? writeAdCopy)({ appName: app.name, profile, angle: b.angle, audience: b.audience, link: base, ...(deps.markets ?? {}) });
+      const hints = copyHints(file.learnings);
+      const plan = await (deps.writeCopy ?? writeAdCopy)({ appName: app.name, profile, angle: b.angle, audience: b.audience, link: base, ...(deps.markets ?? {}), ...(hints ? { learned: hints } : {}) });
       if (!plan) {
         log(`Couldn't write ads for ${b.id} this time — nothing launched.`);
         continue;
@@ -493,57 +640,64 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
       save();
     }
 
-    // Platforms: ready, fitting, within budget.
+    // Platforms: connected, identity ready, fitting, within budget — in the order this app's results rank them.
     const ready: PlatformInfo[] = [];
     const notReady: string[] = [];
     for (const [id] of deps.platforms) {
       const info = deps.infos.get(id)!;
-      if (info.identity === "app_account" && !(await deps.identities.get(app.id, id))) {
-        notReady.push(`${info.name} (needs ${info.identityHelp ?? "the app's own account linked"})`);
-        continue;
+      if (info.identity === "app_account") {
+        const ident = await deps.identities.get(app.id, id);
+        if (!ident || ident.status === "pending") {
+          notReady.push(`${info.name} (${ident?.status === "pending" ? (ident.todo ?? "waiting for approval") : `needs ${info.identityHelp ?? "the app's own account linked"}`})`);
+          continue;
+        }
       }
       ready.push(info);
     }
-    const { chosen, skipped } = choosePlatforms(ready, content.copy.audience, daily);
+    const order = platformOrder(FIT_ORDER[content.copy.audience], file.learnings);
+    const { chosen, skipped } = choosePlatforms(ready, content.copy.audience, daily, MAX_PLATFORMS, order);
     for (const s of skipped) report.skipped.push(`ads: ${b.id} not on ${nameOf(s.id)}: ${s.why}`);
     if (notReady.length) report.skipped.push(`ads: not ready yet: ${notReady.join("; ")}`);
     if (!chosen.length) {
       log(`No platform fits ${b.id}'s budget of ${money(daily)} a day yet${skipped[0] ? ` (${skipped[0].why})` : ""}.`);
       continue;
     }
-    const total = chosen.reduce((n, c) => n + c.dailyUsd, 0);
-    const check = await authorize(deps.credits, { appId: app.id, appName: app.name, service: "paid_ads", maxCostUsd: total * 7 }, now);
-    if (!check.ok) {
-      report.skipped.push(`ads: ${check.reason}`);
-      log(`Didn't launch ads for ${b.id}: ${check.reason}`);
-      continue;
+    const onCredits = chosen.filter((c) => account(c.id).billing === "credits").reduce((n, c) => n + c.dailyUsd, 0);
+    if (onCredits > 0) {
+      const check = await authorize(deps.credits, { appId: app.id, appName: app.name, service: "paid_ads", maxCostUsd: onCredits * 7 }, now);
+      if (!check.ok) {
+        report.skipped.push(`ads: ${check.reason}`);
+        log(`Didn't launch ads for ${b.id}: ${check.reason}`);
+        continue;
+      }
     }
 
-    // Content, once per experiment.
+    // Content, once per experiment — without formats that keep losing.
+    const skip = formatsToSkip(file.learnings);
     let produced: Array<{ asset: StoredAsset; variant: number }>;
     if (content.assets.length) {
       produced = (await Promise.all(content.assets.map(async (a) => ({ asset: await deps.assets.get(a.assetId), variant: a.variant })))).filter((a): a is { asset: StoredAsset; variant: number } => Boolean(a.asset));
     } else {
-      const genOk = await authorize(deps.credits, { appId: app.id, appName: app.name, service: "content_generation", maxCostUsd: GENERATIVE_BUDGET_USD }, now);
-      const pageUrl = base.replace(/\?.*$/, "");
+      const genOk = skip.includes("presenter") && skip.includes("generated") ? { ok: false } : await authorize(deps.credits, { appId: app.id, appName: app.name, service: "content_generation", maxCostUsd: GENERATIVE_BUDGET_USD }, now);
       try {
         const r = await (deps.produce ?? produceContent)({
           appId: app.id,
           purpose: b.id,
-          pageUrl,
+          pageUrl: base.replace(/\?.*$/, ""),
           brand: brandOf(app, profile),
           copy: content.copy,
           platforms: chosen.map((c) => deps.infos.get(c.id)!),
           store: deps.assets,
-          providers: deps.providers,
+          providers: { creatify: skip.includes("presenter") ? null : deps.providers.creatify, runway: skip.includes("generated") ? null : deps.providers.runway },
           generativeBudgetUsd: genOk.ok ? GENERATIVE_BUDGET_USD : 0,
+          ...(skip.includes("walkthrough") ? { skipWalkthrough: true } : {}),
         });
         if (r.costUsd > 0) await recordCharge(deps.credits, { id: `adgen:${app.id}:${b.id}`, appId: app.id, service: "content_generation", costUsd: r.costUsd, description: `Ad videos for ${b.id}` }, now);
         produced = r.assets;
         content.assets = r.assets.map((a) => ({ assetId: a.asset.id, variant: a.variant }));
         content.costUsd = r.costUsd;
-        content.notes = r.notes;
-        for (const n of r.notes) log(`${b.id}: ${n}`);
+        content.notes = [...r.notes, ...skip.map((f) => `Not made: ${f} ads (they lost in earlier experiments).`)];
+        for (const n of content.notes) log(`${b.id}: ${n}`);
         const counts = { image: r.assets.filter((a) => a.asset.kind === "image" && !a.asset.label.startsWith("Cover")).length, video: r.assets.filter((a) => a.asset.kind === "video").length };
         log(`Made ${counts.image} image${counts.image === 1 ? "" : "s"} and ${counts.video} video${counts.video === 1 ? "" : "s"} for ${b.id} from the app's real page.`, r.costUsd ? Math.round(r.costUsd * 100) : undefined);
         save();
@@ -557,6 +711,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     for (const ch of chosen) {
       const info = deps.infos.get(ch.id)!;
       const p = deps.platforms.get(ch.id)!;
+      const acct = account(ch.id);
       let identity: Identity | null = null;
       try {
         identity = await identityFor(app, info, p, deps, produced);
@@ -565,23 +720,27 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
         continue;
       }
       if (info.identity !== "none" && !identity) continue;
-      const creatives = creativesFor(info, b.id, content.copy, produced, { preferText: ch.id === "google" && content.copy.keywords.length >= 3 });
+      const creatives = creativesFor(info, b.id, content.copy, produced, { preferText: ch.id === "google" && content.copy.keywords.length >= 3, baseLink: base, skip });
       if (!creatives.length) {
         report.skipped.push(`ads: nothing made for ${b.id} fits ${info.name}'s formats`);
         continue;
       }
-      const u = new URL(base);
-      u.searchParams.set("d2", `${b.id}.${ch.id}`);
-      const link = u.toString();
+      // Optimise for sign-ups once the platform gets enough of them from day2; until then for clicks.
+      const setup = file.conversions[ch.id]?.setup;
+      const recent = deps.sentConversions && setup ? await deps.sentConversions.countSince(app.id, ch.id, new Date(now.getTime() - 7 * DAY)) : 0;
+      const optimizeFor = setup && recent >= OPTIMIZE_FOR_SIGNUPS_AFTER ? "signups" : "clicks";
       try {
         const launched = await p.launch({
           appId: app.id,
           appName: app.name,
           campaignName: `day2 ${app.name} ${b.id}`,
-          link,
-          dailyBudgetUsd: ch.dailyUsd,
+          link: taggedLink(base, `${b.id}.${ch.id}`),
+          dailyBudget: local(ch.dailyUsd, acct.currency),
+          currency: acct.currency,
+          optimizeFor,
+          ...(optimizeFor === "signups" && setup ? { conversion: setup } : {}),
           targeting: { countries: content.copy.countries, languages: content.copy.languages, ageMin: 18, audience: content.copy.audience, interests: content.copy.interests, keywords: content.copy.keywords },
-          creatives: creatives.map(({ variant: _v, ...c }) => c),
+          creatives: creatives.map(({ variant: _v, format: _f, ...c }) => c),
           identity,
           aiContent: creatives.some((c) => c.asset?.aiGenerated),
         });
@@ -590,6 +749,8 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           platform: ch.id,
           launched,
           status: "active",
+          billing: acct.billing,
+          currency: acct.currency,
           dailyBudgetUsd: ch.dailyUsd,
           launchedAt: at,
           spendUsd: 0,
@@ -601,13 +762,14 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           heldFor: null,
           stopReason: null,
           review: null,
+          optimizeFor,
           month: { id: monthId(now), spendAtStart: 0 },
-          creatives: creatives.map((c) => ({ key: c.key, variant: c.variant, assetId: c.asset?.id ?? null, kind: c.asset ? c.asset.kind : "text" })),
+          creatives: creatives.map((c) => ({ key: c.key, variant: c.variant, assetId: c.asset?.id ?? null, kind: c.asset ? c.asset.kind : "text", format: c.format, headline: c.copy.headline, paused: null })),
         });
         save();
         report.launched.push(`${b.id}:${ch.id}`);
         const kinds = [...new Set(creatives.map((c) => (c.asset ? c.asset.kind : "text")))].join(" and ");
-        log(`Launched ${b.id} on ${info.name} at ${money(ch.dailyUsd)} a day: ${creatives.length} ${kinds} ad${creatives.length === 1 ? "" : "s"}.`);
+        log(`Launched ${b.id} on ${info.name} at ${money(ch.dailyUsd)} a day${acct.billing === "own" ? " (your ad account)" : ""}: ${creatives.length} ${kinds} ad${creatives.length === 1 ? "" : "s"}, optimising for ${optimizeFor === "signups" ? "sign-ups" : "clicks"}.`);
       } catch (err) {
         log(`Couldn't launch ${b.id} on ${info.name}: ${(err as Error).message}`);
       }
@@ -620,7 +782,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
 async function identityFor(app: AppEntry, info: PlatformInfo, p: AdPlatform, deps: PlatformAdsDeps, produced: Array<{ asset: StoredAsset }>): Promise<Identity | null> {
   if (info.identity === "none") return null;
   const have = await deps.identities.get(app.id, info.id);
-  if (have) return { platform: info.id, ref: have.ref, displayName: have.displayName || app.name };
+  if (have && have.status !== "pending") return { platform: info.id, ref: have.ref, displayName: have.displayName || app.name };
   if (info.identity !== "custom" || !p.ensureIdentity) return null;
   const logo = produced.find((a) => a.asset.kind === "image" && a.asset.ratio === "1:1")?.asset ?? (await squareLogo(app, deps));
   const made = await p.ensureIdentity({ appId: app.id, displayName: app.name, logo });

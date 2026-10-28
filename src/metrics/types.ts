@@ -22,6 +22,8 @@ export type EventLike = {
     armKey?: string;
     campaignId?: string;
     creativeId?: string;
+    /** The ad platform's click id (fbclid, ttclid, gclid…), for sending conversions back. */
+    click?: { param: string; value: string; ip?: string; ua?: string };
   };
   /** Active config-plane assignments at the time of the event (spec §2.1's
    * `variants`), e.g. `{ entry_path: "invoice_first", exp_42: "B" }`. Not

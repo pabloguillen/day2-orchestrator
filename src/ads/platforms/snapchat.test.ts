@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { scriptedFetch, testAsset, testImage, testSpec, noSleep, type Expect } from "../test-helpers";
-import { PlatformError, type Launched } from "../types";
+import { PlatformError, type Conversion, type Launched } from "../types";
 import { create, credentialsFromEnv, info, type SnapchatCreds } from "./snapchat";
 
 const creds: SnapchatCreds = { clientId: "cid", clientSecret: "csecret", refreshToken: "rtok", adAccountId: "acct1" };
@@ -58,7 +59,7 @@ function mediaSteps(type: "VIDEO" | "IMAGE", mediaId: string, opts: { ai?: boole
   ];
 }
 
-function restSteps(mediaId: string, cta = "SIGN_UP"): Expect[] {
+function restSteps(mediaId: string, cta = "SIGN_UP", o: { url?: string; signups?: boolean } = {}): Expect[] {
   return [
     {
       method: "POST",
@@ -76,7 +77,7 @@ function restSteps(mediaId: string, cta = "SIGN_UP"): Expect[] {
               shareable: true,
               call_to_action: cta,
               profile_properties: { profile_id: "prof_1" },
-              web_view_properties: { url: "https://buddy.example/go/split?d2=B-4.x", block_preload: true },
+              web_view_properties: { url: o.url ?? "https://buddy.example/go/split?d2=B-4.x", block_preload: true },
             },
           ],
         }),
@@ -94,7 +95,7 @@ function restSteps(mediaId: string, cta = "SIGN_UP"): Expect[] {
               status: "PAUSED",
               start_time: "2026-10-28T12:00:00.000Z",
               buy_model: "AUCTION",
-              objective_v2_properties: { objective_v2_type: "TRAFFIC" },
+              objective_v2_properties: { objective_v2_type: o.signups ? "SALES" : "TRAFFIC" },
             },
           ],
         }),
@@ -114,7 +115,8 @@ function restSteps(mediaId: string, cta = "SIGN_UP"): Expect[] {
               targeting: { regulated_content: false, geos: [{ country_code: "de" }], demographics: [{ min_age: "18", languages: ["de"] }] },
               placement_v2: { config: "AUTOMATIC" },
               billing_event: "IMPRESSION",
-              optimization_goal: "SWIPES",
+              optimization_goal: o.signups ? "PIXEL_SIGNUP" : "SWIPES",
+              ...(o.signups ? { pixel_id: "px_1" } : {}),
               bid_strategy: "AUTO_BID",
               delivery_constraint: "DAILY_BUDGET",
               daily_budget_micro: 20_000_000,
@@ -151,7 +153,7 @@ describe("snapchat", () => {
     expect(info.id).toBe("snapchat");
     expect(info.formats.every((f) => f.ratio === "9:16")).toBe(true);
     expect(info.identity).toBe("app_account");
-    expect(info.minDailyUsd).toBe(5);
+    expect(info.clickIdParam).toBe("ScCid");
   });
 
   test("credentialsFromEnv", () => {
@@ -265,13 +267,15 @@ describe("snapchat", () => {
     const spec = testSpec({ identity });
     spec.creatives[0] = { ...spec.creatives[0]!, asset: testImage() };
     await expect(platform.launch(spec)).rejects.toThrow("9:16");
-    await expect(platform.launch(testSpec({ identity, dailyBudgetUsd: 2 }))).rejects.toThrow("at least $5");
+    await expect(platform.launch(testSpec({ identity, dailyBudget: 2 }))).rejects.toThrow("at least 5");
+    await expect(platform.launch(testSpec({ identity, optimizeFor: "signups" }))).rejects.toThrow("pixelId");
     expect(f.calls.length).toBe(0);
   });
 
   test("stats: micro → USD, swipes as clicks, rejection", async () => {
     const { f, platform } = make([
       tokenStep,
+      accountStep,
       {
         method: "GET",
         url: "/v1/campaigns/camp_1/stats",
@@ -306,12 +310,13 @@ describe("snapchat", () => {
     ]);
     const s = await platform.stats(launched);
     expect(s).toEqual({
-      spendUsd: 12.35,
+      spend: 12.35,
+      currency: "USD",
       impressions: 1200,
       clicks: 34,
       status: "rejected",
       rejection: "Misleading claim",
-      byCreative: { "B-4-v1": { spendUsd: 12.35, impressions: 1200, clicks: 34, status: "rejected" } },
+      byCreative: { "B-4-v1": { spend: 12.35, impressions: 1200, clicks: 34, status: "rejected" } },
     });
     expect(f.done()).toBe(true);
   });
@@ -320,7 +325,7 @@ describe("snapchat", () => {
     const statsStep: Expect = { method: "GET", url: "/stats", json: { ...ok, total_stats: [{ total_stat: { stats: { impressions: 0, swipes: 0, spend: 0 } } }] } };
     const campStep: Expect = { method: "GET", url: "/v1/campaigns/camp_1", json: { ...ok, campaigns: [{ campaign: { id: "camp_1", status: "ACTIVE" } }] } };
     const ads = (review: string): Expect => ({ method: "GET", url: "/v1/adsquads/sq_1/ads", json: { ...ok, ads: [{ ad: { id: "ad_1", status: "ACTIVE", review_status: review } }] } });
-    const { platform } = make([tokenStep, statsStep, campStep, ads("PENDING"), statsStep, campStep, ads("APPROVED")]);
+    const { platform } = make([tokenStep, accountStep, statsStep, campStep, ads("PENDING"), statsStep, campStep, ads("APPROVED")]);
     expect((await platform.stats(launched)).status).toBe("in_review");
     expect((await platform.stats(launched)).status).toBe("active");
   });
@@ -394,5 +399,169 @@ describe("snapchat", () => {
     const e = await platform.pause(launched).catch((x) => x);
     expect(e).toBeInstanceOf(PlatformError);
     expect(String(e.message)).not.toContain("atok");
+  });
+
+  test("launch uses each creative's own link and optimises for pixel sign-ups", async () => {
+    const spec = testSpec({ identity, optimizeFor: "signups", conversion: { platform: "snapchat", refs: { pixelId: "px_1" } } });
+    spec.creatives[0] = { ...spec.creatives[0]!, link: "https://buddy.example/go/split?d2=B-4.snapchat.v1" };
+    const { f, platform } = make([
+      tokenStep,
+      accountStep,
+      ...mediaSteps("VIDEO", "md_v"),
+      ...restSteps("md_v", "SIGN_UP", { url: "https://buddy.example/go/split?d2=B-4.snapchat.v1", signups: true }),
+    ]);
+    await platform.launch(spec);
+    expect(f.done()).toBe(true);
+  });
+
+  test("launch refuses when the account currency differs from the spec, before creating anything", async () => {
+    const { f, platform } = make([tokenStep, { ...accountStep, json: { ...ok, adaccounts: [{ sub_request_status: "SUCCESS", adaccount: { id: "acct1", currency: "EUR" } }] } }]);
+    await expect(platform.launch(testSpec({ identity }))).rejects.toThrow("EUR");
+    expect(f.done()).toBe(true);
+  });
+
+  test("launch in EUR budgets in EUR micro and stats report EUR", async () => {
+    const eurAccount: Expect = { ...accountStep, json: { ...ok, adaccounts: [{ sub_request_status: "SUCCESS", adaccount: { id: "acct1", currency: "EUR" } }] } };
+    const rest = restSteps("md_v");
+    const { f, platform } = make([
+      tokenStep,
+      eurAccount,
+      ...mediaSteps("VIDEO", "md_v"),
+      rest[0]!,
+      rest[1]!,
+      { ...rest[2]!, check: (r) => expect((r.json as { adsquads: Array<{ daily_budget_micro: number }> }).adsquads[0]!.daily_budget_micro).toBe(12_500_000) },
+      rest[3]!,
+      rest[4]!,
+      { method: "GET", url: "/stats", json: { ...ok, total_stats: [{ total_stat: { stats: { impressions: 5, swipes: 1, spend: 1_000_000 } } }] } },
+      { method: "GET", url: "/v1/campaigns/camp_1", json: { ...ok, campaigns: [{ campaign: { id: "camp_1", status: "ACTIVE" } }] } },
+      { method: "GET", url: "/v1/adsquads/sq_1/ads", json: { ...ok, ads: [] } },
+    ]);
+    await platform.launch(testSpec({ identity, currency: "EUR", dailyBudget: 12.5 }));
+    const s = await platform.stats(launched);
+    expect(s.spend).toBe(1);
+    expect(s.currency).toBe("EUR");
+    expect(f.done()).toBe(true);
+  });
+
+  test("setAdActive PUTs the ad with the new status", async () => {
+    const ad = { id: "ad_1", ad_squad_id: "sq_1", creative_id: "cr_1", name: "day2 Buddy B-4 B-4-v1", type: "REMOTE_WEBPAGE", status: "ACTIVE", review_status: "APPROVED", created_at: "x" };
+    const put = (status: string): Expect => ({
+      method: "PUT",
+      url: "/v1/adsquads/sq_1/ads",
+      check: (r) => expect(r.json).toEqual({ ads: [{ id: "ad_1", ad_squad_id: "sq_1", creative_id: "cr_1", name: "day2 Buddy B-4 B-4-v1", type: "REMOTE_WEBPAGE", status }] }),
+      json: { ...ok, ads: [{ sub_request_status: "SUCCESS", ad: { id: "ad_1" } }] },
+    });
+    const get: Expect = { method: "GET", url: "/v1/ads/ad_1", json: { ...ok, ads: [{ sub_request_status: "SUCCESS", ad }] } };
+    const { f, platform } = make([tokenStep, get, put("PAUSED"), get, put("ACTIVE")]);
+    await platform.setAdActive(launched, "B-4-v1", false);
+    await platform.setAdActive(launched, "B-4-v1", true);
+    expect(f.done()).toBe(true);
+    await expect(platform.setAdActive(launched, "nope", true)).rejects.toBeInstanceOf(PlatformError);
+  });
+
+  test("accountInfo", async () => {
+    const acct = (a: object): Expect => ({ method: "GET", url: "/v1/adaccounts/acct1", json: { ...ok, adaccounts: [{ sub_request_status: "SUCCESS", adaccount: a }] } });
+    const { platform } = make([
+      tokenStep,
+      acct({ id: "acct1", name: "day2", currency: "EUR", status: "ACTIVE", funding_source_ids: ["fs1"] }),
+      acct({ id: "acct1", name: "day2", currency: "EUR", status: "PENDING" }),
+      acct({ id: "acct1", name: "day2", currency: "EUR", status: "ACTIVE", funding_source_ids: [] }),
+    ]);
+    expect(await platform.accountInfo()).toEqual({ id: "acct1", name: "day2", currency: "EUR", canSpend: true });
+    expect(await platform.accountInfo()).toEqual({ id: "acct1", name: "day2", currency: "EUR", canSpend: false, problem: "ad account status is PENDING" });
+    expect((await platform.accountInfo()).canSpend).toBe(false);
+  });
+
+  test("checkIdentity reads the Public Profile", async () => {
+    const { f, platform } = make([
+      tokenStep,
+      {
+        method: "GET",
+        url: "https://businessapi.snapchat.com/v1/public_profiles/prof_1",
+        check: bearer,
+        json: { request_status: "SUCCESS", public_profiles: [{ id: "prof_1", display_name: "Buddy", organization_id: "org1" }] },
+      },
+      { method: "GET", url: "https://businessapi.snapchat.com/v1/public_profiles/prof_2", status: 403, json: { request_status: "ERROR", error_code: "AUTHORIZATION_PERMISSION_DENIED" } },
+    ]);
+    expect(await platform.checkIdentity!(identity)).toEqual({ ok: true });
+    const bad = await platform.checkIdentity!({ ...identity, ref: "prof_2" });
+    expect(bad.ok).toBe(false);
+    expect(f.done()).toBe(true);
+  });
+
+  test("ensureConversions finds the ad account's pixel, or explains", async () => {
+    const { platform } = make([
+      tokenStep,
+      {
+        method: "GET",
+        url: "/v1/adaccounts/acct1/pixels",
+        json: { ...ok, pixels: [{ sub_request_status: "SUCCESS", pixel: { id: "px_old", name: "Shop", status: "INACTIVE", effective_status: "INACTIVE" } }, { sub_request_status: "SUCCESS", pixel: { id: "px_1", name: "day2 pixel", status: "ACTIVE", effective_status: "ACTIVE" } }] },
+      },
+      { method: "GET", url: "/v1/adaccounts/acct1/pixels", json: { ...ok, pixels: [] } },
+    ]);
+    expect(await platform.ensureConversions!()).toEqual({ platform: "snapchat", refs: { pixelId: "px_1" } });
+    await expect(platform.ensureConversions!()).rejects.toThrow("Snap Pixel");
+  });
+
+  test("sendConversions posts CAPI v3 events with ScCid, dedups and filters", async () => {
+    const at = "2026-10-28T11:00:00.000Z";
+    const hashed = "a".repeat(64);
+    const events: Conversion[] = [
+      { eventId: "dev-1:signup", name: "signup", at, click: { param: "ScCid", value: "click-1" }, pageUrl: "https://buddy.example/go/split", externalId: hashed, clientIp: "203.0.113.7", userAgent: "UA/1" },
+      { eventId: "dev-1:signup", name: "signup", at, click: { param: "ScCid", value: "click-1" }, pageUrl: "https://buddy.example/go/split" },
+      { eventId: "dev-2:activated", name: "activated", at, click: { param: "ScCid", value: "click-2" }, pageUrl: "https://buddy.example/go/split", externalId: "user-2", clientIp: "203.0.113.7", userAgent: "UA/1" },
+      { eventId: "dev-3:signup", name: "signup", at, click: { param: "fbclid", value: "x" }, pageUrl: "https://buddy.example/" },
+      { eventId: "dev-4:signup", name: "signup", at: "2026-10-01T00:00:00Z", click: { param: "ScCid", value: "c4" }, pageUrl: "https://buddy.example/", clientIp: "203.0.113.7", userAgent: "UA/1" },
+      { eventId: "dev-5:signup", name: "signup", at, click: { param: "ScCid", value: "c5" }, pageUrl: "https://buddy.example/" },
+    ];
+    const f = scriptedFetch([
+      {
+        method: "POST",
+        url: "https://tr.snapchat.com/v3/px_1/events?access_token=capi-tok",
+        check: (r) =>
+          expect(r.json).toEqual({
+            data: [
+              { event_name: "SIGN_UP", event_time: Date.parse(at), event_id: "dev-1:signup", action_source: "WEB", event_source_url: "https://buddy.example/go/split", user_data: { sc_click_id: "click-1", client_ip_address: "203.0.113.7", client_user_agent: "UA/1", external_id: hashed } },
+              {
+                event_name: "CUSTOM_EVENT_1",
+                event_time: Date.parse(at),
+                event_id: "dev-2:activated",
+                action_source: "WEB",
+                event_source_url: "https://buddy.example/go/split",
+                user_data: { sc_click_id: "click-2", client_ip_address: "203.0.113.7", client_user_agent: "UA/1", external_id: createHash("sha256").update("user-2").digest("hex") },
+              },
+            ],
+          }),
+        json: { status: "VALID", reason: "Events have been processed successfully." },
+      },
+    ]);
+    const platform = create({ ...creds, conversionsToken: "capi-tok" }, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    const out = await platform.sendConversions!({ platform: "snapchat", refs: { pixelId: "px_1" } }, events);
+    expect(out.sent).toBe(2);
+    expect(out.rejected.map((r) => r.eventId)).toEqual(["dev-3:signup", "dev-4:signup", "dev-5:signup"]);
+    expect(out.rejected[2]!.why).toContain("user agent");
+    expect(f.done()).toBe(true);
+  });
+
+  test("sendConversions reports an INVALID batch as rejected", async () => {
+    const { platform } = make([
+      tokenStep,
+      { method: "POST", url: "https://tr.snapchat.com/v3/px_1/events?access_token=atok", json: { status: "INVALID", reason: "missing match key" } },
+    ]);
+    const out = await platform.sendConversions!({ platform: "snapchat", refs: { pixelId: "px_1" } }, [
+      { eventId: "e1", name: "signup", at: NOW.toISOString(), click: { param: "ScCid", value: "c" }, pageUrl: "https://buddy.example/", clientIp: "203.0.113.7", userAgent: "UA/1" },
+    ]);
+    expect(out).toEqual({ sent: 0, rejected: [{ eventId: "e1", why: "INVALID: missing match key" }] });
+  });
+
+  test("a rotated refresh token is handed to onRefreshToken", async () => {
+    const seen: string[] = [];
+    const f = scriptedFetch([
+      { ...tokenStep, json: { access_token: "atok", expires_in: 3600, refresh_token: "rtok2" } },
+      { method: "PATCH", url: "/campaigns/camp_1", json: ok },
+    ]);
+    const platform = create({ ...creds, onRefreshToken: (t) => void seen.push(t) }, { fetch: f.fetch, sleep: noSleep, now: () => NOW });
+    await platform.pause(launched);
+    expect(seen).toEqual(["rtok2"]);
   });
 });

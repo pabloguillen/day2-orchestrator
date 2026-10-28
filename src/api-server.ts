@@ -74,15 +74,23 @@ import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
 import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults } from "./ads/autopilot";
-import { ALL_PLATFORMS, configuredPlatforms, platformInfo } from "./ads/registry";
+import { ALL_PLATFORMS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
+import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnect, recheckIdentities, startConnect } from "./ads/connect-flow";
+import { fromUsd } from "./ads/fx";
+import { FORMAT_LABEL } from "./ads/learnings";
+import { retentionFrom } from "./ads/results";
+import { hasSecretsKey } from "./secrets";
+import { chromiumPath } from "./simulation";
 import { REF_RE } from "./ads/identities";
 import { ASSET_ID_RE } from "./ads/assets";
 import type { PlatformId } from "./ads/types";
 import {
   adIdentities,
   assertProductionReady,
+  adConnections,
   assetStore,
   platformIdentities,
+  sentConversions,
   fieldStore,
   ingestKeys,
   platformTools,
@@ -1588,11 +1596,23 @@ async function betsResponse(app: AppEntry) {
 
 // ---- Ads on every platform (src/ads/) ----
 
-/** What the Ads tab shows: platforms (ready or what's missing), this month's ads, every campaign with what it brought, and the content made. Spend in credits only. */
+const adsCallbackUrl = (platform: string) => `${authConfig().publicUrl}/api/ads/connect/callback/${platform}`;
+const flowDeps = () => ({ store: adConnections(), identities: platformIdentities() });
+const isPlatform = (p: string | undefined): p is PlatformId => Boolean(p && (ALL_PLATFORMS as string[]).includes(p));
+
+/**
+ * What the Ads tab shows: each platform (through whose account, whether
+ * the app's page is linked, what's missing — with a connect button for
+ * each), this month, every campaign and ad with what it brought, what
+ * day2 learned, and the content made. day2's own costs only as credits;
+ * the customer's own ad accounts in their own currency.
+ */
 async function adsResponse(app: AppEntry) {
   const now = new Date();
-  const platforms = configuredPlatforms();
+  const store = adConnections();
+  const resolved = await resolvePlatforms(app.id, store);
   const linked = await platformIdentities().forApp(app.id);
+  const connectableNow = connectable();
   const file = loadAds(appFile(app, ADS_FILENAME));
   const bets = loadBets(appFile(app, BETS_FILENAME)).bets;
   const monthlyAds = monthlyAdBudgetUsd(loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME)).budget.monthlyBudgetUsd);
@@ -1600,28 +1620,41 @@ async function adsResponse(app: AppEntry) {
   const monthSpend = file.campaigns.reduce((n, c) => n + Math.max(0, c.spendUsd - (c.month.id === month ? c.month.spendAtStart : c.spendUsd)), 0);
   const since = file.campaigns.map((c) => c.launchedAt).sort()[0];
   const events = since ? ((await appEvents(app, since, fieldStore())) ?? []) : [];
+  const users = since ? (await fieldStore().activity(app.id, new Date(now.getTime() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users : [];
+  const retention = users.length ? retentionFrom(events, users, now) : undefined;
   const assets = await assetStore().list(app.id);
   const byId = new Map(assets.map((a) => [a.id, a]));
-  const results = new Map<string, ReturnType<typeof platformResults>[number]>();
+  const results = new Map<string, PlatformResultView>();
   for (const b of bets) {
     const mine = file.campaigns.filter((c) => c.betId === b.id);
-    if (mine.length) for (const r of platformResults(b, mine, events)) results.set(`${b.id}:${r.platform}`, r);
+    if (mine.length) for (const r of platformResults(b, mine, events, retention)) results.set(`${b.id}:${r.platform}`, r);
   }
+  const sent = sentConversions();
+  const week = new Date(now.getTime() - 7 * 86_400_000);
+  const credits = (usd: number | null) => (usd === null ? null : creditsForCost(usd, "paid_ads"));
+  const money = (c: { billing: string; currency: string }, usd: number | null) =>
+    usd === null ? null : c.billing === "own" ? { amount: Math.round(fromUsd(usd, c.currency) * 100) / 100, currency: c.currency } : { credits: credits(usd)! };
   return {
-    platforms: ALL_PLATFORMS.map((id) => {
-      const info = platformInfo(id);
-      const ident = linked.find((l) => l.platform === id);
-      return {
-        id,
-        name: info.name,
-        connected: platforms.has(id),
-        identity: info.identity,
-        identityHelp: info.identityHelp ?? null,
-        linked: ident ? { ref: ident.ref, displayName: ident.displayName, setBy: ident.setBy } : null,
-        ready: platforms.has(id) && (info.identity !== "app_account" || Boolean(ident)),
-        audiences: info.audiences,
-      };
-    }),
+    platforms: await Promise.all(
+      ALL_PLATFORMS.map(async (id) => {
+        const info = platformInfo(id);
+        const r = resolved.get(id);
+        const ident = linked.find((l) => l.platform === id);
+        const identityReady = info.identity !== "app_account" || (Boolean(ident) && ident!.status !== "pending");
+        return {
+          id,
+          name: info.name,
+          audiences: info.audiences,
+          identity: info.identity,
+          identityHelp: info.identityHelp ?? null,
+          linked: ident ? { displayName: ident.displayName, status: ident.status ?? "ready", todo: ident.todo ?? null } : null,
+          account: r ? { source: r.source, name: r.accountName, currency: r.currency, billing: r.billing } : null,
+          canConnect: connectableNow[id].ok,
+          ready: Boolean(r) && identityReady,
+          conversions: file.conversions[id] ? { lastWeek: await sent.countSince(app.id, id, week) } : null,
+        };
+      }),
+    ),
     month: { budgetCredits: creditsForCost(monthlyAds, "paid_ads"), spentCredits: creditsForCost(monthSpend, "paid_ads") },
     campaigns: file.campaigns.map((c) => {
       const b = bets.find((x) => x.id === c.betId);
@@ -1631,24 +1664,49 @@ async function adsResponse(app: AppEntry) {
         betTitle: b?.title ?? c.betId,
         metric: b?.metric ?? "activation",
         platform: c.platform,
+        billing: c.billing,
         status: c.status,
         heldFor: c.heldFor,
         stopReason: c.stopReason,
-        review: c.review,
+        optimizeFor: c.optimizeFor,
         launchedAt: c.launchedAt,
+        spent: money(c, c.billing === "own" ? c.spendUsd : c.billedSpendUsd),
+        daily: money(c, c.dailyBudgetUsd),
         dailyCredits: creditsForCost(c.dailyBudgetUsd, "paid_ads"),
-        spentCredits: creditsForCost(c.billedSpendUsd, "paid_ads"),
+        spentCredits: creditsForCost(c.billing === "own" ? 0 : c.billedSpendUsd, "paid_ads"),
         impressions: c.impressions,
         clicks: c.clicks,
         people: r?.people ?? 0,
         outcomes: r?.outcomes ?? 0,
-        creditsPerOutcome: r?.costPerOutcome != null ? creditsForCost(r.costPerOutcome, "paid_ads") : null,
+        retained: r?.retained ?? 0,
+        perOutcome: money(c, r?.costPerOutcome ?? null),
+        creditsPerOutcome: c.billing === "own" ? null : credits(r?.costPerOutcome ?? null),
         creatives: c.creatives.map((x) => {
           const a = x.assetId ? byId.get(x.assetId) : undefined;
-          return { key: x.key, kind: x.kind, url: a?.url ?? null, thumbnailUrl: a?.thumbnail?.url ?? (a?.kind === "image" ? a.url : null) };
+          const ad = r?.ads.find((y) => y.key === x.key);
+          return {
+            key: x.key,
+            kind: x.kind,
+            format: x.format ?? null,
+            headline: x.headline ?? null,
+            paused: x.paused ?? null,
+            url: a?.url ?? null,
+            thumbnailUrl: a?.thumbnail?.url ?? (a?.kind === "image" ? a.url : null),
+            people: ad?.people ?? 0,
+            outcomes: ad?.outcomes ?? 0,
+            perOutcome: money(c, ad?.costPerOutcome ?? null),
+          };
         }),
       };
     }),
+    learnings: file.learnings && {
+      at: file.learnings.at,
+      judgedBy: file.learnings.judgedBy,
+      platforms: file.learnings.platforms.map((p) => ({ platform: p.platform, name: platformInfo(p.platform).name, people: p.people, results: file.learnings!.judgedBy === "retained" ? p.retained : p.outcomes, perResultCredits: credits(p.costUsd) })),
+      formats: file.learnings.formats.map((f) => ({ format: f.format, label: FORMAT_LABEL[f.format], ads: f.ads, people: f.people, results: f.outcomes, wins: f.wins, losses: f.losses, perResultCredits: credits(f.costUsd) })),
+      copy: { winners: file.learnings.copy.winners.map(({ costUsd: _c, ...w }) => w), losers: file.learnings.copy.losers },
+      angles: file.learnings.angles,
+    },
     content: file.content.map((ct) => ({
       betId: ct.betId,
       at: ct.at,
@@ -1662,33 +1720,183 @@ async function adsResponse(app: AppEntry) {
     })),
   };
 }
+type PlatformResultView = ReturnType<typeof platformResults>[number];
 
 route("GET", "/api/apps/:id/growth/ads", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   return json(await adsResponse(app));
 });
 
-/** Link the page/account an app's ads show as on a platform (owners, admins, day2's operator). */
+/** Connect the app's own ad account ("account") or its page/profile ("identity"): returns the platform's sign-in page. */
+route("POST", "/api/apps/:id/growth/ads/connect/:platform", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  if (!isPlatform(params.platform)) throw new HttpError(404, "Unknown platform.");
+  const body = (await req.json().catch(() => ({}))) as { purpose?: string };
+  const purpose = body.purpose === "identity" ? "identity" : "account";
+  try {
+    return json(await startConnect(flowDeps(), { platform: params.platform, scope: { appId: app.id }, purpose, appId: app.id, by: (await actorName(t)) ?? null, callbackUrl: adsCallbackUrl(params.platform) }));
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+});
+
+/** After the platform's sign-in: what can be picked. */
+route("GET", "/api/apps/:id/growth/ads/connect/pending/:pending", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  try {
+    return json(await choices(flowDeps(), params.pending!, app.id));
+  } catch (err) {
+    throw new HttpError(410, (err as Error).message);
+  }
+});
+
+route("POST", "/api/apps/:id/growth/ads/connect/pending/:pending", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => ({}))) as { adAccountId?: string; identityRef?: string };
+  const by = (await actorName(t)) ?? null;
+  try {
+    if (typeof body.adAccountId === "string") {
+      const r = await chooseAccount(flowDeps(), params.pending!, app.id, body.adAccountId, by);
+      return json({ ...r, ads: await adsResponse(app) });
+    }
+    if (typeof body.identityRef === "string") {
+      const r = await chooseIdentity(flowDeps(), params.pending!, app.id, body.identityRef, by);
+      return json({ ...r, ads: await adsResponse(app) });
+    }
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+  throw new HttpError(400, "Pick an ad account or a page.");
+});
+
+/** Stop using the app's own ad account on a platform (day2's takes over, if connected). */
+route("DELETE", "/api/apps/:id/growth/ads/accounts/:platform", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  if (!isPlatform(params.platform)) throw new HttpError(404, "Unknown platform.");
+  await adConnections().remove({ appId: app.id }, params.platform);
+  return json(await adsResponse(app));
+});
+
+/** Link a page/account by id instead (when the platform has no way to pick it after signing in). */
 route("PUT", "/api/apps/:id/growth/ads/identities/:platform", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireManager(t);
-  const platform = params.platform as PlatformId;
-  if (!ALL_PLATFORMS.includes(platform)) throw new HttpError(404, "Unknown platform.");
+  const platform = params.platform;
+  if (!isPlatform(platform)) throw new HttpError(404, "Unknown platform.");
   const body = (await req.json().catch(() => null)) as { ref?: unknown; displayName?: unknown } | null;
   const ref = typeof body?.ref === "string" ? body.ref.trim() : "";
   if (!REF_RE[platform].test(ref) || !ref) throw new HttpError(400, `That doesn't look like a ${platformInfo(platform).name} reference: ${platformInfo(platform).identityHelp ?? "check the id"}.`);
   const displayName = typeof body?.displayName === "string" ? body.displayName.trim().slice(0, 80) : "";
-  await platformIdentities().set({ appId: app.id, platform, ref, displayName: displayName || app.name, setBy: (await actorName(t)) ?? null });
+  await platformIdentities().set({ appId: app.id, platform, ref, displayName: displayName || app.name, setBy: (await actorName(t)) ?? null, status: "pending", todo: "day2 is checking it can run ads as this account" });
+  await recheckIdentities(flowDeps(), app.id).catch(() => []);
   return json(await adsResponse(app));
 });
 
 route("DELETE", "/api/apps/:id/growth/ads/identities/:platform", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireManager(t);
-  const platform = params.platform as PlatformId;
-  if (!ALL_PLATFORMS.includes(platform)) throw new HttpError(404, "Unknown platform.");
-  await platformIdentities().remove(app.id, platform);
+  if (!isPlatform(params.platform)) throw new HttpError(404, "Unknown platform.");
+  await platformIdentities().remove(app.id, params.platform);
   return json(await adsResponse(app));
+});
+
+/** The platforms send people back here after signing in. */
+route(
+  "GET",
+  "/api/ads/connect/callback/:platform",
+  async (req, params) => {
+    const url = new URL(req.url);
+    const console = authConfig().publicUrl;
+    if (!isPlatform(params.platform)) return Response.redirect(`${console}/`, 302);
+    const pageOf = (scope: "day2" | { appId: string } | undefined) => (!scope ? "/" : scope === "day2" ? "/operator" : `/apps/${encodeURIComponent(scope.appId)}/growth/ads`);
+    // Where the person started, so an error lands back on the same page.
+    const q = url.searchParams;
+    const started = q.get("state") ? await adConnections().pendingByState(q.get("state")!) : q.get("p") ? await adConnections().pending(q.get("p")!) : null;
+    try {
+      const r = await finishAdConnect(flowDeps(), { platform: params.platform, query: Object.fromEntries(q), callbackUrl: adsCallbackUrl(params.platform) });
+      return Response.redirect(`${console}${pageOf(r.scope)}?connect=${encodeURIComponent(r.pendingId)}&platform=${params.platform}`, 302);
+    } catch (err) {
+      return Response.redirect(`${console}${pageOf(started?.scope)}?platform=${params.platform}&connectError=${encodeURIComponent((err as Error).message.slice(0, 300))}`, 302);
+    }
+  },
+  { public: true },
+);
+
+// day2's own ad accounts and the server's readiness (operator).
+
+async function platformAdsResponse() {
+  const store = adConnections();
+  const day2 = await store.list("day2");
+  const can = connectable();
+  const fromEnv = configuredPlatforms();
+  const pub = authConfig().publicUrl;
+  const which = (cmd: string) => Bun.which(cmd) !== null;
+  return {
+    platforms: ALL_PLATFORMS.map((id) => {
+      const c = day2.find((x) => x.platform === id);
+      return {
+        id,
+        name: platformInfo(id).name,
+        canConnect: can[id].ok,
+        missingEnv: can[id].missing,
+        account: c ? { name: c.accountName, currency: c.currency, connectedBy: c.connectedBy, connectedAt: c.connectedAt } : fromEnv.has(id) ? { name: "From the server environment", currency: "USD", connectedBy: null, connectedAt: null } : null,
+      };
+    }),
+    checks: [
+      { id: "public_url", ok: /^https:\/\//.test(pub) && !/localhost|127\.0\.0\.1/.test(pub), label: "A public https address, so platforms can fetch ad videos", detail: pub },
+      { id: "secrets", ok: hasSecretsKey(), label: "An encryption key for connected accounts", detail: hasSecretsKey() ? "set" : "DAY2_SECRETS_KEY" },
+      { id: "ffmpeg", ok: which("ffmpeg"), label: "ffmpeg, to make videos", detail: which("ffmpeg") ? "installed" : "missing" },
+      { id: "chromium", ok: Boolean(chromiumPath()), label: "Chromium, to make images and recordings", detail: chromiumPath() ? "installed" : "missing" },
+      { id: "creatify", ok: Boolean(videoProviders().creatify), label: "Creatify, for AI presenter videos (optional)", detail: videoProviders().creatify ? "connected" : "CREATIFY_API_ID, CREATIFY_API_KEY" },
+    ],
+  };
+}
+
+route("GET", "/api/platform/ads", async (_req, _params, t) => {
+  requireOperator(t);
+  return json(await platformAdsResponse());
+});
+
+route("POST", "/api/platform/ads/connect/:platform", async (_req, params, t) => {
+  requireOperator(t);
+  if (!isPlatform(params.platform)) throw new HttpError(404, "Unknown platform.");
+  try {
+    return json(await startConnect(flowDeps(), { platform: params.platform, scope: "day2", purpose: "account", appId: null, by: (await actorName(t)) ?? null, callbackUrl: adsCallbackUrl(params.platform) }));
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+});
+
+route("GET", "/api/platform/ads/connect/pending/:pending", async (_req, params, t) => {
+  requireOperator(t);
+  try {
+    return json(await choices(flowDeps(), params.pending!, null));
+  } catch (err) {
+    throw new HttpError(410, (err as Error).message);
+  }
+});
+
+route("POST", "/api/platform/ads/connect/pending/:pending", async (req, params, t) => {
+  requireOperator(t);
+  const body = (await req.json().catch(() => ({}))) as { adAccountId?: string };
+  if (typeof body.adAccountId !== "string") throw new HttpError(400, "Pick an ad account.");
+  try {
+    const r = await chooseAccount(flowDeps(), params.pending!, null, body.adAccountId, (await actorName(t)) ?? null);
+    return json({ ...r, platform: await platformAdsResponse() });
+  } catch (err) {
+    throw new HttpError(409, (err as Error).message);
+  }
+});
+
+route("DELETE", "/api/platform/ads/accounts/:platform", async (_req, params, t) => {
+  requireOperator(t);
+  if (!isPlatform(params.platform)) throw new HttpError(404, "Unknown platform.");
+  await adConnections().remove("day2", params.platform);
+  return json(await platformAdsResponse());
 });
 
 /** Ad images and videos, by unguessable id: ad platforms fetch them from here. */

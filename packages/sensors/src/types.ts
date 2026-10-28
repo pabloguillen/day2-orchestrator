@@ -124,7 +124,8 @@ export type GrowthEvent = {
   at: string;
   /** The app's user, hashed (`hashUser`), once the app called `identify`. */
   user?: string;
-  acquisition?: { campaignId?: string; channel?: string };
+  /** `click`: the ad platform's click id from the landing URL (fbclid, ttclid, gclid…), for conversions. */
+  acquisition?: { campaignId?: string; channel?: string; click?: { param: string; value: string; /** Added by day2's server, kept 7 days. */ ip?: string; ua?: string } };
 };
 
 export type DeviceInfo = {
