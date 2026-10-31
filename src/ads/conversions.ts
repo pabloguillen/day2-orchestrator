@@ -84,8 +84,12 @@ export function collectConversions(o: { platform: PlatformId; clickParam: string
   for (const [device, list] of byDevice) {
     list.sort((a, b) => a.at.localeCompare(b.at));
     const first = list[0]!;
-    const acq = first.acquisition;
-    const tag = parseTag(acq?.campaignId);
+    // Web: the click id comes with the first visit. Mobile apps: in a later "ad_click"
+    // event, sent only after the user agreed (App Tracking Transparency on iOS).
+    const campaignId = first.acquisition?.campaignId;
+    const consented = list.find((e) => e.type === "ad_click" && e.acquisition?.click && e.acquisition.campaignId === campaignId)?.acquisition;
+    const acq = first.acquisition?.click ? first.acquisition : consented;
+    const tag = parseTag(campaignId);
     if (!tag?.platform || tag.platform !== o.platform || !acq?.click || acq.click.param.toLowerCase() !== o.clickParam.toLowerCase()) continue;
     const page = o.pageUrl(tag.bet);
     if (!page) continue;

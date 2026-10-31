@@ -89,6 +89,11 @@ function suite(name: string, make: () => Promise<{ store: FieldStore; deps: Inge
       expect((await handleIngest(post(ctx.key, b, { "x-forwarded-for": "203.0.113.7, 10.0.0.1", "user-agent": "Mozilla/5.0 (iPhone)" }), ctx.deps)).status).toBe(204);
       const mine = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).filter((e) => e.deviceId === "dev-clicks01");
       expect(mine.map((e) => e.acquisition?.click ?? null)).toEqual([{ param: "ttclid", value: "E.C.P.abc123", ip: "203.0.113.7", ua: "Mozilla/5.0 (iPhone)" }, null, null]);
+      // From a phone: the click id (sent after consent) is kept, the IP address and device details aren't.
+      const phone = batch({ device: { id: "dev-phone001", platform: "ios" }, events: [{ type: "ad_click", at: "2026-10-15T11:58:00Z", acquisition: { campaignId: "B-3.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.ph1" } } }] as Batch["events"] });
+      expect((await handleIngest(post(ctx.key, phone, { "x-forwarded-for": "203.0.113.9", "user-agent": "Buddy/3.0" }), ctx.deps)).status).toBe(204);
+      const ph = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).find((e) => e.deviceId === "dev-phone001")!;
+      expect(ph.acquisition!.click).toEqual({ param: "ttclid", value: "E.C.P.ph1" });
       await ctx.store.prune(new Date("2026-10-23T12:00:00Z"));
       const later = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).find((e) => e.deviceId === "dev-clicks01")!;
       expect(later.acquisition!.click).toEqual({ param: "ttclid", value: "E.C.P.abc123" });

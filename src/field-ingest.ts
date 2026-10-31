@@ -211,7 +211,9 @@ export async function handleIngest(req: Request, deps: IngestDeps): Promise<Resp
   // browser. Kept only on visits that came from an ad, and removed after
   // 7 days (field-store prune) — it's only needed to send the conversion.
   const ua = (req.headers.get("user-agent") ?? "").slice(0, 300);
-  if (ip !== "?") for (const e of batch.events) if (e.acquisition?.click) e.acquisition.click = { ...e.acquisition.click, ip: ip.slice(0, 64), ...(ua ? { ua } : {}) };
+  // Web visits only: from mobile apps day2 never keeps the IP address or device
+  // details for ads, so the store privacy answers need no location data.
+  if (ip !== "?" && batch.device.platform === "web") for (const e of batch.events) if (e.acquisition?.click) e.acquisition.click = { ...e.acquisition.click, ip: ip.slice(0, 64), ...(ua ? { ua } : {}) };
   await deps.store.record(owner.appId, batch, now);
   return reply(204);
 }

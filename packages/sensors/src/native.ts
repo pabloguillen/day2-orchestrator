@@ -44,6 +44,14 @@ export type NativeOptions = {
   storage?: { getItem(key: string): Promise<string | null>; setItem(key: string, value: string): Promise<void> };
   /** Device model, e.g. from expo-device's `Device.modelName`. */
   model?: string;
+  /**
+   * The ad platform's click id (from the ad link that opened the app), for
+   * telling the platform which ad brought a sign-up. "off" (default): never
+   * sent — nothing counts as tracking. "after_consent": kept on the device
+   * and sent only when you call allowAdTracking() (on iOS after the App
+   * Tracking Transparency prompt returns "granted").
+   */
+  adClickIds?: "off" | "after_consent";
   enabled?: boolean;
 };
 
@@ -67,6 +75,8 @@ export type Day2Native = {
   treatment(id: string, holdout?: number): "on" | "holdout";
   /** Where this person first came from, when it was a day2 link (e.g. an ad), so the app can continue its promise. */
   cameFrom(): CameFrom | null;
+  /** The user agreed to ad measurement (iOS: ATT "granted"): sends the ad's click id, once. Needs adClickIds: "after_consent". */
+  allowAdTracking(): void;
   flush(): void;
   stop(): void;
 };
@@ -82,6 +92,7 @@ const NOOP: Day2Native = {
   identify() {},
   treatment: () => "on",
   cameFrom: () => null,
+  allowAdTracking() {},
   flush() {},
   stop() {},
 };
@@ -260,11 +271,16 @@ export function startDay2(opts: NativeOptions): Day2Native {
 
   // The visit, with where it came from (the link that opened the app).
   let from: string | null = null;
+  let pendingClick: { campaignId: string; click: { param: string; value: string } } | null = null;
+  let clickSent = false;
   if (opts.identity === "device" && opts.storage) void opts.storage.getItem("day2.from").then((v) => (from = from ?? v)).catch(() => {});
   void Linking.getInitialURL()
     .then((url) => {
-      const acq = url ? acquisitionFrom(url, "", "") : { channel: "direct" as const };
-      engine.track("visit", acq);
+      const full = url ? acquisitionFrom(url, "", "") : { channel: "direct" as const };
+      // The click id never leaves the device unless the user agrees (allowAdTracking).
+      const { click, ...acq } = (full ?? {}) as NonNullable<typeof full> & { click?: { param: string; value: string } };
+      if (click && opts.adClickIds === "after_consent" && acq.campaignId) pendingClick = { campaignId: acq.campaignId, click };
+      engine.track("visit", full ? acq : undefined);
       if (acq?.campaignId && !from) {
         from = acq.campaignId;
         if (opts.identity === "device") void opts.storage?.setItem("day2.from", from).catch(() => {});
@@ -314,6 +330,11 @@ export function startDay2(opts: NativeOptions): Day2Native {
     identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
     treatment: (id, holdout) => arm(engine.userId, id, holdout),
     cameFrom: () => cameFromTag(from),
+    allowAdTracking() {
+      if (opts.adClickIds !== "after_consent" || clickSent || !pendingClick) return;
+      clickSent = true;
+      engine.track("ad_click", { campaignId: pendingClick.campaignId, channel: "paid", click: pendingClick.click });
+    },
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

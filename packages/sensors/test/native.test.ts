@@ -21,7 +21,7 @@ mock.module("react-native", () => ({
   Dimensions: { get: () => ({ width: 390, height: 844 }) },
   Appearance: { getColorScheme: () => "dark" },
   PixelRatio: { getFontScale: () => 1.3 },
-  Linking: { getInitialURL: async () => "buddy://go/split?d2=B-4" },
+  Linking: { getInitialURL: async () => "buddy://go/split?d2=B-4.tiktok.v1&ttclid=E.C.P.abc123" },
   AppState: {
     addEventListener: (_t: string, cb: (s: string) => void) => {
       appState.push(cb);
@@ -72,6 +72,7 @@ beforeAll(async () => {
     release: "3.0.0",
     model: "iPhone 15",
     fetchContracts: false,
+    adClickIds: "after_consent",
     contracts: [
       { id: "cart.continue", kind: "action", target: "action:cart.continue", expect: [{ screen: "Checkout" }], within: 300, source: "code" },
       { id: "screen:Checkout", kind: "screen", route: "Checkout", require: ['[data-day2-require="total"]'], readyWithin: 300, source: "code" },
@@ -131,6 +132,16 @@ describe("React Native / Expo", () => {
     await wait(10);
     expect(failures().find((f) => f.contract === "builtin:stability.crash")).toMatchObject({ actual: "undefined is not an object (evaluating 'cart.items')" });
     day2.flush();
-    expect(sent.flatMap((b) => b.events)).toContainEqual(expect.objectContaining({ type: "visit", acquisition: { campaignId: "B-4", channel: "paid" } }));
+    expect(sent.flatMap((b) => b.events)).toContainEqual(expect.objectContaining({ type: "visit", acquisition: { campaignId: "B-4.tiktok.v1", channel: "paid" } }));
+    expect(day2.cameFrom()).toEqual({ experiment: "B-4", platform: "tiktok", ad: "v1" });
+  });
+
+  test("the ad's click id stays on the device until the user agrees, then goes once", async () => {
+    expect(JSON.stringify(sent)).not.toContain("E.C.P.abc123");
+    day2.allowAdTracking();
+    day2.allowAdTracking();
+    day2.flush();
+    const clicks = sent.flatMap((b) => b.events).filter((e) => e.type === "ad_click");
+    expect(clicks).toEqual([expect.objectContaining({ acquisition: { campaignId: "B-4.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.abc123" } } })]);
   });
 });

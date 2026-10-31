@@ -111,7 +111,7 @@ The console shows all of this under **Growth → Ads**:
 - what day2 learned;
 - the ads that were made.
 
-**Privacy.** The visitor's IP and browser are captured only on visits that came from an ad click, only to send that conversion, and removed after 7 days (`field-store` prune). The click id stays with the visit.
+**Privacy.** The visitor's IP and browser are captured only on web visits that came from an ad click, only to send that conversion, and removed after 7 days (`field-store` prune). The click id stays with the visit. Mobile apps send no click id at all unless the owner turns on ad conversions, and then only after the user agrees (App Tracking Transparency on iOS) — see `docs/store-privacy.md` for that and for the App Store / Google Play answers.
 
 ## Platforms
 

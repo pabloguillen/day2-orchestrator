@@ -147,6 +147,17 @@ describe("what an ad is judged on: cost, adjusted for fit — not absolute reten
 });
 
 describe("conversions back to the platforms", () => {
+  test("mobile apps: the click id arrives later, only after the user agreed — and without IP or browser", () => {
+    const events: EventLike[] = [
+      { type: "visit", at: ago(10), deviceId: "ph1", acquisition: { campaignId: "B-1.tiktok.v1", channel: "paid" } },
+      { type: "signup", at: ago(9.9), deviceId: "ph1" },
+      { type: "ad_click", at: ago(9.8), deviceId: "ph1", acquisition: { campaignId: "B-1.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.777" } } },
+      { type: "visit", at: ago(10), deviceId: "ph2", acquisition: { campaignId: "B-1.tiktok.v1", channel: "paid" } },
+      { type: "signup", at: ago(9.9), deviceId: "ph2" },
+    ];
+    const c = collectConversions({ platform: "tiktok", clickParam: "ttclid", events, sent: new Set(), pageUrl: () => "https://buddy.example/go/split" });
+    expect(c).toEqual([{ eventId: "ph1:signup", name: "signup", at: ago(9.9), click: { param: "ttclid", value: "E.C.P.777" }, pageUrl: "https://buddy.example/go/split" }]);
+  });
   test("only people from that platform's ads, with its click id, IP and browser; each once", () => {
     const events = [...visit("d1", "B-1.tiktok.v1", { signup: true, user: "u_1", click: "E.C.P.123" }), ...visit("d2", "B-1.tiktok.v1", { signup: true }), ...visit("d3", "B-1.meta.v1", { signup: true, click: "E.C.P.9" })];
     const page = () => "https://buddy.example/go/split";

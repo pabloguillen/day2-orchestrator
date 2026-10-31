@@ -49,6 +49,7 @@ import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { ATT_KEY, attTicket, disclosure, loadStorePrivacy, practicesFrom, saveStorePrivacy, STORE_PRIVACY_FILENAME, storeStatus } from "./store-privacy";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
 import { auditLoops, indexRepo, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
 import {
@@ -1503,6 +1504,66 @@ route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, param
   });
   if (!file.treatments.some((x) => x.id === idea.id)) saveRetention(path, addTreatment(file, idea, research, snapshot.rhythm, ticket.id, now));
   return json(await retentionResponse(app), { status: 201 });
+});
+
+// ---- Store privacy answers (App Store / Google Play) for what day2 adds ----
+
+async function storePrivacyResponse(app: AppEntry) {
+  const applies = appKind(app.repoPath) === "react-native";
+  const file = loadStorePrivacy(appFile(app, STORE_PRIVACY_FILENAME));
+  const tickets = applies ? (await loadBacklogFor(app)).tickets : [];
+  const practices = practicesFrom(tickets, file.settings);
+  const att = tickets.find((x) => x.source.key === ATT_KEY);
+  return {
+    applies,
+    settings: file.settings,
+    practices,
+    attTicket: att ? { id: att.id, state: att.state } : null,
+    stores: applies ? storeStatus(file, practices) : [],
+    answers: applies ? disclosure(practices) : null,
+  };
+}
+
+route("GET", "/api/apps/:id/store-privacy", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json(await storePrivacyResponse(app));
+});
+
+/** The owner updated the answers in App Store Connect / the Play Console. */
+route("POST", "/api/apps/:id/store-privacy/confirm", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => ({}))) as { store?: string };
+  if (body.store !== "ios" && body.store !== "android") throw new HttpError(400, "Say which store: ios or android.");
+  const view = await storePrivacyResponse(app);
+  if (!view.applies) throw new HttpError(409, "Only mobile apps have store privacy answers.");
+  const path = appFile(app, STORE_PRIVACY_FILENAME);
+  const file = loadStorePrivacy(path);
+  const status = view.stores.find((x) => x.store === body.store)!;
+  file.confirmed[body.store] = { version: status.version, practices: view.practices, at: new Date().toISOString(), by: (await actorName(t)) ?? null };
+  saveStorePrivacy(path, file);
+  return json(await storePrivacyResponse(app));
+});
+
+/** Ad conversions for the mobile app (with the tracking prompt), and a fixed device id. */
+route("PUT", "/api/apps/:id/store-privacy/settings", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => ({}))) as { adConversions?: unknown; deviceId?: unknown };
+  const path = appFile(app, STORE_PRIVACY_FILENAME);
+  const file = loadStorePrivacy(path);
+  if (body.adConversions === "off" || body.adConversions === "with_consent") file.settings.adConversions = body.adConversions;
+  if (typeof body.deviceId === "boolean") file.settings.deviceId = body.deviceId;
+  saveStorePrivacy(path, file);
+  if (file.settings.adConversions === "with_consent") {
+    const now = new Date();
+    await withBacklog(backlogFile(app), (b) => {
+      if (b.tickets.some((x) => x.source.key === ATT_KEY && x.state !== "parked")) return { backlog: b, result: null };
+      const r = createTicket(b, attTicket(), now);
+      return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+    });
+  }
+  return json(await storePrivacyResponse(app));
 });
 
 route("GET", "/api/apps/:id/field", async (_req, params, t) => {
