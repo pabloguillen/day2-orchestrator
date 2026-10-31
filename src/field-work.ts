@@ -275,7 +275,7 @@ export function installItem(app: AppEntry, opts: { key: string; endpoint: string
       "",
       "Don't change any behaviour; this only adds the checks.",
       ...(native
-        ? ["", "Before the release with this goes to the App Store and Google Play, the store privacy answers need updating (App Privacy and Data safety). day2 lists the exact changes on the app's Store privacy page; ad click ids stay off unless the owner turns on ad conversions there."]
+        ? ["", "Before the release with this goes to the App Store and Google Play, the store privacy answers need updating (App Privacy and Data safety). day2 lists the exact changes on the app's Privacy page; ad click ids stay off unless the owner turns on ad conversions there."]
         : []),
     ].join("\n"),
     doneWhen: [

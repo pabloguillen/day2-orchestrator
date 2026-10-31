@@ -49,6 +49,7 @@ import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { findNotice, noticeKey, noticeSection, noticeTicket, noticeVersion } from "./privacy-notice";
 import { ATT_KEY, attTicket, disclosure, loadStorePrivacy, practicesFrom, saveStorePrivacy, STORE_PRIVACY_FILENAME, storeStatus } from "./store-privacy";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
 import { auditLoops, indexRepo, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
@@ -1509,10 +1510,11 @@ route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, param
 // ---- Store privacy answers (App Store / Google Play) for what day2 adds ----
 
 async function storePrivacyResponse(app: AppEntry) {
-  const applies = appKind(app.repoPath) === "react-native";
+  const kind = appKind(app.repoPath);
+  const applies = kind === "react-native";
   const file = loadStorePrivacy(appFile(app, STORE_PRIVACY_FILENAME));
-  const tickets = applies ? (await loadBacklogFor(app)).tickets : [];
-  const practices = practicesFrom(tickets, file.settings);
+  const tickets = applies || kind === "web" ? (await loadBacklogFor(app)).tickets : [];
+  const practices = practicesFrom(tickets, applies ? file.settings : { adConversions: "off", deviceId: false });
   const att = tickets.find((x) => x.source.key === ATT_KEY);
   return {
     applies,
@@ -1521,6 +1523,30 @@ async function storePrivacyResponse(app: AppEntry) {
     attTicket: att ? { id: att.id, state: att.state } : null,
     stores: applies ? storeStatus(file, practices) : [],
     answers: applies ? disclosure(practices) : null,
+    notice: kind === "web" || applies ? noticeView(app, file, tickets, practices, applies) : null,
+  };
+}
+
+/** The privacy notice section for what day2 does, and whether the app's notice has it. */
+function noticeView(app: AppEntry, file: ReturnType<typeof loadStorePrivacy>, tickets: Ticket[], practices: ReturnType<typeof practicesFrom>, mobile: boolean) {
+  const ads = loadAds(appFile(app, ADS_FILENAME));
+  // Web: sign-ups go back to every platform with a conversion setup. Mobile: only with consent (ATT).
+  const adPlatforms = mobile && !practices.adConversions ? [] : (Object.keys(ads.conversions) as PlatformId[]).map((id) => platformInfo(id).name);
+  const facts = { mobile, ...practices, adPlatforms, adConsent: mobile && practices.adConversions };
+  const found = findNotice(app.repoPath);
+  const sections = { en: noticeSection(facts, app.name, "en"), de: noticeSection(facts, app.name, "de") };
+  const lang = found?.lang ?? "en";
+  const section = sections[lang];
+  const version = section ? noticeVersion(section) : null;
+  const ticket = version ? tickets.find((x) => x.source.key === noticeKey(version)) : undefined;
+  return {
+    sections,
+    lang,
+    version,
+    found: found ? { path: found.path, current: found.version !== null && found.version === version, hasSection: found.version !== null } : null,
+    ticket: ticket ? { id: ticket.id, state: ticket.state } : null,
+    confirmed: file.notice ?? null,
+    upToDate: !version || found?.version === version || file.notice?.version === version,
   };
 }
 
@@ -1541,6 +1567,37 @@ route("POST", "/api/apps/:id/store-privacy/confirm", async (req, params, t) => {
   const file = loadStorePrivacy(path);
   const status = view.stores.find((x) => x.store === body.store)!;
   file.confirmed[body.store] = { version: status.version, practices: view.practices, at: new Date().toISOString(), by: (await actorName(t)) ?? null };
+  saveStorePrivacy(path, file);
+  return json(await storePrivacyResponse(app));
+});
+
+/** The owner says yes: day2 edits the app's own privacy notice (as a ticket, reviewed like any change). */
+route("POST", "/api/apps/:id/privacy-notice/edit", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const view = await storePrivacyResponse(app);
+  const n = view.notice;
+  if (!n?.version) throw new HttpError(409, "There's nothing about day2 to put in the privacy notice yet.");
+  const found = findNotice(app.repoPath);
+  if (!found) throw new HttpError(409, "day2 can't find the privacy notice in the app's code — copy the section into it instead.");
+  const now = new Date();
+  await withBacklog(backlogFile(app), (b) => {
+    if (b.tickets.some((x) => x.source.key === noticeKey(n.version!))) return { backlog: b, result: null };
+    const r = createTicket(b, noticeTicket(found, n.sections[found.lang]!, n.version!), now);
+    return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+  });
+  return json(await storePrivacyResponse(app));
+});
+
+/** The owner added the section to a notice day2 can't see (hosted elsewhere). */
+route("POST", "/api/apps/:id/privacy-notice/confirm", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const view = await storePrivacyResponse(app);
+  if (!view.notice?.version) throw new HttpError(409, "There's nothing about day2 to put in the privacy notice yet.");
+  const path = appFile(app, STORE_PRIVACY_FILENAME);
+  const file = loadStorePrivacy(path);
+  file.notice = { version: view.notice.version, at: new Date().toISOString(), by: (await actorName(t)) ?? null };
   saveStorePrivacy(path, file);
   return json(await storePrivacyResponse(app));
 });

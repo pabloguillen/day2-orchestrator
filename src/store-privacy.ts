@@ -57,6 +57,8 @@ export type Settings = {
 export type StorePrivacyFile = {
   settings: Settings;
   confirmed: Partial<Record<Store, { version: string; practices: Practices; at: string; by: string | null }>>;
+  /** The owner added day2's section to a privacy notice day2 can't see (e.g. hosted elsewhere). */
+  notice?: { version: string; at: string; by: string | null };
 };
 
 export function loadStorePrivacy(path: string): StorePrivacyFile {
@@ -64,7 +66,7 @@ export function loadStorePrivacy(path: string): StorePrivacyFile {
   if (!existsSync(path)) return empty;
   try {
     const p = JSON.parse(readFileSync(path, "utf-8")) as Partial<StorePrivacyFile>;
-    return { settings: { ...empty.settings, ...(p.settings ?? {}) }, confirmed: p.confirmed ?? {} };
+    return { settings: { ...empty.settings, ...(p.settings ?? {}) }, confirmed: p.confirmed ?? {}, ...(p.notice ? { notice: p.notice } : {}) };
   } catch {
     return empty;
   }
@@ -216,7 +218,7 @@ export function attTicket(): NewTicketInput {
       "3. Android has no such prompt; call day2.allowAdTracking() once the user accepts ad measurement in the app's own consent (or not at all if the app has none).",
       "4. Add a test: allowAdTracking is not called when permission is denied.",
       "",
-      "Before the release with this change, update the store privacy answers (day2 lists the exact changes on the app's Store privacy page).",
+      "Before the release with this change, update the store privacy answers (day2 lists the exact changes on the app's Privacy page).",
     ].join("\n"),
     doneWhen: ['startDay2 runs with adClickIds: "after_consent"', 'iOS shows the tracking prompt and calls day2.allowAdTracking() only after "granted"', "NSUserTrackingUsageDescription is set", "A test covers denied permission", "The app builds and its tests pass"],
     priority: 2,
