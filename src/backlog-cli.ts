@@ -1,4 +1,5 @@
 import { allApps } from "./apps-store";
+import { runReleases } from "./mobile-release/run";
 import { loadBacklog } from "./backlog";
 import { backlogFile, syncAppTrackers, tick } from "./backlog-work";
 import { db } from "./db";
@@ -68,6 +69,8 @@ export async function tickAll(opts: { only?: string; startWork: boolean }): Prom
             return item ? [item] : [];
           },
         });
+        // Mobile apps: ship what's merged (over-the-air update or store release).
+        if (startWork) await runReleases(app).catch((err: Error) => console.warn(`[day2-release] ${app.name}: ${err.message}`));
         const sync = await syncAppTrackers(app, tenant.integrations);
         console.log(
           `[day2-backlog] ${app.name}: ${report.created.length} new, ${report.updated.length} updated, ${report.reranked} re-ranked, ` +

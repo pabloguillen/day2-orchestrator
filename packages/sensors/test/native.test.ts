@@ -144,4 +144,9 @@ describe("React Native / Expo", () => {
     const clicks = sent.flatMap((b) => b.events).filter((e) => e.type === "ad_click");
     expect(clicks).toEqual([expect.objectContaining({ acquisition: { campaignId: "B-4.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.abc123" } } })]);
   });
+
+  test("release tags: store version, build, and the update it runs", () => {
+    expect(mod.releaseTag("1.4.0", "23", "3f2a9c1e-77aa-4b0e-9d2a-0123456789ab")).toBe("1.4.0(23)@3f2a9c1e");
+    expect(mod.releaseTag("1.4.0", "23", null)).toBe("1.4.0(23)");
+  });
 });

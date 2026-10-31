@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { dbReleaseCredentials, fileReleaseCredentials, type ReleaseCredentialStore } from "./mobile-release/credentials";
 import { dirname, join, resolve, sep } from "node:path";
 import { $ } from "bun";
 import type { AppEntry } from "./apps-registry";
@@ -111,6 +112,13 @@ export function adConnections(): ConnectionStore {
   if (serverMode() === "accounts") return dbConnections(db());
   ensureLocalSecretsKey(join(dataDir(), ".day2-secrets-key"));
   return fileConnections(join(dataDir(), ".day2-ad-connections.json"));
+}
+
+/** Store credentials for releasing mobile apps (mobile-release/credentials.ts). */
+export function releaseCredentials(): ReleaseCredentialStore {
+  if (serverMode() === "accounts") return dbReleaseCredentials(db());
+  ensureLocalSecretsKey(join(dataDir(), ".day2-secrets-key"));
+  return fileReleaseCredentials(join(dataDir(), ".day2-release-credentials.json"));
 }
 
 /** Conversions already sent to the ad platforms (ads/conversions.ts). */

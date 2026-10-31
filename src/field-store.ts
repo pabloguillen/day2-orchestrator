@@ -77,8 +77,24 @@ export interface FieldStore {
   activity(appId: string, sinceDay: string): Promise<{ users: UserActivity[]; older: number }>;
   setRetention(appId: string, snapshot: RetentionSnapshot): Promise<void>;
   retention(appId: string): Promise<RetentionSnapshot | null>;
+  /**
+   * Per release key: devices (launches, by default) since `since`, and how
+   * many of them crashed or hit each failing check. A key is a release the
+   * app reports ("1.4.0(23)" = that store build without updates) or, starting
+   * with "@", an over-the-air update on any build ("@a1b2c3d4" matches
+   * "1.4.0(23)@a1b2c3d4" and "1.4.1(24)@a1b2c3d4"), or ending with "*", a
+   * store build with or without updates ("1.4.0(23)*"). For comparing a new
+   * release with the one before it.
+   */
+  releaseHealth(appId: string, releases: string[], since: Date): Promise<ReleaseHealth[]>;
   prune(now: Date): Promise<void>;
 }
+
+export type ReleaseHealth = { release: string; devices: number; crashed: number; failing: Record<string, number> };
+/** Does a reported release belong to a release key (see releaseHealth)? "@id" = that update on any build; "1.4.0(23)*" = that build with or without updates; else exact. */
+export const releaseMatches = (key: string, reported: string | null | undefined) =>
+  Boolean(reported) && (key.startsWith("@") ? reported!.endsWith(key) : key.endsWith("*") ? reported!.startsWith(key.slice(0, -1)) : reported === key);
+export const CRASH_CONTRACT = "builtin:stability.crash";
 
 export interface IngestKeys {
   /** The app's key, made on first use. */
@@ -220,6 +236,14 @@ export function fileFieldStore(root: string): FieldStore {
         }
         writeJson(join(d, "users.json"), users);
       }
+      if (batch.release) {
+        const rels = readJson<Record<string, Record<string, string>>>(join(d, "release-devices.json"), {});
+        const r = (rels[batch.release] ??= {});
+        if (!r[deviceId]) {
+          r[deviceId] = now.toISOString();
+          writeJson(join(d, "release-devices.json"), rels);
+        }
+      }
       const meta = readJson<FieldMeta | null>(join(d, "meta.json"), null);
       writeJson(join(d, "meta.json"), {
         lastSeenAt: now.toISOString(),
@@ -294,6 +318,19 @@ export function fileFieldStore(root: string): FieldStore {
     async retention(appId) {
       return readJson<RetentionSnapshot | null>(join(dir(appId), "retention.json"), null);
     },
+    async releaseHealth(appId, releases, since) {
+      const rels = readJson<Record<string, Record<string, string>>>(join(dir(appId), "release-devices.json"), {});
+      const from = since.toISOString();
+      const fails = readLines<StoredFailure>(join(dir(appId), "failures.jsonl")).filter((f) => f.at >= from && releases.some((k) => releaseMatches(k, f.release)));
+      return releases.map((release) => {
+        const devs = new Set(Object.entries(rels).filter(([r]) => releaseMatches(release, r)).flatMap(([, d]) => Object.entries(d).filter(([, at]) => at >= from).map(([id]) => id)));
+        const by = new Map<string, Set<string>>();
+        for (const f of fails) if (releaseMatches(release, f.release)) (by.get(f.contract) ?? by.set(f.contract, new Set()).get(f.contract)!).add(f.deviceId);
+        const crashed = by.get(CRASH_CONTRACT)?.size ?? 0;
+        by.delete(CRASH_CONTRACT);
+        return { release, devices: Math.max(devs.size, crashed), crashed, failing: Object.fromEntries([...by].map(([c, d]) => [c, d.size])) };
+      });
+    },
     async prune(now) {
       if (!existsSync(root)) return;
       const { readdirSync } = await import("node:fs");
@@ -309,6 +346,12 @@ export function fileFieldStore(root: string): FieldStore {
           if (!existsSync(p)) continue;
           const keep = readLines<{ at: string }>(p).filter((x) => x.at >= cut);
           writeFileSync(p, keep.map((x) => JSON.stringify(x)).join("\n") + (keep.length ? "\n" : ""));
+        }
+        const relPath = join(d, "release-devices.json");
+        if (existsSync(relPath)) {
+          const rels = readJson<Record<string, Record<string, string>>>(relPath, {});
+          const kept = Object.fromEntries(Object.entries(rels).map(([r, devs]) => [r, Object.fromEntries(Object.entries(devs).filter(([, at]) => at >= failCut))] as const).filter(([, devs]) => Object.keys(devs).length));
+          writeJson(relPath, kept);
         }
         // Visitors' IP and browser (kept only for sending ad conversions) go after 7 days.
         const ipCut = new Date(now.getTime() - 7 * DAY).toISOString();
@@ -387,6 +430,8 @@ export function dbFieldStore(sql: SQL): FieldStore {
                    ON CONFLICT (app_id, user_id) DO UPDATE SET first_seen = LEAST(field_users.first_seen, EXCLUDED.first_seen), last_seen = GREATEST(field_users.last_seen, EXCLUDED.last_seen)`;
           for (const day of sorted) await tx`INSERT INTO field_user_days (app_id, user_id, day) VALUES (${appId}, ${user}, ${day}) ON CONFLICT DO NOTHING`;
         }
+        if (batch.release)
+          await tx`INSERT INTO field_release_devices (app_id, release, device_id, platform, first_seen) VALUES (${appId}, ${batch.release.slice(0, 120)}, ${batch.device.id}, ${batch.device.platform}, ${now.toISOString()}) ON CONFLICT DO NOTHING`;
         await tx`INSERT INTO field_meta (app_id, last_seen_at, last_release, platforms) VALUES (${appId}, ${now.toISOString()}, ${batch.release ?? null}, ARRAY[${batch.device.platform}]::text[])
                  ON CONFLICT (app_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
                    last_release = COALESCE(EXCLUDED.last_release, field_meta.last_release),
@@ -466,11 +511,24 @@ export function dbFieldStore(sql: SQL): FieldStore {
       const rows = (await sql`SELECT snapshot FROM app_retention WHERE app_id = ${appId}`) as Array<{ snapshot: RetentionSnapshot | string }>;
       return rows[0] ? parse(rows[0].snapshot) : null;
     },
+    async releaseHealth(appId, releases, since) {
+      const out: ReleaseHealth[] = [];
+      for (const release of releases) {
+        const clean = release.replace(/[%_\\*]/g, "");
+        const pattern = release.startsWith("@") ? `%${clean}` : release.endsWith("*") ? `${clean}%` : clean;
+        const [d] = (await sql`SELECT COUNT(*)::int AS n FROM field_release_devices WHERE app_id = ${appId} AND release LIKE ${pattern} AND first_seen >= ${since.toISOString()}`) as Array<{ n: number }>;
+        const fails = (await sql`SELECT contract, COUNT(DISTINCT device_id)::int AS n FROM field_failures WHERE app_id = ${appId} AND release LIKE ${pattern} AND at >= ${since.toISOString()} GROUP BY contract`) as Array<{ contract: string; n: number }>;
+        const crashed = fails.find((f) => f.contract === CRASH_CONTRACT)?.n ?? 0;
+        out.push({ release, devices: Math.max(d?.n ?? 0, crashed), crashed, failing: Object.fromEntries(fails.filter((f) => f.contract !== CRASH_CONTRACT).map((f) => [f.contract, f.n])) });
+      }
+      return out;
+    },
     async prune(now) {
       await sql`UPDATE field_events SET acquisition = acquisition #- '{click,ip}' #- '{click,ua}' WHERE at < ${new Date(now.getTime() - 7 * DAY).toISOString()} AND acquisition ? 'click' AND (acquisition->'click' ? 'ip' OR acquisition->'click' ? 'ua')`;
       await sql`DELETE FROM field_user_days WHERE day < ${dayOf(new Date(now.getTime() - USER_DAY_DAYS * DAY).toISOString())}`;
       await sql`DELETE FROM field_users WHERE last_seen < ${dayOf(new Date(now.getTime() - USER_DAYS * DAY).toISOString())}`;
       await sql`DELETE FROM field_failures WHERE at < ${new Date(now.getTime() - FAILURE_DAYS * DAY).toISOString()}`;
+      await sql`DELETE FROM field_release_devices WHERE first_seen < ${new Date(now.getTime() - FAILURE_DAYS * DAY).toISOString()}`;
       await sql`DELETE FROM field_events WHERE at < ${new Date(now.getTime() - EVENT_DAYS * DAY).toISOString()}`;
       await sql`DELETE FROM field_counts WHERE day < ${dayOf(new Date(now.getTime() - EVENT_DAYS * DAY).toISOString())}`;
     },

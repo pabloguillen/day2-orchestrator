@@ -12,6 +12,16 @@ RUN apt-get update \
  && apt-get update && apt-get install -y --no-install-recommends gh \
  && apt-get purge -y gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
+# Node + eas-cli: mobile releases (src/mobile-release/eas.ts) run eas, and
+# npx expo / expo-updates in app checkouts. Pinned; the adapter falls back to
+# `npx eas-cli@<same version>` when eas isn't on PATH.
+COPY --from=node:22.20.0-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22.20.0-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && npm install -g eas-cli@27.2.0 \
+ && npm cache clean --force
+
 # Commits day2 makes in customer repos are authored as day2.
 RUN git config --system user.name "day2" \
  && git config --system user.email "bot@day2.dev" \

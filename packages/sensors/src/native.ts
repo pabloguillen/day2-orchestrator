@@ -83,6 +83,18 @@ export type Day2Native = {
 
 export { arm, hashUser, mayNudge, stateOf } from "./lifecycle";
 
+/**
+ * The release to report: store version and build, plus the over-the-air
+ * update the app runs (expo-updates), so day2 can tell each update's crash
+ * rate from the one before — and roll it back. E.g.
+ * releaseTag(Application.nativeApplicationVersion, Application.nativeBuildVersion, Updates.isEmbeddedLaunch ? null : Updates.updateId)
+ * → "1.4.0(23)@3f2a9c1e"; the store build itself → "1.4.0(23)".
+ */
+export function releaseTag(version: string | null | undefined, build: string | null | undefined, updateId: string | null | undefined): string {
+  const v = `${version ?? "0"}${build ? `(${build})` : ""}`;
+  return (updateId ? `${v}@${updateId.replace(/-/g, "").slice(0, 8)}` : v).slice(0, 60);
+}
+
 const NOOP: Day2Native = {
   track() {},
   check() {},

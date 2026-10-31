@@ -49,6 +49,11 @@ import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
+import { parseCredential } from "./mobile-release/credentials";
+import { readiness } from "./mobile-release/setup";
+import { runReleases, SETUP_KEY } from "./mobile-release/run";
+import type { Release } from "./mobile-release/types";
 import { findNotice, noticeKey, noticeSection, noticeTicket, noticeVersion } from "./privacy-notice";
 import { ATT_KEY, attTicket, disclosure, loadStorePrivacy, practicesFrom, saveStorePrivacy, STORE_PRIVACY_FILENAME, storeStatus } from "./store-privacy";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
@@ -94,6 +99,7 @@ import {
   assetStore,
   platformIdentities,
   sentConversions,
+  releaseCredentials,
   fieldStore,
   ingestKeys,
   platformTools,
@@ -1505,6 +1511,110 @@ route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, param
   });
   if (!file.treatments.some((x) => x.id === idea.id)) saveRetention(path, addTreatment(file, idea, research, snapshot.rhythm, ticket.id, now));
   return json(await retentionResponse(app), { status: 201 });
+});
+
+// ---- Mobile releases (src/mobile-release/): updates and store releases by day2 ----
+
+async function mobileReleasesResponse(app: AppEntry) {
+  const applies = appKind(app.repoPath) === "react-native";
+  const file = loadReleases(appFile(app, RELEASES_FILENAME));
+  if (!applies) return { applies, enabled: false, settings: file.settings, setup: null, accounts: null, current: null, history: [], shipped: null };
+  const backlog = await loadBacklogFor(app);
+  const setupT = backlog.tickets.find((x) => x.source.key === SETUP_KEY);
+  const ready = readiness(app.repoPath, (await fieldStore().meta(app.id))?.lastRelease ?? null);
+  const creds = await releaseCredentials().list(app.id);
+  const acct = (k: "expo" | "asc" | "play") => {
+    const c = creds.find((x) => x.kind === k);
+    return c ? { label: c.label, setBy: c.setBy, setAt: c.setAt } : null;
+  };
+  const view = (r: Release) => ({ ...r, log: r.log.slice(-30) });
+  return {
+    applies,
+    enabled: file.enabled,
+    settings: file.settings,
+    setup: { code: ready.code, ticket: setupT ? { id: setupT.id, state: setupT.state } : null },
+    accounts: { expo: acct("expo"), asc: acct("asc"), play: acct("play") },
+    current: file.current ? view(file.current) : null,
+    history: file.history.slice(0, 10).map(view),
+    shipped: file.shipped,
+  };
+}
+
+route("GET", "/api/apps/:id/mobile-releases", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  return json(await mobileReleasesResponse(app));
+});
+
+/** Turn releases by day2 on/off, and how far it goes by itself. */
+route("PUT", "/api/apps/:id/mobile-releases/settings", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const path = appFile(app, RELEASES_FILENAME);
+  const file = loadReleases(path);
+  if (typeof body.enabled === "boolean") {
+    file.enabled = body.enabled;
+    file.enabledBy = body.enabled ? ((await actorName(t)) ?? null) : null;
+  }
+  if (body.updates === "auto" || body.updates === "off") file.settings.updates = body.updates;
+  if (body.builds === "auto" || body.builds === "off") file.settings.builds = body.builds;
+  if (body.storeRelease === "auto" || body.storeRelease === "approve_notes") file.settings.storeRelease = body.storeRelease;
+  saveReleases(path, file);
+  if (file.enabled) void runReleases(app);
+  return json(await mobileReleasesResponse(app));
+});
+
+/** Connect Expo / App Store Connect / Google Play once (stored encrypted, never shown again). */
+route("PUT", "/api/apps/:id/mobile-releases/accounts/:kind", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const kind = params.kind;
+  if (kind !== "expo" && kind !== "asc" && kind !== "play") throw new HttpError(404, "Unknown account.");
+  let parsed;
+  try {
+    parsed = parseCredential(kind, await req.json().catch(() => ({})));
+  } catch (err) {
+    throw new HttpError(400, (err as Error).message);
+  }
+  await releaseCredentials().set(app.id, kind, parsed.value as never, parsed.label, (await actorName(t)) ?? null);
+  return json(await mobileReleasesResponse(app));
+});
+
+route("DELETE", "/api/apps/:id/mobile-releases/accounts/:kind", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  if (params.kind !== "expo" && params.kind !== "asc" && params.kind !== "play") throw new HttpError(404, "Unknown account.");
+  await releaseCredentials().remove(app.id, params.kind);
+  return json(await mobileReleasesResponse(app));
+});
+
+/** The owner edits and/or approves the release notes of the store release in flight. */
+route("POST", "/api/apps/:id/mobile-releases/notes", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => ({}))) as { text?: unknown; approve?: unknown };
+  const path = appFile(app, RELEASES_FILENAME);
+  const file = loadReleases(path);
+  const r = file.current;
+  if (!r || r.kind !== "store" || !r.notes) throw new HttpError(409, "There are no release notes waiting.");
+  if (typeof body.text === "string" && body.text.trim()) r.notes.text = body.text.trim().slice(0, 4000);
+  if (body.approve === true) r.notes = { ...r.notes, approved: true, by: (await actorName(t)) ?? null, at: new Date().toISOString() };
+  saveReleases(path, file);
+  if (body.approve === true) void runReleases(app);
+  return json(await mobileReleasesResponse(app));
+});
+
+/** Stop the release in flight: an update goes back, a store rollout is paused/halted. */
+route("POST", "/api/apps/:id/mobile-releases/stop", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const path = appFile(app, RELEASES_FILENAME);
+  const file = loadReleases(path);
+  if (!file.current) throw new HttpError(409, "Nothing is being released right now.");
+  file.current.stopRequested = { by: (await actorName(t)) ?? null, at: new Date().toISOString() };
+  saveReleases(path, file);
+  void runReleases(app);
+  return json(await mobileReleasesResponse(app));
 });
 
 // ---- Store privacy answers (App Store / Google Play) for what day2 adds ----

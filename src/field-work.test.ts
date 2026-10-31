@@ -113,7 +113,8 @@ describe("field contracts in day2's loops", () => {
     mkdirSync(rn, { recursive: true });
     writeFileSync(join(rn, "package.json"), '{"dependencies":{"expo":"52","react-native":"0.76"}}');
     const rnItem = installItem({ ...app, repoPath: rn }, { key: "d2k_testtesttesttesttest", endpoint: "https://day2.example", candidates: [{ name: "cart.help", origin: "src/Cart.tsx:5", label: "Help", expect: [{ screen: "Help" }] }] })!;
-    expect(rnItem.description).toContain('import { startDay2, useDay2Mark } from "./day2/native.js";');
+    expect(rnItem.description).toContain('import { startDay2, useDay2Mark, releaseTag } from "./day2/native.js";');
+    expect(rnItem.description).toContain("release: releaseTag(Application.nativeApplicationVersion");
     expect(rnItem.description).toContain("day2.trackNavigation(navigationRef)");
     expect(rnItem.description).toContain('src/Cart.tsx:5 "Help" → day2.action("cart.help", …)');
     expect(rnItem.description).toContain("5. When a user signs in or a signed-in session is restored, call day2.identify(user.id)");
