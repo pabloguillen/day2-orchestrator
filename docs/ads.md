@@ -95,6 +95,15 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
    - **Growth allocator:** every ad's people and results count as format trials, once.
 8. **Kill switch.** The kill switch, or turning the autopilot off, pauses every ad on every platform.
 
+## Apps in the App Store and Google Play: where ads lead
+
+For a mobile app, day2 finds its store listings itself (`ads/app-links.ts`: the bundle id and package from the app config, the App Store id from Apple's public lookup, the Google Play listing when it's public). When the app also has a website, the owner chooses on the Ads tab where new ads lead (`ads/destination.ts`, `PUT /api/apps/:id/growth/ads/destination`):
+
+- **Your website** (the default when there is one). Each ad leads to the experiment's page on the website. A phone that arrives from an ad (`?d2=` in the address) goes straight on to the App Store or Google Play; a computer stays on the page, whose store badges point at the right store. The website does this with one script tag from day2 (`/api/l/<app>/handoff.js`) and badges marked `data-day2-store`; day2 adds both with one ticket in the app's repo and only launches website ads once the **live** website loads the script (it checks the page each pass). The experiment's ticket covers the website page and the app's first minute.
+- **Straight to the stores.** Each ad leads to day2's smart link (`/api/l/<app>?d2=…`), which counts the tap per ad and redirects to the visitor's store; a computer gets a page with both badges. Ad images and Motion videos use the app's App Store screenshots. The experiment's ticket is the app's first minute.
+
+Either way the ad's tag reaches the store: Google Play's install referrer (read by the field library on the first open, so results are exact per ad through sign-up) and an App Store campaign token (counted by Apple; per-platform results on iPhone). Running ads keep the link they launched with; the choice applies to new ads. Apps without a website use the stores; web apps without store listings use their website.
+
 ## Ads and retention
 
 An ad brings people to the product. Whether they stay is mostly the product and day2's retention engine (`docs/retention.md`). So the two are judged separately and connected on purpose (`ads/results.ts`, `ads/retention-link.ts`, `retention-pass.ts`):

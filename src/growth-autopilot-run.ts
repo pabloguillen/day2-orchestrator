@@ -1,4 +1,7 @@
 import type { AppEntry } from "./apps-registry";
+import { hasStores, refreshAppLinks, smartLink, storeScreenshots } from "./ads/app-links";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { work } from "./backlog-cli";
 import { metaAdsViaAgent } from "./ads";
 import { researchCompetitorDistributionAngles } from "./competitor-feed";
@@ -12,7 +15,10 @@ import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
 import { withCreditContext, type CreditContext } from "./metered-query";
 import type { AppProfile } from "./onboarding";
 import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } from "./tenant";
-import { appEvents, pageHealth } from "./field-work";
+import { appEvents, appKind, pageHealth } from "./field-work";
+import { checkHandoff, handoffTicket } from "./ads/destination";
+import { createTicket, rankBacklog, withBacklog } from "./backlog";
+import { backlogFile } from "./backlog-work";
 import { resolve } from "node:path";
 import { researchRetention } from "./retention";
 import { resolvePlatforms, videoProviders } from "./ads/registry";
@@ -84,6 +90,34 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
         sentConversions: sentConversions(),
         users: async (a: AppEntry) => (await fieldStore().activity(a.id, new Date(Date.now() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users,
         retention: (a: AppEntry) => fieldStore().retention(a.id),
+        ...(await (async () => {
+          // Apps in the App Store / Google Play: ads can lead straight to the stores through day2's smart link,
+          // or to the website, which then sends phones on to the stores (the owner's choice, ads/destination.ts).
+          if (appKind(app.repoPath) !== "react-native") return {};
+          const links = await refreshAppLinks(app.repoPath, new Date()).catch(() => null);
+          if (!links || !hasStores(links)) return {};
+          const pub = authConfig().publicUrl;
+          return {
+            storeLink: smartLink(pub, app.id),
+            storeScreens: () => storeScreenshots(links, join(tmpdir(), `day2-store-shots-${app.id}`)),
+            handoff: {
+              pageOk: (url: string) => checkHandoff(url, pub, app.id),
+              async ensure() {
+                if (!pub.startsWith("https://")) return { ready: false, ticketId: null, why: "day2 needs its public https address (DAY2_PUBLIC_URL) before the website can load its handoff script" };
+                if (app.appBaseUrl && (await checkHandoff(app.appBaseUrl, pub, app.id))) return { ready: true, ticketId: null, why: null };
+                const input = handoffTicket(app, pub, links);
+                const t = await withBacklog(backlogFile(app), (b) => {
+                  const have = b.tickets.find((x) => x.source.key === input.source.key && x.state !== "parked");
+                  if (have) return { backlog: b, result: have };
+                  const now = new Date();
+                  const r = createTicket(b, input, now);
+                  return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
+                });
+                return { ready: false, ticketId: t.id, why: t.state === "done" ? "the website change is merged but the live website doesn't load day2's handoff script yet (is it deployed?)" : "the website doesn't send phones on to the App Store / Google Play yet" };
+              },
+            },
+          };
+        })()),
       };
     })(),
     retention: {

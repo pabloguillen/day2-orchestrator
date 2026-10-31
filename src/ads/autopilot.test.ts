@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import { buyTopUp, readCredits, setPlan } from "../credits";
-import { BETS_FILENAME, saveBets, type Bet } from "../growth-bets";
+import { BETS_FILENAME, loadBets, saveBets, type Bet } from "../growth-bets";
 import type { EventLike } from "../metrics/types";
 import type { AppProfile } from "../onboarding";
 import { fileAssetStore, type StoredAsset } from "./assets";
@@ -349,5 +349,86 @@ describe("a pass", () => {
     ];
     await run(new Date("2026-11-02T08:00:00Z"));
     expect(loadAds(join(repo, ADS_FILENAME)).campaigns.every((c) => c.status === "stopped")).toBe(true);
+  });
+});
+
+describe("where ads lead: the website or straight to the stores", () => {
+  const root = mkdtempSync(join(tmpdir(), "day2-ads-dest-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const repo = join(root, "app");
+  mkdirSync(repo, { recursive: true });
+  const app: AppEntry = { id: "app_d", name: "Dotty", repoPath: repo, connectionMethod: "local_path", appBaseUrl: "https://dotty.example", addedAt: "2026-09-01T00:00:00Z" };
+  const profile = { purpose: "Friends on a map", targetUsers: "Friends", featureMap: ["Share a moment"], styleGuide: { colors: ["#fdf6d8"], framework: "react-native" } } as unknown as AppProfile;
+  const credits = { dir: join(root, "credits") };
+  mkdirSync(credits.dir, { recursive: true });
+  const assets = fileAssetStore(join(root, "assets"), "https://day2.example");
+  const tiktok = new FakePlatform("tiktok");
+  let handoffReady = false;
+  let pageChecks: string[] = [];
+  const logs: string[] = [];
+  const deps = (): PlatformAdsDeps => ({
+    credits,
+    platforms: new Map<PlatformId, AdPlatform>([["tiktok", tiktok]]),
+    infos: new Map<PlatformId, PlatformInfo>([["tiktok", { ...INFOS.tiktok!, identity: "none", minDailyUsd: 1 }]]),
+    identities: filePlatformIdentities(join(root, "identities.json")),
+    assets,
+    providers: { creatify: null, runway: null },
+    events: async () => [],
+    pageHealth: async () => ({ ok: true, reason: "" }),
+    paidGate: async () => ({ unlocked: true, reason: "" }),
+    writeCopy: async () => COPY,
+    checkCopy: async (plan) => ({ plan, dropped: [] }),
+    storeLink: "https://day2.example/api/l/app_d",
+    storeScreens: async () => [join(root, "shot.png")],
+    handoff: {
+      ensure: async () => (handoffReady ? { ready: true, ticketId: null, why: null } : { ready: false, ticketId: "D2-9", why: "the website doesn't send phones on to the App Store / Google Play yet" }),
+      pageOk: async (url) => {
+        pageChecks.push(url);
+        return handoffReady;
+      },
+    },
+    async produce(i) {
+      const f = join(root, `v-${i.purpose}`);
+      writeFileSync(f, "x");
+      const a = await assets.put(f, { appId: i.appId, purpose: i.purpose, label: "Video", kind: "video", ratio: "9:16", width: 1080, height: 1920, durationSec: 12, mime: "video/mp4", source: "motion_template", aiGenerated: false, aiPerson: false });
+      return { assets: [{ asset: a, variant: 0 }], costUsd: 0, notes: [] };
+    },
+  });
+  const run = (now: Date) => runPlatformAds(app, profile, deps(), { monthlyAdsUsd: 1500, now, log: (t) => logs.push(t) });
+  const setDestination = (d: "website" | "store" | null) => {
+    const f = loadAds(join(repo, ADS_FILENAME));
+    writeFileSync(join(repo, ADS_FILENAME), JSON.stringify({ ...f, destination: d }));
+  };
+
+  test("website (the default): new ads wait until the website sends phones on to the stores", async () => {
+    await setPlan(credits, "scale", "monthly", NOW);
+    for (let i = 0; i < 5; i++) await buyTopUp(credits, "10k", NOW);
+    writeFileSync(join(root, "shot.png"), "x");
+    saveBets(join(repo, BETS_FILENAME), { nextNumber: 3, bets: [bet()] });
+    const r = await run(NOW);
+    expect(r.launched).toEqual([]);
+    expect(r.skipped).toContain("ads: the website doesn't send phones on to the App Store / Google Play yet");
+    expect(logs.some((l) => l.startsWith("New ads wait:") && l.includes("(D2-9)"))).toBe(true);
+    expect(loadAds(join(repo, ADS_FILENAME)).handoff).toMatchObject({ ready: false, ticketId: "D2-9" });
+  });
+
+  test("website, once the handoff is live: the ad links to the experiment's page on the website", async () => {
+    handoffReady = true;
+    const r = await run(new Date(NOW.getTime() + 3_600_000));
+    expect(r.launched).toEqual(["B-1:tiktok"]);
+    expect(tiktok.launches[0]!.link).toBe("https://dotty.example/go/split?d2=B-1.tiktok");
+    expect(pageChecks).toContain("https://dotty.example/go/split");
+    expect(logs).toContain("The website now sends phones from ads on to the App Store / Google Play.");
+  });
+
+  test("store: the next experiment's ads go straight to day2's smart link, made from the app's real screens", async () => {
+    setDestination("store");
+    handoffReady = false; // not needed for the stores
+    saveBets(join(repo, BETS_FILENAME), { nextNumber: 3, bets: [bet({ id: "B-2", landingPath: "/go/map" }), ...loadBets(join(repo, BETS_FILENAME)).bets] });
+    const r = await run(new Date(NOW.getTime() + 2 * 3_600_000));
+    expect(r.launched).toEqual(["B-2:tiktok"]);
+    expect(tiktok.launches[1]!.link).toBe("https://day2.example/api/l/app_d?d2=B-2.tiktok");
+    // The running website ad keeps its link.
+    expect(loadAds(join(repo, ADS_FILENAME)).campaigns.find((c) => c.betId === "B-1")).toMatchObject({ status: "active" });
   });
 });

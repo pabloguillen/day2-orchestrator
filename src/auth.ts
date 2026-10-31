@@ -35,6 +35,12 @@ export function authConfig() {
     githubClientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
     /** Where people reach day2 (console + API behind one origin), e.g. https://app.day2.dev */
     publicUrl: (process.env.DAY2_PUBLIC_URL ?? "http://localhost:3000").replace(/\/+$/, ""),
+    /**
+     * Where the owner's browser reaches the console, when that isn't the
+     * public address — day2 run for yourself: the console stays on this
+     * computer (http://localhost:3000) and only public paths go through a tunnel.
+     */
+    consoleUrl: (process.env.DAY2_CONSOLE_URL ?? process.env.DAY2_PUBLIC_URL ?? "http://localhost:3000").replace(/\/+$/, ""),
     /** Development only: sign in as any GitHub login without GitHub. */
     devLogin: process.env.DAY2_DEV_LOGIN === "on" && process.env.NODE_ENV !== "production",
   };

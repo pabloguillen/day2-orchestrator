@@ -50,6 +50,8 @@ import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConne
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
 import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
+import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeUrl } from "./ads/app-links";
+import { betTicketOpts, checkHandoff, destinationFor, handoffJs, type Destination } from "./ads/destination";
 import { parseCredential } from "./mobile-release/credentials";
 import { readiness } from "./mobile-release/setup";
 import { runReleases, SETUP_KEY } from "./mobile-release/run";
@@ -80,7 +82,7 @@ import { isMetaPageId } from "./ad-identities";
 import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
 import { USER_DAY_DAYS } from "./field-store";
-import { ADS_FILENAME, loadAds, platformResults } from "./ads/autopilot";
+import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
 import { ALL_PLATFORMS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
 import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnect, recheckIdentities, startConnect } from "./ads/connect-flow";
 import { fromUsd } from "./ads/fx";
@@ -1857,8 +1859,23 @@ const isPlatform = (p: string | undefined): p is PlatformId => Boolean(p && (ALL
  * day2 learned, and the content made. day2's own costs only as credits;
  * the customer's own ad accounts in their own currency.
  */
+/** Where the app's ads lead (ads/destination.ts), for the Ads tab. */
+function destinationView(app: AppEntry, file: AdsFile) {
+  const { storeApp, links, destination } = destinationFor(app, file.destination);
+  return {
+    choice: file.destination,
+    effective: destination,
+    canChoose: Boolean(app.appBaseUrl) && storeApp,
+    website: app.appBaseUrl ?? null,
+    stores: { ios: Boolean(links.ios?.appStoreId), android: Boolean(links.android) },
+    /** Ads to the website of an app in the stores: whether the website sends phones on to the stores yet. */
+    handoff: destination === "website" && storeApp ? (file.handoff ? { ready: file.handoff.ready, ticketId: file.handoff.ticketId, why: file.handoff.why, at: file.handoff.at } : null) : null,
+  };
+}
+
 async function adsResponse(app: AppEntry) {
   const now = new Date();
+  if (appKind(app.repoPath) === "react-native") await refreshAppLinks(app.repoPath, now).catch(() => null);
   const store = adConnections();
   const resolved = await resolvePlatforms(app.id, store);
   const linked = await platformIdentities().forApp(app.id);
@@ -1908,6 +1925,7 @@ async function adsResponse(app: AppEntry) {
     month: { budgetCredits: creditsForCost(monthlyAds, "paid_ads"), spentCredits: creditsForCost(monthSpend, "paid_ads") },
     /** Why ads aren't scaling up right now (new users barely come back — the retention engine is on it), or null. */
     scaleHeld: file.scaleHeld,
+    destination: destinationView(app, file),
     campaigns: file.campaigns.map((c) => {
       const b = bets.find((x) => x.id === c.betId);
       const r = results.get(`${c.betId}:${c.platform}`);
@@ -1978,6 +1996,29 @@ type PlatformResultView = ReturnType<typeof platformResults>[number];
 
 route("GET", "/api/apps/:id/growth/ads", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
+  return json(await adsResponse(app));
+});
+
+/** Where new ads lead: the app's website, or straight to the App Store / Google Play (null = day2's default). */
+route("PUT", "/api/apps/:id/growth/ads/destination", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  requireManager(t);
+  const body = (await req.json().catch(() => null)) as { destination?: unknown } | null;
+  const d = body?.destination;
+  if (d !== "website" && d !== "store" && d !== null) throw new HttpError(400, 'destination is "website", "store" or null.');
+  const path = appFile(app, ADS_FILENAME);
+  const file = loadAds(path);
+  const { storeApp } = destinationFor(app, d as Destination | null);
+  if (d === "store" && !storeApp) throw new HttpError(409, "day2 hasn't found the app in the App Store or on Google Play yet.");
+  if (d === "website" && !app.appBaseUrl) throw new HttpError(409, "The app has no website address set.");
+  file.destination = d as Destination | null;
+  // Going to the website: see right away whether it already sends phones on to the stores.
+  const pub = authConfig().publicUrl;
+  if (destinationFor(app, file.destination).destination === "website" && storeApp && app.appBaseUrl) {
+    const ready = await checkHandoff(app.appBaseUrl, pub, app.id);
+    file.handoff = { ready, at: new Date().toISOString(), ticketId: file.handoff?.ticketId ?? null, why: ready ? null : file.handoff?.why ?? "the website doesn't send phones on to the App Store / Google Play yet — day2 adds that with the next ads pass" };
+  }
+  saveAds(path, file);
   return json(await adsResponse(app));
 });
 
@@ -2064,7 +2105,7 @@ route(
   "/api/ads/connect/callback/:platform",
   async (req, params) => {
     const url = new URL(req.url);
-    const console = authConfig().publicUrl;
+    const console = authConfig().consoleUrl;
     if (!isPlatform(params.platform)) return Response.redirect(`${console}/`, 302);
     const pageOf = (scope: "day2" | { appId: string } | undefined) => (!scope ? "/" : scope === "day2" ? "/operator" : `/apps/${encodeURIComponent(scope.appId)}/growth/ads`);
     // Where the person started, so an error lands back on the same page.
@@ -2153,6 +2194,58 @@ route("DELETE", "/api/platform/ads/accounts/:platform", async (_req, params, t) 
   return json(await platformAdsResponse());
 });
 
+/** An app's own record without a signed-in person (public endpoints such as smart links). */
+async function appById(id: string): Promise<AppEntry | null> {
+  if (!/^[\w-]{1,80}$/.test(id)) return null;
+  if (serverMode() === "local") return (await localTenant().apps.list()).find((a) => a.id === id) ?? null;
+  return (await allApps(db())).find((r) => r.app.id === id)?.app ?? null;
+}
+
+/**
+ * day2's smart link for apps in the stores (public): ads link here; it
+ * records the tap per ad and sends the person to the App Store or Google
+ * Play with the ad's tag (install referrer / campaign token), or shows both
+ * badges on a computer.
+ */
+route(
+  "GET",
+  "/api/l/:appId",
+  async (req, params) => {
+    const app = await appById(params.appId!);
+    if (!app) return new Response("Not found", { status: 404 });
+    const url = new URL(req.url);
+    const tag = (url.searchParams.get("d2") ?? "").replace(/[^\w.-]/g, "").slice(0, 40) || "direct";
+    const links = loadAppLinks(appFile(app, APP_LINKS_FILENAME));
+    const ua = req.headers.get("user-agent") ?? "";
+    const store = storeFor(ua);
+    const ios = storeUrl("ios", links, tag);
+    const android = storeUrl("android", links, tag);
+    // The tap, per ad (a random id per tap; nothing about the person).
+    const device = { id: `lnk-${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`, platform: store ?? ("web" as const) };
+    void fieldStore()
+      .record(app.id, { v: 1, device, passes: {}, failures: [], events: [{ type: "store_click", at: new Date().toISOString(), acquisition: { campaignId: tag, channel: "paid" } }] } as never, new Date())
+      .catch(() => {});
+    const target = store === "ios" ? ios : store === "android" ? android : null;
+    if (target) return new Response(null, { status: 302, headers: { location: target, "cache-control": "no-store" } });
+    return new Response(storeChooserHtml(links.ios?.name || app.name, ios, android), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  },
+  { public: true },
+);
+
+/** The script the app's website loads to send phones from ads on to the stores (public; ads/destination.ts). */
+route(
+  "GET",
+  "/api/l/:appId/handoff.js",
+  async (_req, params) => {
+    const app = await appById(params.appId!);
+    if (!app) return new Response("// unknown app", { status: 404, headers: { "content-type": "text/javascript; charset=utf-8" } });
+    return new Response(handoffJs(smartLink(authConfig().publicUrl, app.id)), {
+      headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "access-control-allow-origin": "*" },
+    });
+  },
+  { public: true },
+);
+
 /** Ad images and videos, by unguessable id: ad platforms fetch them from here. */
 route(
   "GET",
@@ -2191,7 +2284,7 @@ route("POST", "/api/apps/:id/growth/bets", async (req, params, t) => {
   const path = appFile(app, BETS_FILENAME);
   const { file, bet } = addBet(loadBets(path), valid.bet, new Date());
   const ticket = await withBacklog(backlogFile(app), (b) => {
-    const r = createTicket(b, betTicket(bet), new Date());
+    const r = createTicket(b, betTicket(bet, betTicketOpts(app, appKind(app.repoPath) === "react-native")), new Date());
     return { backlog: rankBacklog(r.backlog, new Date()).backlog, result: r.ticket };
   });
   saveBets(path, { ...file, bets: file.bets.map((b) => (b.id === bet.id ? { ...b, ticketId: ticket.id } : b)) });

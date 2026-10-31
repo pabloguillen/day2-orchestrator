@@ -23,6 +23,7 @@ import { platformResults, retentionFrom, shortKey, type PlatformResult, type Ret
 import { scaleGate, stayAfterDays } from "./retention-link";
 import type { RetentionSnapshot } from "../retention";
 import type { AdCreativeInput, AdPlatform, AdStats, ConversionSetup, Identity, Launched, PlatformId, PlatformInfo, Ratio } from "./types";
+import { effectiveDestination, type Destination } from "./destination";
 
 export { platformResults } from "./results";
 
@@ -111,10 +112,14 @@ export type AdsFile = {
   allocatorRecorded: Record<string, { people: number; outcomes: number; spendUsd: number }>;
   /** Why scale-ups are on hold for the retention engine (retention-link.ts), or null. */
   scaleHeld: string | null;
+  /** Where the owner wants ads to lead (destination.ts), or null for day2's default. */
+  destination: Destination | null;
+  /** Whether the website sends phones from ads on to the stores (website destination for apps in the stores). */
+  handoff: { ready: boolean; at: string; ticketId: string | null; why: string | null } | null;
 };
 
 export function loadAds(path: string): AdsFile {
-  const empty: AdsFile = { campaigns: [], content: [], learnings: null, conversions: {}, allocatorRecorded: {}, scaleHeld: null };
+  const empty: AdsFile = { campaigns: [], content: [], learnings: null, conversions: {}, allocatorRecorded: {}, scaleHeld: null, destination: null, handoff: null };
   if (!existsSync(path)) return empty;
   try {
     const p = JSON.parse(readFileSync(path, "utf-8")) as Partial<AdsFile>;
@@ -126,6 +131,8 @@ export function loadAds(path: string): AdsFile {
       conversions: p.conversions ?? {},
       allocatorRecorded: p.allocatorRecorded ?? {},
       scaleHeld: p.scaleHeld ?? null,
+      destination: p.destination === "website" || p.destination === "store" ? p.destination : null,
+      handoff: p.handoff ?? null,
     };
   } catch {
     return empty;
@@ -328,6 +335,18 @@ export type PlatformAdsDeps = {
   writeCopy?: (i: CopyInput) => Promise<AdCopyPlan | null>;
   checkCopy?: (plan: AdCopyPlan, profile: AppProfile) => ReturnType<typeof checkAdCopy>;
   produce?: (i: ProduceInput) => Promise<Produced>;
+  /**
+   * The app's smart link (ads/app-links.ts) when it is in the App Store /
+   * Google Play: ads that lead to the stores use it.
+   */
+  storeLink?: string | null;
+  /**
+   * For apps in the stores whose ads lead to the website: makes sure the
+   * website sends phones on to the stores (one ticket), and checks a page.
+   */
+  handoff?: { ensure: () => Promise<{ ready: boolean; ticketId: string | null; why: string | null }>; pageOk: (url: string) => Promise<boolean> };
+  /** The app's real screens as image files (App Store screenshots), for store-only apps' ad content. */
+  storeScreens?: () => Promise<string[]>;
   /** Markets the owner set for the app (ISO codes), if any. */
   markets?: { countries: string[]; languages: string[] } | null;
 };
@@ -372,14 +391,24 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
   const betsPath = resolve(app.repoPath, BETS_FILENAME);
   const file = loadAds(path);
   let bets = loadBets(betsPath);
-  const save = () => saveAds(path, file);
+  // The owner's destination choice can change while a pass runs: keep theirs.
+  const save = () => saveAds(path, { ...file, destination: loadAds(path).destination });
   const nameOf = (id: PlatformId) => deps.infos.get(id)?.name ?? id;
   const account = (id: PlatformId) => deps.accounts?.get(id) ?? { billing: "credits" as Billing, currency: "USD" };
   const local = (usd: number, currency: string) => (currency === "USD" ? usd : fromUsd(usd, currency));
+  /** Where new ads lead: the owner's choice (destination.ts). The smart link has no page to break. */
+  const destination = effectiveDestination(file.destination, Boolean(app.appBaseUrl), Boolean(deps.storeLink));
+  const toStores = destination === "store" && Boolean(deps.storeLink);
+  const handoff = destination === "website" && deps.storeLink ? (deps.handoff ?? null) : null;
   const healthOf = async (betId: string) => {
     const b = bets.bets.find((x) => x.id === betId);
-    return b && deps.pageHealth ? deps.pageHealth(app, b.landingPath) : { ok: true, reason: "" };
+    if (!b || toStores) return { ok: true, reason: "" };
+    const page = deps.pageHealth ? await deps.pageHealth(app, b.landingPath) : { ok: true, reason: "" };
+    if (page.ok && handoff && app.appBaseUrl && !(await handoff.pageOk(`${app.appBaseUrl.replace(/\/+$/, "")}${b.landingPath}`)))
+      return { ok: false, reason: "the page doesn't send phones on to the App Store / Google Play yet (day2's handoff script is missing)" };
+    return page;
   };
+  const linkOf = (b: Bet) => (toStores ? `${deps.storeLink}?d2=${encodeURIComponent(b.id)}` : betLink(b, app.appBaseUrl));
 
   // Month-to-date spend, and the ad budget's cap.
   for (const c of file.campaigns) if (c.month.id !== monthId(now)) c.month = { id: monthId(now), spendAtStart: c.spendUsd };
@@ -624,8 +653,20 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     return report;
   }
 
-  for (const b of waiting) {
-    const base = betLink(b, app.appBaseUrl);
+  // Ads to the website of an app in the stores: the website has to send phones on to the stores first.
+  let launchHeld = false;
+  if (handoff && waiting.length) {
+    const h = await handoff.ensure();
+    if (!h.ready && (!file.handoff || file.handoff.ready)) log(`New ads wait: ${h.why ?? "the website doesn't send phones on to the App Store / Google Play yet"}${h.ticketId ? ` (${h.ticketId})` : ""}.`);
+    if (h.ready && file.handoff && !file.handoff.ready) log("The website now sends phones from ads on to the App Store / Google Play.");
+    file.handoff = { ...h, at };
+    save();
+    launchHeld = !h.ready;
+    if (launchHeld) report.skipped.push(`ads: ${h.why ?? "waiting for the website to send phones on to the stores"}`);
+  }
+
+  for (const b of launchHeld ? [] : waiting) {
+    const base = linkOf(b);
     if (!base) continue;
     const page = await healthOf(b.id);
     if (!page.ok) {
@@ -697,7 +738,13 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     } else {
       const genOk = skip.includes("presenter") && skip.includes("generated") ? { ok: false } : await authorize(deps.credits, { appId: app.id, appName: app.name, service: "content_generation", maxCostUsd: GENERATIVE_BUDGET_USD }, now);
       try {
+        const screenshots = toStores && deps.storeScreens ? await deps.storeScreens().catch(() => [] as string[]) : [];
+        if (toStores && !screenshots.length) {
+          log(`No ads for ${b.id} yet: day2 needs the app's App Store screenshots (its real screens) to make them.`);
+          continue;
+        }
         const r = await (deps.produce ?? produceContent)({
+          ...(screenshots.length ? { screenshots } : {}),
           appId: app.id,
           purpose: b.id,
           pageUrl: base.replace(/\?.*$/, ""),
@@ -717,7 +764,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
         content.notes = [...r.notes, ...skip.map((f) => `Not made: ${f} ads (they lost in earlier experiments).`)];
         for (const n of content.notes) log(`${b.id}: ${n}`);
         const counts = { image: r.assets.filter((a) => a.asset.kind === "image" && !a.asset.label.startsWith("Cover")).length, video: r.assets.filter((a) => a.asset.kind === "video").length };
-        log(`Made ${counts.image} image${counts.image === 1 ? "" : "s"} and ${counts.video} video${counts.video === 1 ? "" : "s"} for ${b.id} from the app's real page.`, r.costUsd ? Math.round(r.costUsd * 100) : undefined);
+        log(`Made ${counts.image} image${counts.image === 1 ? "" : "s"} and ${counts.video} video${counts.video === 1 ? "" : "s"} for ${b.id} ${toStores ? "from the app's real screens (App Store screenshots)" : "from the app's real page"}.`, r.costUsd ? Math.round(r.costUsd * 100) : undefined);
         save();
       } catch (err) {
         log(`Couldn't make the ads for ${b.id}: ${(err as Error).message}`);

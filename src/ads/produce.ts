@@ -47,6 +47,12 @@ export type ProduceInput = {
   skipMotion?: boolean;
   /** More same-origin pages of the app to show in Motion videos (read only: loaded, never tapped). */
   screens?: string[];
+  /**
+   * The app's real screens as image files (e.g. its App Store screenshots),
+   * for apps without a web page: used instead of capturing `pageUrl`, and no
+   * walkthrough recording is made.
+   */
+  screenshots?: string[];
   videoSeconds?: number;
   /** Motion video length (default 12 s) and render rate (default 30 fps; lower only for tests). */
   motionSeconds?: number;
@@ -81,7 +87,7 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
   };
   try {
     // The real page, as users see it.
-    const shot = await screenshotPage(i.pageUrl, join(dir, "shot.png"), browser);
+    const shot = i.screenshots?.length ? i.screenshots[0]! : await screenshotPage(i.pageUrl, join(dir, "shot.png"), browser);
 
     // Images: every needed ratio, every variant.
     for (const [v, variant] of i.copy.variants.entries()) {
@@ -94,7 +100,7 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
     }
 
     // Screen recording videos: every needed ratio, first variant's words.
-    if (need.video.length && !i.skipWalkthrough) {
+    if (need.video.length && !i.skipWalkthrough && !i.screenshots?.length) {
       const v0 = i.copy.variants[0]!;
       const rec = await recordPage(i.pageUrl, dir, seconds, browser);
       for (const r of need.video) {
@@ -110,7 +116,7 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
     // Motion videos: per variant and video format (every format gets variant 1 first), in-house, no cost.
     if (need.video.length && !i.skipMotion) {
       try {
-        const screens = await captureScreens(i.pageUrl, dir, { screens: i.screens, landingShot: shot, browser });
+        const screens = i.screenshots?.length ? i.screenshots.slice(0, 4) : await captureScreens(i.pageUrl, dir, { screens: i.screens, landingShot: shot, browser });
         const jobs = i.copy.variants.flatMap((variant, v) => need.video.map((r) => ({ variant, v, r }))).slice(0, MAX_MOTION_VIDEOS);
         const mSeconds = i.motionSeconds ?? 12;
         for (const { variant, v, r } of jobs) {

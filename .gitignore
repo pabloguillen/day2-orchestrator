@@ -54,3 +54,8 @@ field/
 
 # The field library build output (bun run build in packages/sensors).
 packages/sensors/dist/
+.day2-tunnel.yml
+
+# Local mode: the key that encrypts stored tokens (never commit), and the exchange-rate cache.
+.day2-secrets-key
+.day2-fx.json

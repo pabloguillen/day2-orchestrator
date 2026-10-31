@@ -153,8 +153,15 @@ export function betLink(bet: Bet, appBaseUrl: string | undefined): string | null
   return `${appBaseUrl.replace(/\/+$/, "")}${bet.landingPath}?d2=${encodeURIComponent(bet.id)}`;
 }
 
-/** The backlog ticket for the bet's page in the app. */
-export function betTicket(bet: Bet): NewTicketInput {
+/**
+ * The backlog ticket for the bet. Web apps: its landing page. Apps in the
+ * App Store / Google Play: the app's first minute — plus, when their ads lead
+ * to the website, a page there for people on a computer (phones from the ad
+ * go straight on to the stores).
+ */
+export function betTicket(bet: Bet, opts: { storeApp?: boolean; destination?: "website" | "store" | null } = {}): NewTicketInput {
+  if (opts.storeApp && opts.destination !== "website") return appBetTicket(bet);
+  if (opts.storeApp) return websiteAppBetTicket(bet);
   return {
     title: `Experiment ${bet.id}: build the page for "${bet.title}"`,
     type: "feature",
@@ -175,6 +182,58 @@ export function betTicket(bet: Bet): NewTicketInput {
       `Visiting ${bet.landingPath}?d2=${bet.id} records campaignId "${bet.id}" on the visitor's first event`,
       "The page has its own title, description and link preview",
     ],
+    priority: 2,
+    prioritySource: "day2",
+    source: { kind: "day2_proposal", key: `bet:${bet.id}` },
+    actor: "day2",
+    createdNote: `Part of experiment ${bet.id}.`,
+  };
+}
+
+/** An app in the stores whose ads lead to its website: a page there, and the app's first minute. */
+function websiteAppBetTicket(bet: Bet): NewTicketInput {
+  const inApp = appBetTicket(bet);
+  return {
+    ...inApp,
+    title: `Experiment ${bet.id}: the page and the first minute for "${bet.title}"`,
+    description: [
+      `day2 is testing an idea end to end with ads that lead to the app's website. People on a phone go straight on from there to the App Store / Google Play (day2's handoff script on the website); people on a computer — and the ad platforms' reviewers — see the page.`,
+      ``,
+      `The idea: ${bet.angle}`,
+      bet.audience ? `For: ${bet.audience}` : "",
+      `It will run on: ${bet.channel}`,
+      ``,
+      `1. On the website: a page at ${bet.landingPath} that leads with this message, shows the app's real screens (no invented claims), loads day2's handoff script like the other pages, and offers the store badges marked data-day2-store as its one call to action. Its own title, description and link preview.`,
+      `2. In the app: when day2.cameFrom()?.experiment === "${bet.id}" (Google Play's install referrer, read on the first open), open on what this idea is about and get the person to it in one step — before any generic tour. Everyone else sees no change.`,
+    ]
+      .filter((l) => l !== "")
+      .join("\n"),
+    doneWhen: [`${bet.landingPath} exists on the website, leads with the idea, loads the handoff script and shows the store badges`, ...(inApp.doneWhen ?? [])],
+  };
+}
+
+/**
+ * For an app that lives only in the App Store / Google Play: the experiment's
+ * "landing page" is the app's first minute. Ads send people to the store
+ * through day2's smart link; on Android the experiment arrives with the
+ * install (day2.cameFrom()), so the first screens can deliver its promise.
+ */
+function appBetTicket(bet: Bet): NewTicketInput {
+  return {
+    title: `Experiment ${bet.id}: the first minute for "${bet.title}"`,
+    type: "feature",
+    description: [
+      `day2 is testing an idea end to end with ads that lead to the App Store and Google Play. People who install from these ads should find exactly what the ad promised as soon as they open the app.`,
+      ``,
+      `The idea: ${bet.angle}`,
+      bet.audience ? `For: ${bet.audience}` : "",
+      ``,
+      `In the app: when day2.cameFrom()?.experiment === "${bet.id}" (set from Google Play's install referrer on the first open), open on what this idea is about and get the person to it in one step — before any generic tour. Everyone else sees no change.`,
+      `Real screens and claims only. Keep it small: this is a variant of the first screens, not a new app.`,
+    ]
+      .filter((l) => l !== "")
+      .join("\n"),
+    doneWhen: [`People arriving with experiment ${bet.id} land on what the idea promises, in one step`, "Everyone else sees no change", "A test covers both", "The app builds and its tests pass"],
     priority: 2,
     prioritySource: "day2",
     source: { kind: "day2_proposal", key: `bet:${bet.id}` },

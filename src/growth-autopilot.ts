@@ -1,5 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { betTicketOpts } from "./ads/destination";
+import { appKind } from "./field-work";
 import type { AppEntry } from "./apps-registry";
 import { createTicket, findTicket, rankBacklog, withBacklog } from "./backlog";
 import { backlogFile } from "./backlog-work";
@@ -266,7 +268,7 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
         now,
       );
       const ticket = await withBacklog(backlogFile(app), (b) => {
-        const r = createTicket(b, betTicket(added.bet), now);
+        const r = createTicket(b, betTicket(added.bet, betTicketOpts(app, appKind(app.repoPath) === "react-native")), now);
         return { backlog: rankBacklog(r.backlog, now).backlog, result: r.ticket };
       });
       bets = { ...added.file, bets: added.file.bets.map((b) => (b.id === added.bet.id ? { ...b, ticketId: ticket.id } : b)) };
