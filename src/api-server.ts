@@ -501,6 +501,27 @@ route("POST", "/api/apps", async (req, _params, t) => {
     return json({ app: result.app }, { status: 201 });
   }
 
+  if (t.mode === "local" && body.connectionMethod === "github") {
+    // Local: clone with this machine's own `gh` session into day2's managed repos.
+    const full = typeof body.githubRepo === "string" ? body.githubRepo.trim() : "";
+    if (!/^[\w.-]+\/[\w.-]+$/.test(full)) throw new HttpError(400, "githubRepo (owner/name) is required.");
+    await requireAppSlot(t);
+    const id = generateAppId();
+    const dir = managedRepoDir(t, id);
+    mkdirSync(dirname(dir), { recursive: true });
+    const cloned = await $`gh repo clone ${full} ${dir}`.quiet().nothrow();
+    if (cloned.exitCode !== 0) {
+      rmSync(dir, { recursive: true, force: true });
+      throw new HttpError(502, `Couldn't clone ${full} with gh: ${cloned.stderr.toString().trim().split("\n").slice(-2).join(" ")}`);
+    }
+    const result = await t.apps.add({ id, name: body.name, repoPath: dir, connectionMethod: "github", githubRepo: full, appBaseUrl: body.appBaseUrl });
+    if (!result.ok) {
+      rmSync(dir, { recursive: true, force: true });
+      throw new HttpError(409, result.reason);
+    }
+    return json({ app: result.app }, { status: 201 });
+  }
+
   if (!body.repoPath) throw new HttpError(400, "repoPath is required.");
   if (body.connectionMethod === "local_path" && !allowLocalPaths(t)) {
     throw new HttpError(400, "Connecting a folder on the server isn't available — connect a GitHub repository or upload a .zip.");
