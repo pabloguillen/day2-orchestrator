@@ -277,6 +277,12 @@ For **each** platform you want:
 
 ---
 
+## 12a. The inbox at Cloudflare (optional)
+
+Keeps app reports while day2 can't be reached (deploys, outages), then hands them over: [inbox.md](inbox.md). Settings: `DAY2_INBOX_URL`, `DAY2_INBOX_TOKEN`.
+
+---
+
 ## 12b. What your customers do (and what day2 does for them)
 
 Once day2 is deployed, an app owner never touches tunnels, addresses or keys for day2 itself. Their part:

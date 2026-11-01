@@ -49,6 +49,7 @@ import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, existingIntegration, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { drainInbox } from "./ingest-inbox";
 import { isLaunchKey, launchChecklist } from "./launch";
 import { TURN_ON_KEY } from "./field-turn-on";
 import { loadDeviceReport, shotPath, type DeviceReport } from "./device-checks";
@@ -3149,6 +3150,33 @@ if (import.meta.main) {
     console.log("[day2-api] No ANTHROPIC_API_KEY — agents use this computer's Claude Code login (your subscription). Fine for trying day2 yourself; production needs an API key.");
   }
   startBacklogTimer();
+  startInboxDrain();
+}
+
+/**
+ * Reports the inbox at Cloudflare kept while this computer slept
+ * (deploy/inbox/, ingest-inbox.ts): fetched every minute and handled like
+ * any report. Only when DAY2_INBOX_URL and DAY2_INBOX_TOKEN are set.
+ */
+function startInboxDrain(): void {
+  const url = process.env.DAY2_INBOX_URL;
+  const token = process.env.DAY2_INBOX_TOKEN;
+  if (!url || !token) return;
+  let running = false;
+  const pass = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const r = await drainInbox({ url, token, handle: handleRequest });
+      if (r.taken || r.refused) console.log(`[day2-inbox] took ${r.taken} report${r.taken === 1 ? "" : "s"} kept while day2 was away${r.refused ? `, ${r.refused} refused` : ""}${r.waiting ? `, ${r.waiting} still waiting` : ""}.`);
+    } catch (err) {
+      console.warn(`[day2-inbox] couldn't fetch the inbox: ${(err as Error).message}`);
+    } finally {
+      running = false;
+    }
+  };
+  void pass();
+  setInterval(() => void pass(), 60_000);
 }
 
 /**

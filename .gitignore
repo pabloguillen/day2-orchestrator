@@ -59,3 +59,4 @@ packages/sensors/dist/
 # Local mode: the key that encrypts stored tokens (never commit), and the exchange-rate cache.
 .day2-secrets-key
 .day2-fx.json
+deploy/inbox/wrangler.toml
