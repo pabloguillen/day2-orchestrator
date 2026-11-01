@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  afterFailedRun,
   compareTickets,
+  MAX_AUTO_ATTEMPTS,
   createTicket,
   deleteTicket,
   emptyBacklog,
@@ -112,6 +114,21 @@ describe("ranking", () => {
     expect(nextToStart(noTasks).map((t) => t.title)).toEqual(["Bug P1"]);
     const zero = { ...b, settings: { ...b.settings, wipLimit: 0 } };
     expect(nextToStart(zero)).toEqual([]);
+  });
+
+  test("after attempts without a result, day2 waits longer each time, then only starts it when asked", () => {
+    let b = add(emptyBacklog(), { title: "Task", type: "task", priority: 2 });
+    const first = afterFailedRun(b.tickets[0]!, now);
+    expect(first).toMatchObject({ failedRuns: 1, autoStartAfter: new Date(now.getTime() + 6 * 3_600_000).toISOString(), note: "day2 tries again by itself in 6 hours." });
+    b = { ...b, tickets: [{ ...b.tickets[0]!, ...first }] };
+    expect(nextToStart(b, now)).toEqual([]);
+    expect(nextToStart(b, new Date(now.getTime() + 7 * 3_600_000)).map((t) => t.title)).toEqual(["Task"]);
+    expect(afterFailedRun(b.tickets[0]!, now)).toMatchObject({ failedRuns: 2, note: "day2 tries again by itself in 24 hours." });
+    const third = afterFailedRun({ ...b.tickets[0]!, failedRuns: 2 }, now);
+    expect(third.failedRuns).toBe(MAX_AUTO_ATTEMPTS);
+    expect(third.note).toContain("won't start this again by itself");
+    b = { ...b, tickets: [{ ...b.tickets[0]!, ...third }] };
+    expect(nextToStart(b, new Date("2030-01-01T00:00:00Z"))).toEqual([]);
   });
 
   test("no new signal for 60 days drops one priority, once per 60 days", () => {

@@ -289,3 +289,32 @@ describe("runPipeline", () => {
     });
   });
 });
+
+describe("backlog work that isn't a bug (kind: build)", () => {
+  test("no failing-test gate: a static change (a sitemap) goes to the verifier and becomes a PR", async () => {
+    await withStateFile(async (stateFile) => {
+      const calls: string[] = [];
+      const deps = happyDeps(calls, {
+        diffStat: async () => {
+          calls.push("diffStat");
+          return " website/sitemap.xml | 20 ++++\n website/robots.txt | 3 +\n 2 files changed";
+        },
+      });
+      const result = await runPipeline("/fake/repo", bugReport({ kind: "build", title: "Add a sitemap" }), stateFile, deps);
+      expect(result.status).toBe("pr_opened");
+      expect(calls).toContain("runVerifierAgent");
+    });
+  });
+
+  test("no changes: the ticket gets what the agent said, not 'could not reproduce the bug'", async () => {
+    await withStateFile(async (stateFile) => {
+      const calls: string[] = [];
+      const deps = happyDeps(calls, {
+        runFixAgent: async () => agentResult({ finalText: "This needs the owner's App Store Connect account, which isn't in the repo." }),
+        hasChanges: async () => false,
+      });
+      const result = await runPipeline("/fake/repo", bugReport({ kind: "build" }), stateFile, deps);
+      expect(result).toEqual({ status: "reproduction_failed", reason: "the agent made no changes — it said: This needs the owner's App Store Connect account, which isn't in the repo." });
+    });
+  });
+});

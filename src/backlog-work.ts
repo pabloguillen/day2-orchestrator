@@ -5,6 +5,7 @@ import { sandboxConfig } from "./agent-sandbox";
 import type { AppEntry } from "./apps-registry";
 import { hasGitRemote } from "./apps-registry";
 import {
+  afterFailedRun,
   BACKLOG_FILENAME,
   findTicket,
   ingest,
@@ -65,6 +66,7 @@ export function reportForTicket(t: Ticket): BugReport {
     description: parts.join("\n\n"),
     sourceId: `backlog-${t.id}-${Date.now()}`,
     source: "manual",
+    kind: t.type === "bug" ? "bug" : "build",
     ...(t.source.kind === "sentry" && t.source.url ? { correlationKey: t.source.url } : {}),
   };
 }
@@ -72,7 +74,7 @@ export function reportForTicket(t: Ticket): BugReport {
 const STEPS = 5;
 
 /** Pipeline deps that report progress on the ticket as each stage starts. */
-function progressDeps(file: string, ticketId: string): Partial<PipelineDeps> {
+function progressDeps(file: string, ticketId: string, build: boolean): Partial<PipelineDeps> {
   const step = (n: number, label: string) =>
     withBacklog(file, (b) => {
       const t = findTicket(b, ticketId);
@@ -80,11 +82,11 @@ function progressDeps(file: string, ticketId: string): Partial<PipelineDeps> {
     });
   return {
     runFixAgent: async (cwd, report) => {
-      await step(2, "writing a failing test, then the fix");
+      await step(2, build ? "building it, with tests" : "writing a failing test, then the fix");
       return runFixAgent(cwd, report);
     },
     runVerifierAgent: async (cwd, report) => {
-      await step(3, "an independent check of the fix");
+      await step(3, build ? "an independent check of the change" : "an independent check of the fix");
       return runVerifierAgent(cwd, report);
     },
     pushBranch: async (cwd, branch) => {
@@ -98,8 +100,15 @@ const FAIL_TEXT: Record<Exclude<PipelineResult["status"], "pr_opened">, string> 
   no_signal: "had nothing to work on",
   already_processed: "found this was already handled",
   reproduction_failed: "couldn't reproduce or fix it",
+  // (backlog work that isn't a bug uses BUILD_FAIL_TEXT)
   verifier_rejected: "wrote a fix, but the independent check rejected it",
   ci_failed: "wrote a fix, but checks failed",
+};
+
+const BUILD_FAIL_TEXT: Partial<Record<Exclude<PipelineResult["status"], "pr_opened">, string>> = {
+  reproduction_failed: "couldn't build it",
+  verifier_rejected: "built it, but the independent check rejected it",
+  ci_failed: "built it, but checks failed",
 };
 
 /** Runs the pipeline for a ticket already marked Doing. Exported for tests
@@ -125,7 +134,7 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
           }
         : {};
     const result = await withCreditContext({ appId: app.id, appName: app.name, service: "agent_work", description: `${t.id}: ${t.title}` }, () =>
-      runPipeline(app.repoPath, reportForTicket(t), resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId), ...deps, ...install }),
+      runPipeline(app.repoPath, reportForTicket(t), resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId, t.type !== "bug"), ...deps, ...install }),
     );
     await withBacklog(file, (b) => {
       const cur = findTicket(b, ticketId);
@@ -137,16 +146,22 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
         const ticket: Ticket = {
           ...moved.ticket,
           approval: { kind: "pr", number, url: result.url },
-          activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: `opened PR #${number} with a failing test and the fix — waiting for your review.` }],
+          failedRuns: 0,
+          autoStartAfter: null,
+          activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: cur.type === "bug" ? `opened PR #${number} with a failing test and the fix — waiting for your review.` : `opened PR #${number} — waiting for your review.` }],
         };
         return { backlog: putTicket(moved.backlog, ticket), result: null };
       }
       const moved = updateTicket(b, ticketId, { state: "todo" }, now, { kind: "day2" });
+      const retry = afterFailedRun(cur, now);
+      const failText = cur.type !== "bug" ? (BUILD_FAIL_TEXT[result.status] ?? FAIL_TEXT[result.status]) : FAIL_TEXT[result.status];
       const ticket: Ticket = {
         ...moved.ticket,
+        failedRuns: retry.failedRuns,
+        autoStartAfter: retry.autoStartAfter,
         activity: [
           ...moved.ticket.activity,
-          { at: now.toISOString(), actor: "day2", kind: "work", text: `${FAIL_TEXT[result.status]}${"reason" in result && result.reason ? `: ${String(result.reason).slice(0, 300)}` : ""}. Back in To do.` },
+          { at: now.toISOString(), actor: "day2", kind: "work", text: `${failText}${"reason" in result && result.reason ? `: ${String(result.reason).slice(0, 300)}` : ""}. Back in To do — ${retry.note}` },
         ],
       };
       return { backlog: putTicket(moved.backlog, ticket), result: null };
@@ -158,11 +173,14 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
       const cur = findTicket(b, ticketId);
       if (!cur) return { backlog: b, result: null };
       const moved = cur.state === "todo" ? { backlog: b, ticket: cur } : updateTicket(b, ticketId, { state: "todo" }, new Date(), { kind: "day2" });
-      const text = `stopped: ${reason.slice(0, 300)}`;
+      const retry = afterFailedRun(cur, new Date());
+      const text = `stopped: ${reason.slice(0, 300)} — ${retry.note}`;
       if (moved.ticket.activity.at(-1)?.text === text) return { backlog: moved.backlog, result: null };
       return {
         backlog: putTicket(moved.backlog, {
           ...moved.ticket,
+          failedRuns: retry.failedRuns,
+          autoStartAfter: retry.autoStartAfter,
           activity: [...moved.ticket.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text }],
         }),
         result: null,
@@ -230,10 +248,12 @@ export async function startTicket(
     const moved = updateTicket(b, ticketId, { state: "doing" }, now, { kind: by });
     const ticket: Ticket = {
       ...moved.ticket,
+      // Someone asking starts it fresh: day2 may start it by itself again after that.
+      ...(by === "user" ? { failedRuns: 0, autoStartAfter: null } : {}),
       progress: { step: 1, of: planFirst ? 2 : STEPS, label: planFirst ? "writing a plan" : "preparing an isolated copy" },
       activity: [
         ...moved.ticket.activity,
-        { at: now.toISOString(), actor: "day2", kind: "work", text: planFirst ? "started writing a plan for your OK." : "started work: failing test first, then the fix." },
+        { at: now.toISOString(), actor: "day2", kind: "work", text: planFirst ? "started writing a plan for your OK." : t.type === "bug" ? "started work: failing test first, then the fix." : "started building it." },
       ],
     };
     return { backlog: putTicket(moved.backlog, ticket), result: { ok: true, ticket, started: planFirst ? "plan" : "pipeline" } };
@@ -276,6 +296,16 @@ export function parsePlan(text: string): { plan: string; doneWhen: string[]; eff
 }
 
 export async function planTicket(app: AppEntry, ticketId: string): Promise<void> {
+  const key = `${app.id}:${ticketId}`;
+  running.add(key);
+  try {
+    await writePlan(app, ticketId);
+  } finally {
+    running.delete(key);
+  }
+}
+
+async function writePlan(app: AppEntry, ticketId: string): Promise<void> {
   const file = backlogFile(app);
   const t = await withBacklog(file, (b) => ({ backlog: b, result: findTicket(b, ticketId) }));
   if (!t) return;
@@ -318,10 +348,13 @@ Reply with ONLY JSON: {"plan": "<5-10 plain-language steps, one per line>", "don
     const now = new Date();
     if (!parsed) {
       const moved = updateTicket(b, ticketId, { state: "todo" }, now, { kind: "day2" });
+      const retry = afterFailedRun(cur, now);
       return {
         backlog: putTicket(moved.backlog, {
           ...moved.ticket,
-          activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: `couldn't write a plan${failed ? `: ${failed.slice(0, 200)}` : ""}. Back in To do.` }],
+          failedRuns: retry.failedRuns,
+          autoStartAfter: retry.autoStartAfter,
+          activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: `couldn't write a plan${failed ? `: ${failed.slice(0, 200)}` : ""}. Back in To do — ${retry.note}` }],
         }),
         result: null,
       };
@@ -408,6 +441,28 @@ export function reconcileApprovals(b: Backlog, states: Map<string, "MERGED" | "C
   return { backlog: out, changed };
 }
 
+/** A ticket in Doing that nothing works on any more (day2 was restarted mid-run) goes back to To do after this long. */
+const ORPHAN_AFTER_MS = 15 * 60_000;
+
+/**
+ * Pure apart from the in-process "running" set. Tickets left in Doing with
+ * no work behind them — the server stopped while day2 worked on them — go
+ * back to To do, so they don't hold a work slot forever. They start again
+ * like any other ticket (it isn't counted as a failed attempt).
+ */
+export function releaseOrphans(app: AppEntry, b: Backlog, now: Date): Backlog {
+  let out = b;
+  for (const t of b.tickets) {
+    if (t.state !== "doing" || isRunning(app.id, t.id)) continue;
+    const last = Math.max(Date.parse(t.updatedAt), ...t.activity.map((a) => Date.parse(a.at)));
+    if (now.getTime() - last < ORPHAN_AFTER_MS) continue;
+    const moved = updateTicket(out, t.id, { state: "todo" }, now, { kind: "day2" });
+    const { progress: _p, ...rest } = moved.ticket;
+    out = putTicket(moved.backlog, { ...rest, activity: [...rest.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: "day2 was restarted while working on this, so nothing came of that run. Back in To do — it starts again." }] });
+  }
+  return out;
+}
+
 /**
  * One pass of keeping the backlog current: import new findings, re-rank,
  * reconcile PRs, and start what the owner allows. Used by the console's
@@ -450,12 +505,13 @@ export async function tick(
   if (hasGitRemote(app.repoPath)) for (const p of prTickets) states.set(p.id, await prState(app.repoPath, p.pr));
 
   const report = await withBacklog(file, (b) => {
+    b = releaseOrphans(app, b, now);
     const ing = ingest(b, [...proposalItems(app), ...signalItems(signals), ...extra], now);
     const ranked = rankBacklog(ing.backlog, now);
     const rec = reconcileApprovals(ranked.backlog, states, now);
     return {
       backlog: rec.backlog,
-      result: { created: ing.created, updated: ing.updated, reranked: ranked.changes.length, reconciled: rec.changed, started: [] as string[], next: nextToStart(rec.backlog).map((t) => t.id) },
+      result: { created: ing.created, updated: ing.updated, reranked: ranked.changes.length, reconciled: rec.changed, started: [] as string[], next: nextToStart(rec.backlog, now).map((t) => t.id) },
     };
   });
   if (opts.startWork && hasGitRemote(app.repoPath)) {

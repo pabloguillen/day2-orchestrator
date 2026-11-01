@@ -306,12 +306,14 @@ describe("a pass", () => {
   test("next pass: results billed in credits; a rejected ad is stopped with its reason", async () => {
     tiktok.stat = { spend: 42.5, currency: "USD", impressions: 9000, clicks: 300, status: "active" };
     google.stat = { spend: 3, currency: "USD", impressions: 100, clicks: 4, status: "rejected", rejection: "Destination not working" };
-    const before = (await readCredits(credits, NOW)).events.length;
+    // Only the ads' own charges (a plan renewal can land in between, depending on today's date).
+    const adCharges = (events: Array<{ id: string }>) => events.filter((e) => e.id.startsWith("ads:")).length;
+    const before = adCharges((await readCredits(credits, NOW)).events);
     const r = await run(new Date(NOW.getTime() + 7 * 3_600_000));
     expect(r.stopped).toEqual(["B-1:google"]);
     expect(logs.some((l) => l.includes("Google rejected the ad for B-1 (Destination not working)"))).toBe(true);
     const after = await readCredits(credits, NOW);
-    expect(after.events.length).toBe(before + 2);
+    expect(adCharges(after.events)).toBe(before + 2);
     expect(after.events.some((e) => e.id === "ads:tiktok:tiktok-1:4250")).toBe(true);
     expect(loadAds(join(repo, ADS_FILENAME)).campaigns.find((c) => c.platform === "tiktok")).toMatchObject({ spendUsd: 42.5, clicks: 300, status: "active" });
   });

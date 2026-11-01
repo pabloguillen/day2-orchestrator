@@ -41,6 +41,9 @@ function fakeDeps(result: "pr" | "fail"): Partial<PipelineDeps> {
   };
 }
 
+/** Credits aren't what these tests are about (see the "credits first" tests below). */
+const paid = async () => ({ ok: true as const });
+
 describe("working on a ticket", () => {
   test("the report carries the description, Done when and an approved plan", () => {
     seed();
@@ -55,7 +58,7 @@ describe("working on a ticket", () => {
   test("start → Doing; a PR moves it to To be approved with the PR link", async () => {
     seed();
     let job: Promise<unknown> | null = null;
-    const started = await startTicket(app, "D2-1", { run: (a, id) => (job = runTicket(a, id, fakeDeps("pr"))) });
+    const started = await startTicket(app, "D2-1", { afford: paid, run: (a, id) => (job = runTicket(a, id, fakeDeps("pr"))) });
     expect(started).toMatchObject({ ok: true, started: "pipeline" });
     expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.state).toBe("doing");
     await job;
@@ -64,24 +67,49 @@ describe("working on a ticket", () => {
     expect(t.approval).toEqual({ kind: "pr", number: 42, url: "https://github.com/example/buddy/pull/42" });
     expect(t.activity.at(-1)!.text).toMatch(/opened PR #42/);
     expect(t.progress).toBeUndefined();
-    const again = await startTicket(app, "D2-1", { run: async () => {} });
+    const again = await startTicket(app, "D2-1", { afford: paid, run: async () => {} });
     expect(again).toMatchObject({ ok: false, status: 409 });
   });
 
   test("a failed attempt goes back to To do with the reason", async () => {
     seed();
     let job: Promise<unknown> | null = null;
-    await startTicket(app, "D2-1", { run: (a, id) => (job = runTicket(a, id, fakeDeps("fail"))) });
+    await startTicket(app, "D2-1", { afford: paid, run: (a, id) => (job = runTicket(a, id, fakeDeps("fail"))) });
     await job;
     const t = findTicket(loadBacklog(backlogFile(app)), "D2-1")!;
     expect(t.state).toBe("todo");
-    expect(t.activity.at(-1)!.text).toMatch(/couldn't reproduce or fix it: could not reproduce\. Back in To do\./);
+    expect(t.activity.at(-1)!.text).toMatch(/couldn't reproduce or fix it: could not reproduce\. Back in To do — day2 tries again by itself in 6 hours\./);
+  });
+
+  test("backlog work that isn't a bug is built, not reproduced", async () => {
+    let b = emptyBacklog();
+    b = createTicket(b, { title: "Add a sitemap and robots.txt", type: "task", description: "List every public page", source: { kind: "day2_proposal", key: "loop:sitemap" } }, now).backlog;
+    saveBacklog(backlogFile(app), b);
+    expect(reportForTicket(loadBacklog(backlogFile(app)).tickets[0]!).kind).toBe("build");
+    let job: Promise<unknown> | null = null;
+    await startTicket(app, "D2-1", { afford: paid, run: (a, id) => (job = runTicket(a, id, fakeDeps("pr"))) });
+    expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.activity.at(-1)!.text).toBe("started building it.");
+    await job;
+    expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.activity.at(-1)!.text).toBe("opened PR #42 — waiting for your review.");
+  });
+
+  test("a ticket left in Doing by a restart goes back to To do on the next pass, so it doesn't hold a work slot", async () => {
+    let b = emptyBacklog();
+    b = createTicket(b, { title: "Add a sitemap", type: "task", source: { kind: "user" } }, now).backlog;
+    b = updateTicket(b, "D2-1", { state: "doing" }, now).backlog;
+    saveBacklog(backlogFile(app), b);
+    await tick(app, { now: new Date(now.getTime() + 5 * 60_000) });
+    expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.state).toBe("doing"); // might still be running elsewhere
+    await tick(app, { now: new Date(now.getTime() + 20 * 60_000) });
+    const t = findTicket(loadBacklog(backlogFile(app)), "D2-1")!;
+    expect(t.state).toBe("todo");
+    expect(t.activity.at(-1)!.text).toContain("day2 was restarted while working on this");
   });
 
   test("features get a plan first when the rule says so", async () => {
     seed("feature");
     let planned = false;
-    const r = await startTicket(app, "D2-1", { plan: async () => void (planned = true), run: async () => {} });
+    const r = await startTicket(app, "D2-1", { afford: paid, plan: async () => void (planned = true), run: async () => {} });
     expect(r).toMatchObject({ ok: true, started: "plan" });
     expect(planned).toBe(true);
     expect(findTicket(loadBacklog(backlogFile(app)), "D2-1")!.progress).toMatchObject({ label: "writing a plan" });

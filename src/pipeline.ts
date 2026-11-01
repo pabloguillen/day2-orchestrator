@@ -28,6 +28,12 @@ function markProcessed(stateFile: string, report: BugReport) {
   writeFileSync(stateFile, JSON.stringify([...processed], null, 2));
 }
 
+/** The end of an agent's last message, for the ticket (what it said when it stopped). */
+function lastWords(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > 240 ? `…${t.slice(-240)}` : t;
+}
+
 function extractVerdict(text: string): { approved: boolean; line: string } {
   const line = text.split("\n").find((l) => l.trim().startsWith("VERDICT:")) ?? "";
   return { approved: line.includes("APPROVE") && !line.includes("REJECT"), line };
@@ -141,17 +147,20 @@ export async function runPipeline(
         reason: fix.finalText || "agent reported an error",
       };
     }
+    const build = report.kind === "build";
     if (!(await d.hasChanges(cwd))) {
+      const said = lastWords(fix.finalText);
       return {
         status: "reproduction_failed",
-        reason: "agent made no changes — likely could not reproduce the bug",
+        reason: build ? `the agent made no changes${said ? ` — it said: ${said}` : ""}` : `agent made no changes — likely could not reproduce the bug${said ? ` (it said: ${said})` : ""}`,
       };
     }
 
-    await d.commitAll(cwd, `Fix: ${report.title}`);
+    await d.commitAll(cwd, build ? report.title : `Fix: ${report.title}`);
 
     const stat = await d.diffStat(cwd);
-    if (!touchesTestFile(stat)) {
+    // Bugs: a failing test first, mechanically checked. Backlog work: the verifier checks tests where code changed.
+    if (!build && !touchesTestFile(stat)) {
       const changedFiles = changedFilesFromDiffStat(stat);
       const reason =
         `fix-agent changed files but none matched this app's test-file convention ` +

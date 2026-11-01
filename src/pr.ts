@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import { gitEnv } from "./tenant";
+import { defaultBranch } from "./git";
 import type { BugReport } from "./types";
 
 /**
@@ -13,16 +14,19 @@ export async function openFixPr(
   report: BugReport,
   agentSummary: string,
 ): Promise<string> {
-  const title = `Fix: ${report.title}`;
+  const build = report.kind === "build";
+  const title = build ? report.title : `Fix: ${report.title}`;
   const body = [
     agentSummary.trim(),
     "",
     "---",
-    `_Opened automatically by Day2 in response to a ${report.source} signal (${report.sourceId}). A human should review before merging — this is never auto-merged._`,
+    build
+      ? `_Opened by day2 for its backlog ticket (${report.sourceId}). Review before merging._`
+      : `_Opened automatically by Day2 in response to a ${report.source} signal (${report.sourceId}). A human should review before merging — this is never auto-merged._`,
   ].join("\n");
 
   const result =
-    await $`gh pr create --title ${title} --body ${body} --head ${branch} --base main`
+    await $`gh pr create --title ${title} --body ${body} --head ${branch} --base ${await defaultBranch(cwd)}`
       .cwd(cwd)
       .env(await gitEnv())
       .text();

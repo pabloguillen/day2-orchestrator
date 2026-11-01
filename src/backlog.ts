@@ -122,6 +122,14 @@ export type Ticket = {
   /** Set while day2 works on it. */
   progress?: { step: number; of: number; label: string };
   approval?: Approval;
+  /**
+   * day2's own attempts that ended without a result, in a row. After each,
+   * day2 waits before starting it again by itself (backoff); after
+   * MAX_AUTO_ATTEMPTS it only starts again when someone asks.
+   */
+  failedRuns?: number;
+  /** day2 doesn't start this by itself before this time (null/absent: any time). */
+  autoStartAfter?: string | null;
   /** A feature broken into smaller tickets points at its parent. */
   parentId?: string;
   createdAt: string;
@@ -331,10 +339,23 @@ export function compareTickets(a: Ticket, b: Ticket): number {
 
 /** What day2 would pick up next, respecting the WIP limit and the owner's
  * "start on its own" choices. Security tickets bypass the WIP limit. */
-export function nextToStart(backlog: Backlog): Ticket[] {
+/** How many attempts in a row day2 makes by itself before it waits for someone to ask. */
+export const MAX_AUTO_ATTEMPTS = 3;
+/** Wait after the 1st and 2nd attempt without a result. */
+const BACKOFF_HOURS = [6, 24];
+
+/** Pure. A ticket after an attempt that ended without a result: when day2 may try again by itself, and the note. */
+export function afterFailedRun(t: Ticket, now: Date): { failedRuns: number; autoStartAfter: string | null; note: string } {
+  const failedRuns = (t.failedRuns ?? 0) + 1;
+  if (failedRuns >= MAX_AUTO_ATTEMPTS) return { failedRuns, autoStartAfter: "9999-12-31T00:00:00.000Z", note: `day2 tried ${failedRuns} times without a result, so it won't start this again by itself — start it when the ticket is clearer, or edit it.` };
+  const hours = BACKOFF_HOURS[failedRuns - 1] ?? 24;
+  return { failedRuns, autoStartAfter: new Date(now.getTime() + hours * 3_600_000).toISOString(), note: `day2 tries again by itself in ${hours} hours.` };
+}
+
+export function nextToStart(backlog: Backlog, now = new Date()): Ticket[] {
   const { settings } = backlog;
   const doing = backlog.tickets.filter((t) => t.state === "doing").length;
-  const todo = backlog.tickets.filter((t) => t.state === "todo").sort(compareTickets);
+  const todo = backlog.tickets.filter((t) => t.state === "todo" && !(t.autoStartAfter && Date.parse(t.autoStartAfter) > now.getTime())).sort(compareTickets);
   const securityRule = ruleOn(settings, "security_now");
   const urgent = securityRule ? todo.filter((t) => t.signals.security) : [];
   const allowed = (t: Ticket) =>

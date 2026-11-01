@@ -47,8 +47,14 @@ function slugify(title: string): string {
 export async function createFixBranch(cwd: string, sourceId: string, title: string) {
   const branch = `day2-fix-${slugify(title)}-${sourceId.slice(0, 8)}`;
   await $`git -C ${cwd} fetch origin`.env(await gitEnv()).quiet();
-  await $`git -C ${cwd} checkout -B ${branch} origin/main`.quiet();
+  await $`git -C ${cwd} checkout -B ${branch} ${`origin/${await defaultBranch(cwd)}`}`.quiet();
   return branch;
+}
+
+/** The repo's default branch on GitHub ("main", "expo", …), from the clone's origin/HEAD. */
+export async function defaultBranch(cwd: string): Promise<string> {
+  const ref = (await $`git -C ${cwd} symbolic-ref --short refs/remotes/origin/HEAD`.quiet().nothrow().text()).trim();
+  return ref.replace(/^origin\//, "") || "main";
 }
 
 export async function hasChanges(cwd: string): Promise<boolean> {
@@ -66,5 +72,5 @@ export async function pushBranch(cwd: string, branch: string) {
 }
 
 export async function diffStat(cwd: string): Promise<string> {
-  return $`git -C ${cwd} diff origin/main --stat`.quiet().text();
+  return $`git -C ${cwd} diff ${`origin/${await defaultBranch(cwd)}`} --stat`.quiet().text();
 }

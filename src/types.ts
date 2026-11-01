@@ -21,6 +21,8 @@ export type BugReport = {
    * report id); without this, `pipeline.ts` would process both as
    * unrelated and open two competing fix PRs for the same bug. */
   correlationKey?: string;
+  /** "build": a feature, task or improvement from the backlog — built, not reproduced. Default "bug". */
+  kind?: "bug" | "build";
 };
 
 export type PipelineResult =
