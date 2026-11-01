@@ -131,7 +131,8 @@ import {
   setArea,
 } from "./autonomy-config";
 import { loadAuditEntries, renderFeed } from "./owner-feed";
-import { applyChange, askQuestion, fetchPendingChangeCards, undoChange } from "./approvals";
+import { applyChange, fetchPendingChangeCards, undoChange } from "./approvals";
+import { answerAboutChange, CHANGE_ANSWER_MAX_USD, isQuestion, loadPrQuestions, postOnPr, prContext, PR_QUESTIONS_FILENAME, recordPrQuestion, type ChangeContext } from "./change-questions";
 import { loadReleaseResults } from "./release";
 import {
   GROWTH_CONFIG_FILENAME,
@@ -750,7 +751,8 @@ route("GET", "/api/apps/:id/approvals", async (_req, params, t) => {
     return json({ available: false, reason: `"${app.name}" has no connected git remote — connect one to enable this.`, cards: [] });
   }
   const cards = await fetchPendingChangeCards(app.repoPath);
-  return json({ available: true, cards });
+  const asked = loadPrQuestions(appFile(app, PR_QUESTIONS_FILENAME));
+  return json({ available: true, cards: cards.map((c) => ({ ...c, questions: asked.filter((q) => q.pr === c.number).map(({ pr: _p, ...q }) => q) })) });
 });
 
 route("POST", "/api/apps/:id/approvals/:pr/apply", async (_req, params, t) => {
@@ -770,10 +772,23 @@ route("POST", "/api/apps/:id/approvals/:pr/undo", async (_req, params, t) => {
 route("POST", "/api/apps/:id/approvals/:pr/ask", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireGitRemote(app);
-  const body = (await req.json()) as { question?: string };
-  if (!body.question) throw new HttpError(400, "question is required.");
-  await askQuestion(app.repoPath, Number(params.pr), body.question);
-  return json({ ok: true });
+  const body = (await req.json().catch(() => ({}))) as { question?: unknown };
+  const valid = validateQuestion(body.question);
+  if (!valid.ok) throw new HttpError(400, valid.reason);
+  const pr = Number(params.pr);
+  if (!Number.isInteger(pr) || pr <= 0) throw new HttpError(400, "Not a pull request number.");
+  // day2 answers it (from the change, its ticket and the code), and both go on the pull request.
+  const tk = (await loadBacklogFor(app)).tickets.find((x) => x.approval?.kind === "pr" && x.approval.number === pr);
+  const ctx: ChangeContext = { pr: await prContext(app.repoPath, pr), ticket: tk ? ticketContext(tk) : null };
+  const { result, credits } = await runWithCredits(t, app, "scan_answer", `Question about PR #${pr}`, CHANGE_ANSWER_MAX_USD, () => answerAboutChange(app.repoPath, valid.question, ctx));
+  if (!result.ok) return json(result);
+  const by = (await actorName(t)) ?? null;
+  recordPrQuestion(appFile(app, PR_QUESTIONS_FILENAME), { pr, askedAt: result.askedAt, question: valid.question, answer: result.answer, by, credits });
+  const posted = await postOnPr(app.repoPath, pr, valid.question, result.answer, by).then(
+    () => true,
+    () => false,
+  );
+  return json({ ok: true, answer: result.answer, askedAt: result.askedAt, credits, posted });
 });
 
 // ---- Releases (plan §3.2) ----
@@ -1151,6 +1166,11 @@ route("DELETE", "/api/apps/:id/backlog/tickets/:tid", async (_req, params, t) =>
   return json({ ok: true });
 });
 
+/** A ticket for an answer: what it is, and its last few notes. */
+function ticketContext(tk: Ticket): NonNullable<ChangeContext["ticket"]> {
+  return { id: tk.id, title: tk.title, description: tk.description, doneWhen: tk.doneWhen, recent: tk.activity.slice(-8).map((a) => `${a.at.slice(0, 16)} ${a.actor === "day2" ? "day2" : (a.name ?? "someone")}: ${a.text}`) };
+}
+
 route("POST", "/api/apps/:id/backlog/tickets/:tid/comments", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   const body = (await req.json().catch(() => ({}))) as { text?: unknown };
@@ -1163,7 +1183,22 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/comments", async (req, params,
     const next = addActivity(b, params.tid!, { actor: "user", name, kind: "comment", text }, new Date());
     return { backlog: next, result: findTicket(next, params.tid!)! };
   });
-  return json({ ticket }, { status: 201 });
+  if (!isQuestion(text)) return json({ ticket }, { status: 201 });
+  // A question: day2 answers it on the ticket (from the ticket, its pull request if any, and the code).
+  let reply: string;
+  try {
+    const pr = ticket.approval?.kind === "pr" && hasGitRemote(app.repoPath) ? await prContext(app.repoPath, ticket.approval.number).catch(() => null) : null;
+    const { result } = await runWithCredits(t, app, "scan_answer", `Question about ${ticket.id}`, CHANGE_ANSWER_MAX_USD, () => answerAboutChange(app.repoPath, text, { ticket: ticketContext(ticket), pr }));
+    reply = result.ok ? result.answer : result.reason;
+  } catch (err) {
+    reply = err instanceof CreditsError ? `I can't answer right now: ${err.message}` : `I couldn't answer right now: ${(err as Error).message}`;
+  }
+  const answered = await withBacklog(backlogFile(app), (b) => {
+    if (!findTicket(b, params.tid!)) return { backlog: b, result: ticket };
+    const next = addActivity(b, params.tid!, { actor: "day2", kind: "comment", text: reply.slice(0, 4000) }, new Date());
+    return { backlog: next, result: findTicket(next, params.tid!)! };
+  });
+  return json({ ticket: answered }, { status: 201 });
 });
 
 route("POST", "/api/apps/:id/backlog/tickets/:tid/work", async (_req, params, t) => {
