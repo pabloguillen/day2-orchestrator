@@ -555,6 +555,11 @@ export function updateTicket(
     if (patch.state === "done") next.doneAt = at;
     if (patch.state !== "doing") delete next.progress;
     if (patch.state !== "to_approve") delete next.approval;
+    // Someone moving it back to To do (e.g. out of Parked) means day2 may pick it up again.
+    if (patch.state === "todo" && actor.kind === "user") {
+      next.autoStartAfter = null;
+      next.failedRuns = 0;
+    }
     log.push({ at, actor: actor.kind, name: actor.name, kind: "state", text: `moved it to ${stateName(patch.state)}.` });
   }
 

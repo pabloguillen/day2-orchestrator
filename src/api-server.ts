@@ -1309,16 +1309,9 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/reject", async (req, params, t
   const reason = typeof body.reason === "string" && body.reason.trim() ? `: ${body.reason.trim().slice(0, 500)}` : ".";
   const what = tk.approval.kind === "pr" ? `closed PR #${tk.approval.number} without merging` : "sent the plan back";
   const ticket = await withBacklog(backlogFile(app), (bb) => {
-    if (tk.approval!.kind === "pr") {
-      const next = closedWithoutMerge(bb, tk.id, new Date(), { kind: "user" }, `${what}${reason === "." ? "" : reason}`);
-      return { backlog: next, result: findTicket(next, tk.id)! };
-    }
-    const r = updateTicket(bb, tk.id, { state: "todo" }, new Date(), { kind: "user" });
-    const next: Ticket = {
-      ...r.ticket,
-      activity: [...r.ticket.activity, { at: new Date().toISOString(), actor: "user", kind: "work", text: `${what}${reason}` }],
-    };
-    return { backlog: putTicket(r.backlog, next), result: next };
+    // Declined (a pull request or a plan): parked, not rebuilt by itself.
+    const next = closedWithoutMerge(bb, tk.id, new Date(), { kind: "user" }, `${what}${reason === "." ? "" : reason}`);
+    return { backlog: next, result: findTicket(next, tk.id)! };
   });
   return json({ ticket });
 });

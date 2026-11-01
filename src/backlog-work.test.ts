@@ -106,7 +106,7 @@ describe("working on a ticket", () => {
     expect(t.activity.at(-1)!.text).toContain("day2 was restarted while working on this");
   });
 
-  test("merging or closing on Approvals settles the ticket at once; a closed one isn't rebuilt by itself", () => {
+  test("merging or declining on Approvals settles the ticket at once; a declined one is parked", () => {
     let b = emptyBacklog();
     for (const title of ["Sitemap", "Pages"]) b = createTicket(b, { title, type: "task", source: { kind: "user" } }, now).backlog;
     b = { ...b, tickets: b.tickets.map((t, i) => ({ ...t, state: "to_approve" as const, approval: { kind: "pr" as const, number: i + 1, url: `https://github.com/x/y/pull/${i + 1}` } })) };
@@ -115,10 +115,13 @@ describe("working on a ticket", () => {
     expect(findTicket(merged.backlog, "D2-1")!.state).toBe("done");
     const closed = settleByPr(merged.backlog, 2, "closed", now, "Pablo").backlog;
     const t = findTicket(closed, "D2-2")!;
-    expect(t.state).toBe("todo");
+    expect(t.state).toBe("parked");
     expect(t.approval).toBeUndefined();
-    expect(t.activity.at(-1)!.text).toContain("won't build it again by itself");
+    expect(t.activity.at(-1)!.text).toContain("Parked — day2 won't build it again by itself");
     expect(nextToStart(closed, new Date("2030-01-01T00:00:00Z")).map((x) => x.id)).not.toContain("D2-2");
+    // The owner moves it back to To do: day2 may pick it up again.
+    const back = updateTicket(closed, "D2-2", { state: "todo" }, now, { kind: "user" }).backlog;
+    expect(nextToStart(back, now).map((x) => x.id)).toContain("D2-2");
     expect(settleByPr(closed, 99, "merged", now, null).ticketId).toBeNull();
   });
 
@@ -187,7 +190,7 @@ describe("sources and reconciling", () => {
     expect(s[0]).toMatchObject({ type: "bug", source: { kind: "sentry", key: "sentry-1", url: "https://sentry.io/1" }, signals: { users: 23, errors: 41, errorsNote: "41 Sentry events, 23 people affected." } });
   });
 
-  test("merged PRs finish tickets, closed ones go back to To do", () => {
+  test("merged PRs finish tickets, closed ones are parked", () => {
     let b = emptyBacklog();
     for (const title of ["a", "b", "c"]) b = createTicket(b, { title, type: "bug", source: { kind: "user" } }, now).backlog;
     for (const id of ["D2-1", "D2-2", "D2-3"]) {
@@ -196,7 +199,7 @@ describe("sources and reconciling", () => {
     }
     const r = reconcileApprovals(b, new Map([["D2-1", "MERGED"], ["D2-2", "CLOSED"], ["D2-3", "OPEN"]]), now);
     expect(r.changed).toEqual(["D2-1", "D2-2"]);
-    expect(r.backlog.tickets.map((t) => t.state)).toEqual(["done", "todo", "to_approve"]);
+    expect(r.backlog.tickets.map((t) => t.state)).toEqual(["done", "parked", "to_approve"]);
   });
 
   test("tick imports, ranks and starts within the owner's limits", async () => {

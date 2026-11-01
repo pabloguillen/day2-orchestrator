@@ -117,6 +117,13 @@ const FAIL_TEXT: Record<Exclude<PipelineResult["status"], "pr_opened">, string> 
   ci_failed: "wrote a fix, but checks failed",
 };
 
+/** An error for the ticket: a failed command says what it printed, not just "exit code 1". */
+export function describeError(err: unknown): string {
+  const e = err as Error & { stderr?: { toString(): string }; stdout?: { toString(): string }; exitCode?: number };
+  const said = (e.stderr?.toString() || e.stdout?.toString() || "").trim().split("\n").filter(Boolean).slice(-3).join(" ");
+  return said ? `${e.message}: ${said.slice(0, 400)}` : e.message;
+}
+
 const BUILD_FAIL_TEXT: Partial<Record<Exclude<PipelineResult["status"], "pr_opened">, string>> = {
   reproduction_failed: "couldn't build it",
   verifier_rejected: "built it, but the independent check rejected it",
@@ -196,7 +203,7 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
     });
     return result;
   } catch (err) {
-    const reason = (err as Error).message;
+    const reason = describeError(err);
     await withBacklog(file, (b) => {
       const cur = findTicket(b, ticketId);
       if (!cur) return { backlog: b, result: null };
@@ -486,19 +493,19 @@ async function prState(repoPath: string, pr: number): Promise<"MERGED" | "CLOSED
 const NOT_BY_ITSELF = "9999-12-31T00:00:00.000Z";
 
 /**
- * Pure. A ticket whose pull request was closed without merging: back to To
- * do, but day2 doesn't build it again by itself — the owner said no to that
- * change. A comment saying what to do differently, then "work on it", starts
- * it again.
+ * Pure. A ticket whose change was declined (its pull request closed without
+ * merging, or its plan sent back): parked — the owner said no, so day2
+ * doesn't build it again by itself. Moving it back to To do (maybe with a
+ * comment on what to change) is the owner's call.
  */
 export function closedWithoutMerge(b: Backlog, id: string, now: Date, by: { kind: "user" | "day2"; name?: string | null }, what: string): Backlog {
-  const r = updateTicket(b, id, { state: "todo" }, now, { kind: by.kind, ...(by.name ? { name: by.name } : {}) });
-  const { approval: _a, ...rest } = r.ticket;
+  const r = updateTicket(b, id, { state: "parked" }, now, { kind: by.kind, ...(by.name ? { name: by.name } : {}) });
+  const { approval: _a, progress: _p, ...rest } = r.ticket;
   return putTicket(r.backlog, {
     ...rest,
     autoStartAfter: NOT_BY_ITSELF,
     failedRuns: 0,
-    activity: [...rest.activity, { at: now.toISOString(), actor: by.kind, ...(by.name ? { name: by.name } : {}), kind: "work", text: `${what}. day2 won't build it again by itself — say what to change in a comment and start it when you want another try.` }],
+    activity: [...rest.activity, { at: now.toISOString(), actor: by.kind, ...(by.name ? { name: by.name } : {}), kind: "work", text: `${what}. Parked — day2 won't build it again by itself. To try again, say what to change in a comment and move it back to To do.` }],
   });
 }
 

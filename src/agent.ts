@@ -18,7 +18,10 @@ export type AgentRunResult = {
   numTurns: number;
 };
 
-async function runAgent(prompt: string, cwd: string): Promise<AgentRunResult> {
+/** Building a feature (with tests and a device flow) takes more steps than fixing one bug. */
+const BUILD_MAX_TURNS = 150;
+
+async function runAgent(prompt: string, cwd: string, maxTurns = MAX_TURNS): Promise<AgentRunResult> {
   let finalText = "";
   let isError = false;
   let costUsd = 0;
@@ -30,7 +33,7 @@ async function runAgent(prompt: string, cwd: string): Promise<AgentRunResult> {
       cwd,
       model: MODEL,
       permissionMode: "bypassPermissions",
-      maxTurns: MAX_TURNS,
+      maxTurns,
       maxBudgetUsd: MAX_BUDGET_USD,
       persistSession: false,
       // Isolation mode: never inherit whatever happens to be configured on
@@ -194,7 +197,7 @@ When done, end your final message with a plain-language summary formatted exactl
 ## Evidence
 <tests added or run, build/lint status, and any "Done when" point you couldn't check>`;
 
-  return runAgent(prompt, cwd);
+  return runAgent(prompt, cwd, BUILD_MAX_TURNS);
 }
 
 /** Independent check of backlog work (not a bug fix): does it do what the ticket asks, without breaking anything? */
