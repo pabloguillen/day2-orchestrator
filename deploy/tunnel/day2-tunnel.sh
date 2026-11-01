@@ -42,7 +42,15 @@ if [ -z "$ID" ]; then
   echo "Couldn't find the tunnel \"$NAME\" after creating it." >&2
   exit 1
 fi
-cloudflared tunnel route dns "$NAME" "$HOST" >/dev/null 2>&1 || true
+# The DNS name for the tunnel. Fails when the name already points elsewhere: say so instead of hiding it.
+if ! route_out="$(cloudflared tunnel route dns "$NAME" "$HOST" 2>&1)"; then
+  if ! grep -qi "already configured to route to your tunnel" <<<"$route_out"; then
+    echo "Couldn't create the DNS name $HOST for the tunnel:" >&2
+    echo "$route_out" >&2
+    echo "Check the domain's DNS records in Cloudflare (dash.cloudflare.com → the domain → DNS)." >&2
+    exit 1
+  fi
+fi
 
 cat >"$CONFIG" <<YAML
 # Written by deploy/tunnel/day2-tunnel.sh — only these paths are public.
