@@ -450,12 +450,19 @@ const ORPHAN_AFTER_MS = 15 * 60_000;
  * back to To do, so they don't hold a work slot forever. They start again
  * like any other ticket (it isn't counted as a failed attempt).
  */
+/** A ticket in Doing that nothing in this process works on, for a while: left behind by a restart. */
+export function isOrphan(appId: string, t: Ticket, now: Date): boolean {
+  if (t.state !== "doing" || isRunning(appId, t.id)) return false;
+  // day2's own steps (not comments, which move updatedAt but say nothing about the run).
+  const steps = t.activity.filter((a) => a.actor === "day2" && a.kind !== "comment").map((a) => Date.parse(a.at));
+  const last = steps.length ? Math.max(...steps) : Date.parse(t.updatedAt);
+  return now.getTime() - last >= ORPHAN_AFTER_MS;
+}
+
 export function releaseOrphans(app: AppEntry, b: Backlog, now: Date): Backlog {
   let out = b;
   for (const t of b.tickets) {
-    if (t.state !== "doing" || isRunning(app.id, t.id)) continue;
-    const last = Math.max(Date.parse(t.updatedAt), ...t.activity.map((a) => Date.parse(a.at)));
-    if (now.getTime() - last < ORPHAN_AFTER_MS) continue;
+    if (!isOrphan(app.id, t, now)) continue;
     const moved = updateTicket(out, t.id, { state: "todo" }, now, { kind: "day2" });
     const { progress: _p, ...rest } = moved.ticket;
     out = putTicket(moved.backlog, { ...rest, activity: [...rest.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: "day2 was restarted while working on this, so nothing came of that run. Back in To do — it starts again." }] });

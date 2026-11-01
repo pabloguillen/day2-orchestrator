@@ -1,7 +1,7 @@
 import { allApps } from "./apps-store";
 import { runReleases } from "./mobile-release/run";
 import { findTicket, loadBacklog, putTicket, updateTicket, withBacklog } from "./backlog";
-import { backlogFile, syncAppTrackers, tick } from "./backlog-work";
+import { backlogFile, isOrphan, syncAppTrackers, tick } from "./backlog-work";
 import { db } from "./db";
 import { gatherSignalsForApp } from "./health-scout-cli";
 import type { AppEntry } from "./apps-registry";
@@ -123,7 +123,9 @@ async function retireInstallTicket(app: AppEntry, fresh: () => Promise<IncomingI
     ? `parked: the app already starts day2 in ${existing.file}, so a second copy isn't needed — see the launch checklist on Home for what's left.`
     : "parked: day2 has no public address yet, so users' phones couldn't reach it — see the launch checklist on Home.";
   await withBacklog(backlogFile(app), (b) => {
-    const t = b.tickets.find((x) => x.source.key === INSTALL_KEY && x.state === "todo");
+    // Not started yet, or left in Doing by a restart (it would start again right away otherwise).
+    const now = new Date();
+    const t = b.tickets.find((x) => x.source.key === INSTALL_KEY && (x.state === "todo" || isOrphan(app.id, x, now)));
     if (!t) return { backlog: b, result: null };
     const moved = updateTicket(b, t.id, { state: "parked" }, new Date(), { kind: "day2" });
     const cur = findTicket(moved.backlog, t.id)!;
