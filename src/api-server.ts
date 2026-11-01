@@ -48,7 +48,8 @@ import {
 import { db, migrate } from "./db";
 import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConnector, findConnector, finishConnector } from "./connectors";
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
-import { appEvents, appKind, describeBroken, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { appEvents, appKind, describeBroken, existingIntegration, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
+import { isLaunchKey, launchChecklist } from "./launch";
 import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
 import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeUrl } from "./ads/app-links";
 import { betTicketOpts, checkHandoff, destinationFor, handoffJs, type Destination } from "./ads/destination";
@@ -1034,7 +1035,8 @@ const DONE_WINDOW_DAYS = 30;
 async function backlogResponse(t: Tenant, app: AppEntry, b: Awaited<ReturnType<typeof loadBacklogFor>>) {
   const cutoff = Date.now() - DONE_WINDOW_DAYS * 86_400_000;
   return {
-    tickets: b.tickets.filter((t) => t.state !== "done" || new Date(t.doneAt ?? t.updatedAt).getTime() >= cutoff),
+    // launch: part of the launch checklist (needed before the next release goes out with day2).
+    tickets: b.tickets.filter((t) => t.state !== "done" || new Date(t.doneAt ?? t.updatedAt).getTime() >= cutoff).map((t) => ({ ...t, launch: isLaunchKey(t.source.key) })),
     settings: b.settings,
     lastRankedAt: b.lastRankedAt ?? null,
     running: b.tickets.filter((t) => isRunning(app.id, t.id)).map((t) => t.id),
@@ -1562,6 +1564,32 @@ async function mobileReleasesResponse(app: AppEntry) {
     shipped: file.shipped,
   };
 }
+
+/** What has to be in place before the next release goes out with day2 in it (launch.ts). */
+route("GET", "/api/apps/:id/launch", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const kind = appKind(app.repoPath);
+  const [meta, backlog, key, privacy] = await Promise.all([fieldStore().meta(app.id), loadBacklogFor(app), ingestKeys().forApp(app.id), storePrivacyResponse(app)]);
+  const install = backlog.tickets.find((x) => x.source.key === INSTALL_KEY);
+  const releases = kind === "react-native" ? await mobileReleasesResponse(app) : null;
+  const ads = loadAds(appFile(app, ADS_FILENAME));
+  const dest = destinationFor(app, ads.destination);
+  const items = launchChecklist({
+    appId: app.id,
+    kind,
+    publicUrl: authConfig().publicUrl,
+    ingestKey: key,
+    field: { reporting: Boolean(meta), installTicket: install ? { id: install.id, state: install.state } : null, existing: existingIntegration(app.repoPath) },
+    privacy: { applies: privacy.applies, stores: privacy.stores, notice: privacy.notice ? { upToDate: privacy.notice.upToDate, found: privacy.notice.found, ticket: privacy.notice.ticket } : null },
+    releases: releases?.enabled
+      ? { enabled: true, codeGaps: releases.setup?.code.length ?? 0, setupTicket: releases.setup?.ticket ?? null, missingAccounts: releases.accounts ? (["expo", "asc", "play"] as const).filter((k) => !releases.accounts![k]).map((k) => ({ expo: "Expo", asc: "App Store Connect", play: "Google Play" })[k]) : [] }
+      : null,
+    ads: dest.destination === "website" && dest.storeApp && ads.campaigns.length + bets(app) > 0 ? { handoffNeeded: true, ready: Boolean(ads.handoff?.ready), ticketId: ads.handoff?.ticketId ?? null, why: ads.handoff?.why ?? null } : null,
+  });
+  const essential = items.filter((x) => x.essential);
+  return json({ items, ready: essential.every((x) => x.state === "done"), left: essential.filter((x) => x.state !== "done").length });
+});
+const bets = (app: AppEntry) => loadBets(appFile(app, BETS_FILENAME)).bets.filter((b) => b.status !== "stopped").length;
 
 route("GET", "/api/apps/:id/mobile-releases", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);

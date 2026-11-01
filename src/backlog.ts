@@ -16,6 +16,7 @@
  *  - "why this order" is built from those same signals and the rule that
  *    applied, not written after the fact.
  */
+import { isLaunchKey } from "./launch";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -365,7 +366,9 @@ export function nextToStart(backlog: Backlog, now = new Date()): Ticket[] {
     (t.type === "improvement" && settings.autoStart.improvements) ||
     (t.type === "feature" && settings.autoStart.features);
   const slots = Math.max(0, settings.wipLimit - doing);
-  const rest = todo.filter((t) => !urgent.includes(t) && allowed(t)).slice(0, slots);
+  // What the next release needs (the launch checklist) goes before everything else allowed.
+  const launchFirst = (x: Ticket, y: Ticket) => Number(isLaunchKey(y.source.key)) - Number(isLaunchKey(x.source.key));
+  const rest = todo.filter((t) => !urgent.includes(t) && allowed(t)).sort(launchFirst).slice(0, slots);
   return [...urgent, ...rest];
 }
 

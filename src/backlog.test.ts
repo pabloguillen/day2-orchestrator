@@ -116,6 +116,13 @@ describe("ranking", () => {
     expect(nextToStart(zero)).toEqual([]);
   });
 
+  test("launch tickets start before other work", () => {
+    let b = add(emptyBacklog(), { title: "Growth page", type: "task", priority: 1 });
+    b = createTicket(b, { title: "Install day2", type: "task", priority: 3, source: { kind: "day2_proposal", key: "field:install" } }, now).backlog;
+    b = { ...b, settings: { ...b.settings, wipLimit: 1 } };
+    expect(nextToStart(b, now).map((t) => t.title)).toEqual(["Install day2"]);
+  });
+
   test("after attempts without a result, day2 waits longer each time, then only starts it when asked", () => {
     let b = add(emptyBacklog(), { title: "Task", type: "task", priority: 2 });
     const first = afterFailedRun(b.tickets[0]!, now);

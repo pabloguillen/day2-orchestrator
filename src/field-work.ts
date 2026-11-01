@@ -1,5 +1,5 @@
 import { $ } from "bun";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AppEntry } from "./apps-registry";
 import { fetchAppEvents } from "./app-events";
@@ -224,12 +224,67 @@ export function appKind(repoPath: string): AppKind {
   return "web";
 }
 
+/**
+ * day2 already wired into the app by hand (e.g. a vendored copy of the field
+ * library started in the app's own code): where it's started, and whether the
+ * key and address come from environment variables (then turning it on is
+ * setting them for release builds, not a code change).
+ */
+export type ExistingIntegration = { file: string; envKey: string | null; envEndpoint: string | null; envSetForRelease: boolean };
+
+export function existingIntegration(repoPath: string): ExistingIntegration | null {
+  const skip = new Set(["node_modules", ".git", "ios", "android", "dist", "build", ".expo", "vendor", VENDOR_DIR]);
+  const files: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (depth > 6 || files.length > 4000) return;
+    let entries: import("node:fs").Dirent[] = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (!skip.has(e.name) && !e.name.startsWith(".")) walk(join(dir, e.name), depth + 1);
+      } else if (/\.(m?[jt]sx?)$/.test(e.name) && !/\.(test|spec|d)\./.test(e.name)) files.push(join(dir, e.name));
+    }
+  };
+  walk(repoPath, 0);
+  for (const f of files) {
+    let text = "";
+    try {
+      text = readFileSync(f, "utf-8");
+    } catch {
+      continue;
+    }
+    if (!/\bstartDay2\s*\(\s*\{/.test(text)) continue;
+    const envKey = text.match(/process\.env\.([A-Z0-9_]*DAY2_KEY)\b/)?.[1] ?? null;
+    const envEndpoint = text.match(/process\.env\.([A-Z0-9_]*DAY2_ENDPOINT)\b/)?.[1] ?? null;
+    let envSetForRelease = false;
+    if (envKey) {
+      try {
+        const eas = JSON.parse(readFileSync(join(repoPath, "eas.json"), "utf-8")) as { build?: Record<string, { env?: Record<string, string> }> };
+        const env = eas.build?.production?.env ?? {};
+        envSetForRelease = Boolean(env[envKey]) && (!envEndpoint || Boolean(env[envEndpoint]));
+      } catch {
+        // No eas.json: the variables may be set elsewhere (EAS environment variables, .env) — day2 can't tell.
+      }
+    }
+    return { file: f.slice(repoPath.length + 1), envKey, envEndpoint, envSetForRelease };
+  }
+  return null;
+}
+
 const IDENTIFY_STEP = (n: number) =>
   `${n}. When a user signs in or a signed-in session is restored, call day2.identify(user.id) (the app's own id; day2 only receives a salted hash); on sign-out, day2.identify(null). Without accounts, skip this. Only after consent where the app's markets require it.`;
 
 export function installItem(app: AppEntry, opts: { key: string; endpoint: string; candidates: Candidate[] }): IncomingItem | null {
   const kind = appKind(app.repoPath);
   if (kind !== "web" && kind !== "react-native") return null;
+  // Users' devices have to reach day2: never put a local address into the app.
+  if (!/^https:\/\//.test(opts.endpoint)) return null;
+  // Already wired in by hand: turning it on is the owner's step (launch checklist), not a second copy.
+  if (existingIntegration(app.repoPath)) return null;
   const native = kind === "react-native";
   const dir = existsSync(join(app.repoPath, "src")) ? `src/${VENDOR_DIR}` : VENDOR_DIR;
   const file = native ? "native.js" : "sensors.js";

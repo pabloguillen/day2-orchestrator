@@ -1,13 +1,14 @@
 import { allApps } from "./apps-store";
 import { runReleases } from "./mobile-release/run";
-import { loadBacklog } from "./backlog";
+import { findTicket, loadBacklog, putTicket, updateTicket, withBacklog } from "./backlog";
 import { backlogFile, syncAppTrackers, tick } from "./backlog-work";
 import { db } from "./db";
 import { gatherSignalsForApp } from "./health-scout-cli";
 import type { AppEntry } from "./apps-registry";
+import type { IncomingItem } from "./backlog";
 import { fieldStore, ingestKeys, loadAccountTenant, localTenant, runAsTenant, serverMode, type Tenant } from "./tenant";
 import { authConfig } from "./auth";
-import { fieldSignals, installItem, refreshContracts } from "./field-work";
+import { existingIntegration, fieldSignals, INSTALL_KEY, installItem, refreshContracts } from "./field-work";
 /**
  * Keeps every app's backlog moving. The API server does this on its own
  * every DAY2_BACKLOG_TICK_MINUTES (default 15); by hand:
@@ -53,6 +54,7 @@ export async function tickAll(opts: { only?: string; startWork: boolean }): Prom
           console.warn(`[day2-field] ${app.name}: couldn't generate contracts: ${err.message}`);
           return null;
         });
+        await retireInstallTicket(app, async () => installItem(app, { key: await ingestKeys().forApp(app.id), endpoint: authConfig().publicUrl, candidates: contracts?.candidates ?? [] }));
         const report = await tick(app, {
           startWork,
           gatherSignals: async () => [
@@ -95,3 +97,37 @@ if (import.meta.main) {
     process.exit(1);
   });
 }
+
+/**
+ * An install ticket that shouldn't be built (yet): the app already has day2
+ * wired in by hand, or day2 has no public address, so the app would get a
+ * local one. Not started yet → parked with the reason; the launch checklist
+ * says what's left.
+ */
+async function retireInstallTicket(app: AppEntry, fresh: () => Promise<IncomingItem | null>): Promise<void> {
+  const existing = existingIntegration(app.repoPath);
+  const local = !authConfig().publicUrl.startsWith("https://");
+  if (!existing && !local) {
+    // Public now: an install ticket parked for having a local address comes back, with the public one.
+    const item = await fresh();
+    if (!item) return;
+    await withBacklog(backlogFile(app), (b) => {
+      const t = b.tickets.find((x) => x.source.key === INSTALL_KEY && x.state === "parked" && /endpoint: "http:\/\//.test(x.description));
+      if (!t) return { backlog: b, result: null };
+      const moved = updateTicket(b, t.id, { state: "todo", description: item.description ?? t.description, doneWhen: item.doneWhen ?? t.doneWhen }, new Date(), { kind: "day2" });
+      return { backlog: moved.backlog, result: null };
+    });
+    return;
+  }
+  const why = existing
+    ? `parked: the app already starts day2 in ${existing.file}, so a second copy isn't needed — see the launch checklist on Home for what's left.`
+    : "parked: day2 has no public address yet, so users' phones couldn't reach it — see the launch checklist on Home.";
+  await withBacklog(backlogFile(app), (b) => {
+    const t = b.tickets.find((x) => x.source.key === INSTALL_KEY && x.state === "todo");
+    if (!t) return { backlog: b, result: null };
+    const moved = updateTicket(b, t.id, { state: "parked" }, new Date(), { kind: "day2" });
+    const cur = findTicket(moved.backlog, t.id)!;
+    return { backlog: putTicket(moved.backlog, { ...cur, activity: [...cur.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text: why }] }), result: null };
+  });
+}
+
