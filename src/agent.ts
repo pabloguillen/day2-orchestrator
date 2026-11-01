@@ -108,7 +108,8 @@ Follow this process exactly, in order:
    already existed before your change (check by comparing against the
    unmodified file) are not your concern — only fix lint issues your own
    diff introduces.
-6. If at any point you cannot reproduce the bug, or the fix would require
+${report.agentNotes ? `${report.agentNotes}
+` : ""}6. If at any point you cannot reproduce the bug, or the fix would require
    changes far outside what was described, STOP and explain why instead of
    guessing.
 
@@ -179,7 +180,8 @@ Follow this process:
 2. Make the change the ticket describes, fitting the existing code and style. Keep it as small as it can be while meeting every "Done when" point. Don't refactor or touch unrelated code.
 3. Tests: where the change has behaviour (code), add or extend tests that cover it, using the project's existing test setup. Static content (HTML, text, images, sitemaps) needs no unit test, but if a script generates it, test the script.
 4. Run the project's test suite, type check, lint and build — whatever the project has — and fix what your change broke. Problems that existed before your change are not yours to fix.
-5. Only stop without changes if the ticket truly can't be done in this repo (e.g. it needs an account or a decision only the owner can make) — then explain exactly what's missing. Don't stop just because it isn't a bug: this is new work.
+${report.agentNotes ? `${report.agentNotes}
+` : ""}5. Only stop without changes if the ticket truly can't be done in this repo (e.g. it needs an account or a decision only the owner can make) — then explain exactly what's missing. Don't stop just because it isn't a bug: this is new work.
 
 When done, end your final message with a plain-language summary formatted exactly like this (for the pull request description):
 

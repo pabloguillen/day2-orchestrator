@@ -28,6 +28,9 @@ import { FIX_MAX_BUDGET_USD, runFixAgent, runVerifierAgent } from "./agent";
 import { cloneIsolatedWorkspace, pushBranch } from "./git";
 import { appKind, INSTALL_KEY, placeLibrary } from "./field-work";
 import { runPipeline, type PipelineDeps } from "./pipeline";
+import { runDeviceChecks } from "./device-checks";
+import { makeMockup } from "./mockups";
+import { releaseCredentials } from "./tenant";
 import { listProposals } from "./proposals";
 import type { Signal } from "./signals/types";
 import type { BugReport, PipelineResult } from "./types";
@@ -72,6 +75,15 @@ export function reportForTicket(t: Ticket): BugReport {
 }
 
 const STEPS = 5;
+
+/** For mobile apps: how the change will be checked on virtual devices, so the agent leaves a flow for it. */
+const MAESTRO_NOTES = (ticketId: string) =>
+  [
+    "Device checks: after you finish, day2 builds the app and runs it on an iPhone Simulator and an Android emulator with Maestro (https://maestro.mobile.dev), keeping a screenshot of every takeScreenshot step, before and after your change. A crash or a failed flow stops the change.",
+    `If your change touches anything users see, add or update a Maestro flow at .maestro/day2/${ticketId.toLowerCase()}.yaml: appId from the app config; launchApp with clearState: true; get to the changed screen the way a user would; assertVisible the key text or element; takeScreenshot (short-kebab-name) on each screen it passes.`,
+    "Also make sure .maestro/day2/smoke.yaml exists: launchApp, wait for the first screen (extendedWaitUntil), takeScreenshot: start.",
+    "Flows run as a signed-out user: if the changed screen needs a signed-in user, cover what's reachable signed out and say so in your summary. Don't change app behaviour for the flows; adding testID props to elements without visible text is fine.",
+  ].join(" ");
 
 /** Pipeline deps that report progress on the ticket as each stage starts. */
 function progressDeps(file: string, ticketId: string, build: boolean): Partial<PipelineDeps> {
@@ -133,9 +145,23 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
             },
           }
         : {};
+    const mobile = appKind(app.repoPath) === "react-native";
+    const report = { ...reportForTicket(t), ...(mobile ? { agentNotes: MAESTRO_NOTES(t.id) } : {}) };
+    const devices: Partial<PipelineDeps> = mobile
+      ? {
+          runDeviceChecks: async (cwd, branch, changedFiles) => {
+            await withBacklog(file, (b) => {
+              const cur = findTicket(b, ticketId);
+              return { backlog: cur && cur.state === "doing" ? putTicket(b, { ...cur, progress: { step: 3, of: STEPS, label: "running it on virtual devices" } }) : b, result: null };
+            });
+            return runDeviceChecks({ appId: app.id, repoPath: app.repoPath, cwd, key: branch, changedFiles, expoToken: async () => (await releaseCredentials().get(app.id, "expo"))?.value.token ?? null });
+          },
+        }
+      : {};
     const result = await withCreditContext({ appId: app.id, appName: app.name, service: "agent_work", description: `${t.id}: ${t.title}` }, () =>
-      runPipeline(app.repoPath, reportForTicket(t), resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId, t.type !== "bug"), ...deps, ...install }),
+      runPipeline(app.repoPath, report, resolve(app.repoPath, ".day2-processed.json"), { ...progressDeps(file, ticketId, t.type !== "bug"), ...devices, ...deps, ...install }),
     );
+    const checks = "checks" in result && result.checks ? { ...result.checks, at: new Date().toISOString() } : undefined;
     await withBacklog(file, (b) => {
       const cur = findTicket(b, ticketId);
       if (!cur) return { backlog: b, result: null };
@@ -146,6 +172,7 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
         const ticket: Ticket = {
           ...moved.ticket,
           approval: { kind: "pr", number, url: result.url },
+          ...(checks ? { deviceChecks: checks } : {}),
           failedRuns: 0,
           autoStartAfter: null,
           activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: cur.type === "bug" ? `opened PR #${number} with a failing test and the fix — waiting for your review.` : `opened PR #${number} — waiting for your review.` }],
@@ -159,6 +186,7 @@ export async function runTicket(app: AppEntry, ticketId: string, deps: Partial<P
         ...moved.ticket,
         failedRuns: retry.failedRuns,
         autoStartAfter: retry.autoStartAfter,
+        ...(checks ? { deviceChecks: checks } : {}),
         activity: [
           ...moved.ticket.activity,
           { at: now.toISOString(), actor: "day2", kind: "work", text: `${failText}${"reason" in result && result.reason ? `: ${String(result.reason).slice(0, 300)}` : ""}. Back in To do — ${retry.note}` },
@@ -306,6 +334,34 @@ export async function planTicket(app: AppEntry, ticketId: string): Promise<void>
 }
 
 async function writePlan(app: AppEntry, ticketId: string): Promise<void> {
+  let planned: { plan: string; doneWhen: string[] } | null = null;
+  await writePlanText(app, ticketId, (p) => (planned = p));
+  // With the plan: what it will look like, when it changes a screen (mobile and web apps).
+  const p = planned as { plan: string; doneWhen: string[] } | null;
+  const kind = appKind(app.repoPath);
+  if (p && (kind === "react-native" || kind === "web")) await attachMockup(app, ticketId, p).catch((err) => console.warn(`[day2-backlog] ${ticketId}: no mockup: ${(err as Error).message}`));
+}
+
+/** Draws the ticket's mockup (mockups.ts) and keeps it on the ticket; "none" when it changes no screen. */
+export async function attachMockup(app: AppEntry, ticketId: string, extra: { plan?: string | null; doneWhen?: string[] } = {}): Promise<"made" | "none"> {
+  const file = backlogFile(app);
+  const t = await withBacklog(file, (b) => ({ backlog: b, result: findTicket(b, ticketId) }));
+  if (!t) throw new Error(`No ticket ${ticketId}.`);
+  const m = await withCreditContext({ appId: app.id, appName: app.name, service: "scan_answer", description: `Mockup for ${t.id}: ${t.title}` }, () =>
+    makeMockup(app.repoPath, app.id, t.id, { title: t.title, description: t.description, doneWhen: extra.doneWhen ?? t.doneWhen, plan: extra.plan ?? (t.approval?.kind === "plan" ? t.approval.plan : null) }),
+  );
+  await withBacklog(file, (b) => {
+    const cur = findTicket(b, ticketId);
+    if (!cur) return { backlog: b, result: null };
+    const now = new Date().toISOString();
+    const note = m === "none" ? "this doesn't change any screen, so there's no mockup." : `drew a mockup${m.note ? `: ${m.note}` : "."}`;
+    return { backlog: putTicket(b, { ...cur, ...(m === "none" ? {} : { mockup: { at: now, file: m.file, note: m.note } }), activity: [...cur.activity, { at: now, actor: "day2", kind: "work", text: note }] }), result: null };
+  });
+  return m === "none" ? "none" : "made";
+}
+
+async function writePlanText(app: AppEntry, ticketId: string, onPlan: (p: { plan: string; doneWhen: string[] }) => void): Promise<void> {
+  let planned: { plan: string; doneWhen: string[] } | null = null;
   const file = backlogFile(app);
   const t = await withBacklog(file, (b) => ({ backlog: b, result: findTicket(b, ticketId) }));
   if (!t) return;
@@ -360,6 +416,7 @@ Reply with ONLY JSON: {"plan": "<5-10 plain-language steps, one per line>", "don
       };
     }
     const moved = updateTicket(b, ticketId, { state: "to_approve", doneWhen: cur.doneWhen.length ? cur.doneWhen : parsed.doneWhen, effort: parsed.effort, estimateCredits: estimateCredits(parsed.effort) }, now, { kind: "day2" });
+    planned = { plan: parsed.plan, doneWhen: moved.ticket.doneWhen };
     return {
       backlog: putTicket(moved.backlog, {
         ...moved.ticket,
@@ -369,6 +426,7 @@ Reply with ONLY JSON: {"plan": "<5-10 plain-language steps, one per line>", "don
       result: null,
     };
   });
+  if (planned) onPlan(planned);
 }
 
 // ---------------------------------------------------------------------------

@@ -131,6 +131,10 @@ export type Ticket = {
   failedRuns?: number;
   /** day2 doesn't start this by itself before this time (null/absent: any time). */
   autoStartAfter?: string | null;
+  /** The last run on virtual devices (device-checks/): result, one line, and the report's key for screenshots. */
+  deviceChecks?: { status: "passed" | "failed" | "skipped"; summary: string; key: string | null; at: string } | null;
+  /** A mockup of the change before it's built (mockups.ts). */
+  mockup?: { at: string; file: string; note: string } | null;
   /** A feature broken into smaller tickets points at its parent. */
   parentId?: string;
   createdAt: string;

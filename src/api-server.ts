@@ -50,6 +50,8 @@ import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConne
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, existingIntegration, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
 import { isLaunchKey, launchChecklist } from "./launch";
+import { loadDeviceReport, shotPath, type DeviceReport } from "./device-checks";
+import { MOCKUP_MAX_USD, mockupPath } from "./mockups";
 import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
 import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeUrl } from "./ads/app-links";
 import { betTicketOpts, checkHandoff, destinationFor, handoffJs, type Destination } from "./ads/destination";
@@ -198,7 +200,7 @@ import {
   type TicketType,
   type Ticket,
 } from "./backlog";
-import { backlogFile, closedWithoutMerge, isRunning, settleByPr, startTicket, syncAppTrackers, tick, trackerClientsFor } from "./backlog-work";
+import { attachMockup, backlogFile, closedWithoutMerge, isRunning, settleByPr, startTicket, syncAppTrackers, tick, trackerClientsFor } from "./backlog-work";
 import {
   applyTellPlan,
   buildTellPrompt,
@@ -752,7 +754,7 @@ route("GET", "/api/apps/:id/approvals", async (_req, params, t) => {
   }
   const cards = await fetchPendingChangeCards(app.repoPath);
   const asked = loadPrQuestions(appFile(app, PR_QUESTIONS_FILENAME));
-  return json({ available: true, cards: cards.map((c) => ({ ...c, questions: asked.filter((q) => q.pr === c.number).map(({ pr: _p, ...q }) => q) })) });
+  return json({ available: true, cards: cards.map((c) => ({ ...c, questions: asked.filter((q) => q.pr === c.number).map(({ pr: _p, ...q }) => q), checks: deviceReportView(app, loadDeviceReport(app.id, c.branch)) })) });
 });
 
 route("POST", "/api/apps/:id/approvals/:pr/apply", async (_req, params, t) => {
@@ -796,6 +798,28 @@ route("POST", "/api/apps/:id/approvals/:pr/ask", async (req, params, t) => {
     () => false,
   );
   return json({ ok: true, answer: result.answer, askedAt: result.askedAt, credits, posted });
+});
+
+// ---- Device checks: the change on virtual devices, with screenshots before and after ----
+
+function deviceReportView(app: AppEntry, r: DeviceReport | null) {
+  if (!r) return null;
+  const url = (rel: string | null) => (rel ? `/api/apps/${encodeURIComponent(app.id)}/device-checks/${encodeURIComponent(r.key)}/shot?f=${encodeURIComponent(rel)}` : null);
+  return { ...r, runs: r.runs.map((x) => ({ ...x, shots: x.shots.map((s) => ({ name: s.name, before: url(s.before), after: url(s.after) })) })) };
+}
+
+route("GET", "/api/apps/:id/device-checks/:key", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const view = deviceReportView(app, loadDeviceReport(app.id, params.key!));
+  if (!view) throw new HttpError(404, "No device check for this change.");
+  return json(view);
+});
+
+route("GET", "/api/apps/:id/device-checks/:key/shot", async (req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const p = shotPath(app.id, params.key!, new URL(req.url).searchParams.get("f") ?? "");
+  if (!p) return new Response("Not found", { status: 404 });
+  return new Response(Bun.file(p), { headers: { "content-type": "image/png", "cache-control": "private, max-age=86400" } });
 });
 
 // ---- Releases (plan §3.2) ----
@@ -1206,6 +1230,30 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/comments", async (req, params,
     return { backlog: next, result: findTicket(next, params.tid!)! };
   });
   return json({ ticket: answered }, { status: 201 });
+});
+
+/** "Show me a mockup": what the ticket will look like, before it's built. */
+route("POST", "/api/apps/:id/backlog/tickets/:tid/mockup", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const tk = findTicket(await loadBacklogFor(app), params.tid!);
+  if (!tk) throw new HttpError(404, `No ticket ${params.tid}.`);
+  const check = await authorize(t.credits, { appId: app.id, appName: app.name, service: "scan_answer", maxCostUsd: MOCKUP_MAX_USD, killSwitch: killSwitchFor(app) });
+  if (!check.ok) throw new CreditsError(check);
+  let outcome: "made" | "none";
+  try {
+    outcome = await attachMockup(app, tk.id);
+  } catch (err) {
+    throw new HttpError(502, (err as Error).message);
+  }
+  return json({ outcome, ticket: findTicket(await loadBacklogFor(app), tk.id) });
+});
+
+route("GET", "/api/apps/:id/backlog/tickets/:tid/mockup", async (_req, params, t) => {
+  const app = await requireApp(t, params.id!);
+  const tk = findTicket(await loadBacklogFor(app), params.tid!);
+  const p = tk?.mockup ? mockupPath(app.id, tk.mockup.file) : null;
+  if (!p) return new Response("Not found", { status: 404 });
+  return new Response(Bun.file(p), { headers: { "content-type": "image/png", "cache-control": "private, max-age=300" } });
 });
 
 route("POST", "/api/apps/:id/backlog/tickets/:tid/work", async (_req, params, t) => {

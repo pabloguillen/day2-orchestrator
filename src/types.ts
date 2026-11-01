@@ -23,6 +23,8 @@ export type BugReport = {
   correlationKey?: string;
   /** "build": a feature, task or improvement from the backlog — built, not reproduced. Default "bug". */
   kind?: "bug" | "build";
+  /** day2's own notes for the agent about how this app is checked (not part of the untrusted ticket text). */
+  agentNotes?: string;
 };
 
 export type PipelineResult =
@@ -30,8 +32,8 @@ export type PipelineResult =
   | { status: "already_processed"; sourceId: string }
   | { status: "reproduction_failed"; reason: string }
   | { status: "verifier_rejected"; reason: string }
-  | { status: "ci_failed"; reason: string }
-  | { status: "pr_opened"; url: string; branch: string };
+  | { status: "ci_failed"; reason: string; checks?: import("./device-checks/types").DeviceVerdict }
+  | { status: "pr_opened"; url: string; branch: string; checks?: import("./device-checks/types").DeviceVerdict };
 
 /** Governance levels L0-L5, per source doc "Autonomy levels and governance".
  * Autonomy is earned per area, not granted platform-wide — an area only

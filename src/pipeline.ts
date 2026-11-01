@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { runFixAgent, runVerifierAgent, type AgentRunResult } from "./agent";
 import { cloneIsolatedWorkspace, commitAll, createFixBranch, diffStat, hasChanges, pushBranch } from "./git";
 import { openFixPr } from "./pr";
+import type { DeviceVerdict } from "./device-checks/types";
 import type { BugReport, PipelineResult } from "./types";
 
 function loadProcessed(stateFile: string): Set<string> {
@@ -91,6 +92,12 @@ export type PipelineDeps = {
   pushBranch: (cwd: string, branch: string) => Promise<void>;
   openFixPr: (cwd: string, branch: string, report: BugReport, agentSummary: string) => Promise<string>;
   removeWorkspace: (cwd: string) => void;
+  /**
+   * Runs the change on virtual devices (device-checks/) — set for mobile
+   * apps. "failed" stops the change before a pull request; the summary goes
+   * into the pull request either way.
+   */
+  runDeviceChecks?: (cwd: string, branch: string, changedFiles: string[]) => Promise<DeviceVerdict>;
 };
 
 const defaultDeps: PipelineDeps = {
@@ -171,6 +178,13 @@ export async function runPipeline(
       return { status: "reproduction_failed", reason };
     }
 
+    let checks: DeviceVerdict | null = null;
+    if (d.runDeviceChecks) {
+      console.log(`[day2] Running the change on virtual devices...`);
+      checks = await d.runDeviceChecks(cwd, branch, changedFilesFromDiffStat(stat));
+      if (checks.status === "failed") return { status: "ci_failed", reason: `on a virtual device: ${checks.summary}`, checks };
+    }
+
     console.log(`[day2] Running independent verifier...`);
     const verifier = await d.runVerifierAgent(cwd, report);
     console.log(
@@ -183,11 +197,11 @@ export async function runPipeline(
     }
 
     await d.pushBranch(cwd, branch);
-    const url = await d.openFixPr(cwd, branch, report, fix.finalText);
+    const url = await d.openFixPr(cwd, branch, report, checks && checks.status !== "skipped" ? `${fix.finalText}\n\n## On virtual devices\n${checks.summary} Screenshots before and after are in day2 (Approvals).` : fix.finalText);
     console.log(`[day2] Opened PR: ${url}`);
 
     markProcessed(stateFile, report);
-    return { status: "pr_opened", url, branch };
+    return { status: "pr_opened", url, branch, ...(checks ? { checks } : {}) };
   } finally {
     d.removeWorkspace(cwd);
   }

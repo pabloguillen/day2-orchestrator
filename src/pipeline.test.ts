@@ -318,3 +318,38 @@ describe("backlog work that isn't a bug (kind: build)", () => {
     });
   });
 });
+
+describe("changes users can see run on virtual devices first", () => {
+  test("a failed device check stops the change before a pull request", async () => {
+    await withStateFile(async (stateFile) => {
+      const calls: string[] = [];
+      const deps = happyDeps(calls, {
+        runDeviceChecks: async () => {
+          calls.push("runDeviceChecks");
+          return { status: "failed", summary: "iPhone Simulator (iPhone 16): failed — the app crashed", key: "day2-fix-x" };
+        },
+      });
+      const result = await runPipeline("/fake/repo", bugReport({ kind: "build" }), stateFile, deps);
+      expect(result).toMatchObject({ status: "ci_failed", reason: "on a virtual device: iPhone Simulator (iPhone 16): failed — the app crashed" });
+      expect(calls).not.toContain("runVerifierAgent");
+      expect(calls).not.toContain("pushBranch");
+    });
+  });
+
+  test("passed: the pull request says so, and the result carries the report", async () => {
+    await withStateFile(async (stateFile) => {
+      const calls: string[] = [];
+      let body = "";
+      const deps = happyDeps(calls, {
+        runDeviceChecks: async () => ({ status: "passed", summary: "iPhone Simulator (iPhone 16): all flows passed.", key: "day2-fix-x" }),
+        openFixPr: async (_c, _b, _r, summary) => {
+          body = summary;
+          return "https://github.com/acme/app/pull/7";
+        },
+      });
+      const result = await runPipeline("/fake/repo", bugReport({ kind: "build" }), stateFile, deps);
+      expect(result).toMatchObject({ status: "pr_opened", checks: { status: "passed", key: "day2-fix-x" } });
+      expect(body).toContain("## On virtual devices\niPhone Simulator (iPhone 16): all flows passed.");
+    });
+  });
+});
