@@ -230,7 +230,14 @@ export function appKind(repoPath: string): AppKind {
  * key and address come from environment variables (then turning it on is
  * setting them for release builds, not a code change).
  */
-export type ExistingIntegration = { file: string; envKey: string | null; envEndpoint: string | null; envSetForRelease: boolean };
+export type ExistingIntegration = {
+  file: string;
+  envKey: string | null;
+  envEndpoint: string | null;
+  envSetForRelease: boolean;
+  /** The app tells day2 who the user is (day2.identify) somewhere in its code. */
+  identify: boolean;
+};
 
 export function existingIntegration(repoPath: string): ExistingIntegration | null {
   const skip = new Set(["node_modules", ".git", "ios", "android", "dist", "build", ".expo", "vendor", VENDOR_DIR]);
@@ -250,6 +257,13 @@ export function existingIntegration(repoPath: string): ExistingIntegration | nul
     }
   };
   walk(repoPath, 0);
+  const identify = files.some((f) => {
+    try {
+      return /\bday2\.identify\(/.test(readFileSync(f, "utf-8"));
+    } catch {
+      return false;
+    }
+  });
   for (const f of files) {
     let text = "";
     try {
@@ -270,7 +284,7 @@ export function existingIntegration(repoPath: string): ExistingIntegration | nul
         // No eas.json: the variables may be set elsewhere (EAS environment variables, .env) — day2 can't tell.
       }
     }
-    return { file: f.slice(repoPath.length + 1), envKey, envEndpoint, envSetForRelease };
+    return { file: f.slice(repoPath.length + 1), envKey, envEndpoint, envSetForRelease, identify };
   }
   return null;
 }

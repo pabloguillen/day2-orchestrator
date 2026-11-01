@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import { createTicket, rankBacklog, withBacklog, type NewTicketInput } from "../backlog";
 import { backlogFile } from "../backlog-work";
-import { appKind } from "../field-work";
+import { appKind, existingIntegration } from "../field-work";
 import { loadStorePrivacy, practicesFrom, STORE_PRIVACY_FILENAME, storeStatus } from "../store-privacy";
 import { fieldStore, releaseCredentials } from "../tenant";
 import { createAppStore } from "./app-store";
@@ -60,7 +60,7 @@ export async function runReleases(app: AppEntry, log: (text: string) => void = (
       privacyDue: async (platform) => {
         const sp = loadStorePrivacy(privacyPath);
         const tickets = (await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }))).tickets;
-        return storeStatus(sp, practicesFrom(tickets, sp.settings)).find((s) => s.store === platform)?.steps ?? [];
+        return storeStatus(sp, practicesFrom(tickets, sp.settings, existingIntegration(app.repoPath))).find((s) => s.store === platform)?.steps ?? [];
       },
       ticket,
       log,

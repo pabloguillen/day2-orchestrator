@@ -33,7 +33,7 @@ export type LaunchInput = {
   /** day2's address users' devices and ad platforms reach (DAY2_PUBLIC_URL). */
   publicUrl: string;
   ingestKey: string;
-  field: { reporting: boolean; installTicket: Ticket; existing: ExistingIntegration | null };
+  field: { reporting: boolean; installTicket: Ticket; existing: ExistingIntegration | null; turnOnTicket?: Ticket };
   privacy: {
     applies: boolean;
     stores: Array<{ store: "ios" | "android"; upToDate: boolean; steps: string[] }>;
@@ -79,6 +79,8 @@ export function launchChecklist(i: LaunchInput): LaunchItem[] {
     to: app("/checks"),
   });
   if (f.reporting) items.push(fieldItem("done", "The app reports to day2."));
+  else if (ex && ex.envKey && !ex.envSetForRelease && open(f.turnOnTicket ?? null))
+    items.push(fieldItem("you", `Approve ${f.turnOnTicket!.id}: day2's pull request turns it on in release builds. Then the next release build reports to day2.`, f.turnOnTicket!));
   else if (ex && ex.envKey && !ex.envSetForRelease)
     items.push(
       fieldItem(
@@ -169,5 +171,5 @@ export function launchChecklist(i: LaunchInput): LaunchItem[] {
 }
 
 /** Source keys of the tickets that belong to the launch checklist (shown as "Launch" on the board). */
-export const LAUNCH_KEYS = [/^field:install$/, /^privacy-notice:update:/, /^release:setup$/, /^ads:website-handoff:/, /^store-privacy:att$/];
+export const LAUNCH_KEYS = [/^field:install$/, /^field:turn-on$/, /^privacy-notice:update:/, /^release:setup$/, /^ads:website-handoff:/, /^store-privacy:att$/];
 export const isLaunchKey = (key: string | undefined) => Boolean(key && LAUNCH_KEYS.some((r) => r.test(key)));

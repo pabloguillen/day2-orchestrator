@@ -24,7 +24,7 @@ function handWiredApp(easEnv: Record<string, string> = {}) {
 describe("an integration wired in by hand", () => {
   test("found, with its env variables — and day2 doesn't propose a second copy", () => {
     const repo = handWiredApp();
-    expect(existingIntegration(repo)).toEqual({ file: "src/lib/day2.ts", envKey: "EXPO_PUBLIC_DAY2_KEY", envEndpoint: "EXPO_PUBLIC_DAY2_ENDPOINT", envSetForRelease: false });
+    expect(existingIntegration(repo)).toEqual({ file: "src/lib/day2.ts", envKey: "EXPO_PUBLIC_DAY2_KEY", envEndpoint: "EXPO_PUBLIC_DAY2_ENDPOINT", envSetForRelease: false, identify: false });
     const app: AppEntry = { id: "app_d", name: "Dotty", repoPath: repo, connectionMethod: "local_path", addedAt: "" };
     expect(installItem(app, { key: "d2k_x", endpoint: "https://day2.example", candidates: [] })).toBeNull();
     expect(existingIntegration(handWiredApp({ EXPO_PUBLIC_DAY2_KEY: "d2k_x", EXPO_PUBLIC_DAY2_ENDPOINT: "https://day2.example" }))!.envSetForRelease).toBe(true);
@@ -44,7 +44,7 @@ const base = (over: Partial<LaunchInput> = {}): LaunchInput => ({
   kind: "react-native",
   publicUrl: "http://localhost:3000",
   ingestKey: "d2k_abc",
-  field: { reporting: false, installTicket: null, existing: { file: "src/lib/day2.ts", envKey: "EXPO_PUBLIC_DAY2_KEY", envEndpoint: "EXPO_PUBLIC_DAY2_ENDPOINT", envSetForRelease: false } },
+  field: { reporting: false, installTicket: null, existing: { file: "src/lib/day2.ts", envKey: "EXPO_PUBLIC_DAY2_KEY", envEndpoint: "EXPO_PUBLIC_DAY2_ENDPOINT", envSetForRelease: false, identify: true } },
   privacy: { applies: true, stores: [{ store: "ios", upToDate: false, steps: [] }, { store: "android", upToDate: true, steps: [] }], notice: { upToDate: true, found: { path: "src/legal/texts.ts" }, ticket: null } },
   releases: null,
   ads: null,
@@ -85,8 +85,15 @@ describe("the launch checklist", () => {
     expect(items.some((x) => x.id === "ads_handoff")).toBe(false);
   });
 
+  test("day2's pull request that turns it on: approving it is the owner's step", () => {
+    const items = launchChecklist(base({ publicUrl: "https://day2.example.com", field: { ...base().field, turnOnTicket: { id: "D2-14", state: "to_approve" } } }));
+    expect(items[1]).toMatchObject({ state: "you", ticket: { id: "D2-14" } });
+    expect(items[1]!.next).toContain("Approve D2-14");
+  });
+
   test("launch tickets are recognised by their source", () => {
     expect(isLaunchKey("field:install")).toBe(true);
+    expect(isLaunchKey("field:turn-on")).toBe(true);
     expect(isLaunchKey("privacy-notice:update:ab12")).toBe(true);
     expect(isLaunchKey("ads:website-handoff:day2.example.com")).toBe(true);
     expect(isLaunchKey("loop:sitemap")).toBe(false);

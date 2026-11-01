@@ -1,6 +1,7 @@
 import { allApps } from "./apps-store";
 import { runReleases } from "./mobile-release/run";
-import { findTicket, loadBacklog, putTicket, updateTicket, withBacklog } from "./backlog";
+import { createTicket, findTicket, loadBacklog, putTicket, updateTicket, withBacklog } from "./backlog";
+import { openTurnOnPr, syncCheckout, TURN_ON_KEY } from "./field-turn-on";
 import { backlogFile, isOrphan, syncAppTrackers, tick } from "./backlog-work";
 import { db } from "./db";
 import { gatherSignalsForApp } from "./health-scout-cli";
@@ -47,6 +48,8 @@ export async function tickAll(opts: { only?: string; startWork: boolean }): Prom
     // credits, using that account's GitHub access and tracker connections.
     await runAsTenant(tenant, async () => {
       try {
+        // Read the app as it is on GitHub now, not as it was when day2 last looked.
+        await syncCheckout(app.repoPath);
         const sentry = loadBacklog(backlogFile(app)).settings.sentry;
         const field = fieldStore();
         // The app's field contracts follow its code.
@@ -55,6 +58,7 @@ export async function tickAll(opts: { only?: string; startWork: boolean }): Prom
           return null;
         });
         await retireInstallTicket(app, async () => installItem(app, { key: await ingestKeys().forApp(app.id), endpoint: authConfig().publicUrl, candidates: contracts?.candidates ?? [] }));
+        await proposeTurnOn(app).catch((err: Error) => console.warn(`[day2-field] ${app.name}: couldn't open the pull request that turns day2 on: ${err.message}`));
         const report = await tick(app, {
           startWork,
           gatherSignals: async () => [
@@ -130,6 +134,29 @@ async function retireInstallTicket(app: AppEntry, fresh: () => Promise<IncomingI
     const moved = updateTicket(b, t.id, { state: "parked" }, new Date(), { kind: "day2" });
     const cur = findTicket(moved.backlog, t.id)!;
     return { backlog: putTicket(moved.backlog, { ...cur, activity: [...cur.activity, { at: new Date().toISOString(), actor: "day2", kind: "work", text: why }] }), result: null };
+  });
+}
+
+/**
+ * day2 wired in by hand, off until release builds get its settings: day2
+ * opens the pull request that sets them (field-turn-on.ts), once, as a
+ * ticket waiting for the owner's approval.
+ */
+async function proposeTurnOn(app: AppEntry): Promise<void> {
+  const pub = authConfig().publicUrl;
+  if (!pub.startsWith("https://")) return;
+  const ex = existingIntegration(app.repoPath);
+  if (!ex?.envKey || ex.envSetForRelease) return;
+  const have = loadBacklog(backlogFile(app)).tickets.find((t) => t.source.key === TURN_ON_KEY);
+  if (have) return; // once — merged, waiting, or declined
+  const pr = await openTurnOnPr(app, ex, await ingestKeys().forApp(app.id), pub);
+  if (!pr) return;
+  const now = new Date();
+  await withBacklog(backlogFile(app), (b) => {
+    if (b.tickets.some((t) => t.source.key === TURN_ON_KEY)) return { backlog: b, result: null };
+    const r = createTicket(b, { title: "Turn on day2 in release builds", type: "task", description: `day2 is in the app (${ex.file}) but off until release builds get its key and address. The pull request sets them in eas.json.`, doneWhen: ["eas.json's production build profile sets the day2 key and address"], priority: 1, prioritySource: "day2", source: { kind: "day2_proposal", key: TURN_ON_KEY }, actor: "day2", createdNote: "Needed before the next release." }, now);
+    const moved = updateTicket(r.backlog, r.ticket.id, { state: "to_approve" }, now, { kind: "day2" });
+    return { backlog: putTicket(moved.backlog, { ...moved.ticket, approval: { kind: "pr", number: pr.number, url: pr.url }, activity: [...moved.ticket.activity, { at: now.toISOString(), actor: "day2", kind: "work", text: `opened PR #${pr.number} — approve it and the next release build reports to day2.` }] }), result: null };
   });
 }
 

@@ -277,6 +277,22 @@ For **each** platform you want:
 
 ---
 
+## 12b. What your customers do (and what day2 does for them)
+
+Once day2 is deployed, an app owner never touches tunnels, addresses or keys for day2 itself. Their part:
+
+| Step | Who |
+|---|---|
+| day2 in the app | **day2.** A pull request adds it ("Install day2 field checks"). For an app that wired day2 in by hand with env variables, a pull request sets them in `eas.json` ("Turn on day2 in release builds"). The owner approves. |
+| Privacy notice | **day2**, with a pull request when the notice is in the app's code and the owner says yes. Otherwise the owner copies the drafted section. |
+| App Store / Google Play privacy answers | **The owner**, because Apple and Google don't let other tools fill these forms. **Do it with me** on the Privacy page walks through it one screen at a time, with the page to open, then confirms. |
+| Connecting Expo, App Store Connect, Google Play (once) | **The owner**, step by step on Releases, with the page to open at each step. day2 tries each connection against the app before saving it, and a mistake says what to fix: wrong role, app not invited, API off. |
+| Building and submitting | **day2**, after the connections. The owner approves release notes if they want to. |
+
+Still on the owner, not automated yet: the first build of a new app (so EAS has the signing certificates), and the first upload of an Android app in the Play Console.
+
+---
+
 ## 13. Moving the demo data
 
 **There is no importer.** Nothing in the code reads local-mode files into Postgres. Production starts empty: customers sign up, connect GitHub and add their apps again.

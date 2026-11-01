@@ -50,12 +50,15 @@ import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConne
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, existingIntegration, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
 import { isLaunchKey, launchChecklist } from "./launch";
+import { TURN_ON_KEY } from "./field-turn-on";
 import { loadDeviceReport, shotPath, type DeviceReport } from "./device-checks";
 import { MOCKUP_MAX_USD, mockupPath } from "./mockups";
 import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
-import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeUrl } from "./ads/app-links";
+import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeIdsFromRepo, storeUrl } from "./ads/app-links";
 import { betTicketOpts, checkHandoff, destinationFor, handoffJs, type Destination } from "./ads/destination";
-import { parseCredential } from "./mobile-release/credentials";
+import { parseCredential, type AscCredential, type ExpoCredential, type PlayCredential } from "./mobile-release/credentials";
+import { checkAsc, checkExpo, checkPlay } from "./mobile-release/check-access";
+import { walkthrough } from "./store-walkthrough";
 import { readiness } from "./mobile-release/setup";
 import { runReleases, SETUP_KEY } from "./mobile-release/run";
 import type { Release } from "./mobile-release/types";
@@ -1658,6 +1661,7 @@ route("GET", "/api/apps/:id/launch", async (_req, params, t) => {
   const kind = appKind(app.repoPath);
   const [meta, backlog, key, privacy] = await Promise.all([fieldStore().meta(app.id), loadBacklogFor(app), ingestKeys().forApp(app.id), storePrivacyResponse(app)]);
   const install = backlog.tickets.find((x) => x.source.key === INSTALL_KEY);
+  const turnOn = backlog.tickets.find((x) => x.source.key === TURN_ON_KEY);
   const releases = kind === "react-native" ? await mobileReleasesResponse(app) : null;
   const ads = loadAds(appFile(app, ADS_FILENAME));
   const dest = destinationFor(app, ads.destination);
@@ -1666,7 +1670,7 @@ route("GET", "/api/apps/:id/launch", async (_req, params, t) => {
     kind,
     publicUrl: authConfig().publicUrl,
     ingestKey: key,
-    field: { reporting: Boolean(meta), installTicket: install ? { id: install.id, state: install.state } : null, existing: existingIntegration(app.repoPath) },
+    field: { reporting: Boolean(meta), installTicket: install ? { id: install.id, state: install.state } : null, existing: existingIntegration(app.repoPath), turnOnTicket: turnOn ? { id: turnOn.id, state: turnOn.state } : null },
     privacy: { applies: privacy.applies, stores: privacy.stores, notice: privacy.notice ? { upToDate: privacy.notice.upToDate, found: privacy.notice.found, ticket: privacy.notice.ticket } : null },
     releases: releases?.enabled
       ? { enabled: true, codeGaps: releases.setup?.code.length ?? 0, setupTicket: releases.setup?.ticket ?? null, missingAccounts: releases.accounts ? (["expo", "asc", "play"] as const).filter((k) => !releases.accounts![k]).map((k) => ({ expo: "Expo", asc: "App Store Connect", play: "Google Play" })[k]) : [] }
@@ -1714,7 +1718,16 @@ route("PUT", "/api/apps/:id/mobile-releases/accounts/:kind", async (req, params,
   } catch (err) {
     throw new HttpError(400, (err as Error).message);
   }
-  await releaseCredentials().set(app.id, kind, parsed.value as never, parsed.label, (await actorName(t)) ?? null);
+  // Only what works is kept: each connection is tried against this app first.
+  const ids = storeIdsFromRepo(app.repoPath);
+  const access =
+    kind === "expo"
+      ? await checkExpo(parsed.value as ExpoCredential)
+      : kind === "asc"
+        ? await checkAsc(parsed.value as AscCredential, ids.bundleId)
+        : await checkPlay(parsed.value as PlayCredential, ids.packageName);
+  if (!access.ok) throw new HttpError(400, access.why);
+  await releaseCredentials().set(app.id, kind, parsed.value as never, `${parsed.label} · ${access.who}`, (await actorName(t)) ?? null);
   return json(await mobileReleasesResponse(app));
 });
 
@@ -1762,14 +1775,16 @@ async function storePrivacyResponse(app: AppEntry) {
   const applies = kind === "react-native";
   const file = loadStorePrivacy(appFile(app, STORE_PRIVACY_FILENAME));
   const tickets = applies || kind === "web" ? (await loadBacklogFor(app)).tickets : [];
-  const practices = practicesFrom(tickets, applies ? file.settings : { adConversions: "off", deviceId: false });
+  const practices = practicesFrom(tickets, applies ? file.settings : { adConversions: "off", deviceId: false }, existingIntegration(app.repoPath));
   const att = tickets.find((x) => x.source.key === ATT_KEY);
   return {
     applies,
     settings: file.settings,
     practices,
     attTicket: att ? { id: att.id, state: att.state } : null,
-    stores: applies ? storeStatus(file, practices) : [],
+    stores: applies
+      ? storeStatus(file, practices).map((st) => ({ ...st, walkthrough: walkthrough(st.store, st.steps, { appName: loadAppLinks(appFile(app, APP_LINKS_FILENAME)).ios?.name || app.name, appStoreId: loadAppLinks(appFile(app, APP_LINKS_FILENAME)).ios?.appStoreId ?? null }) }))
+      : [],
     answers: applies ? disclosure(practices) : null,
     notice: kind === "web" || applies ? noticeView(app, file, tickets, practices, applies) : null,
   };

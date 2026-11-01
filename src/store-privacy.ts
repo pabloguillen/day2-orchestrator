@@ -81,12 +81,13 @@ export function saveStorePrivacy(path: string, f: StorePrivacyFile): void {
 const done = (tickets: Ticket[], pred: (key: string) => boolean) => tickets.some((t) => t.source.key && pred(t.source.key) && t.state === "done");
 
 /** What's in the app now: merged day2 work plus the owner's settings. */
-export function practicesFrom(tickets: Ticket[], settings: Settings): Practices {
-  const fieldChecks = done(tickets, (k) => k === INSTALL_KEY);
+export function practicesFrom(tickets: Ticket[], settings: Settings, wiredByHand: { identify: boolean } | null = null): Practices {
+  // In the app through day2's install ticket, or wired in by hand (field-work existingIntegration).
+  const fieldChecks = done(tickets, (k) => k === INSTALL_KEY) || Boolean(wiredByHand);
   return {
     fieldChecks,
     // The install ticket includes day2.identify; the separate identify ticket covers apps installed before.
-    identify: fieldChecks || done(tickets, (k) => k === IDENTIFY_KEY),
+    identify: (fieldChecks && !wiredByHand) || Boolean(wiredByHand?.identify) || done(tickets, (k) => k === IDENTIFY_KEY),
     treatments: done(tickets, (k) => k.startsWith("retention:") && k !== IDENTIFY_KEY && !k.startsWith("retention:undo:")),
     deviceId: fieldChecks && settings.deviceId,
     adConversions: fieldChecks && settings.adConversions === "with_consent" && done(tickets, (k) => k === ATT_KEY),
