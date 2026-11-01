@@ -9,7 +9,9 @@ import type { AggregateFrictionSignal } from "../../sdk/friction-signals";
  * app's routes or component names.
  */
 export async function fetchFrictionSignals(appId: string, appBaseUrl: string): Promise<Signal[]> {
-  const res = await fetch(new URL("/api/day2-friction-signals", appBaseUrl));
+  const res = await fetch(new URL("/api/day2-friction-signals", appBaseUrl), { signal: AbortSignal.timeout(15_000) });
+  // Optional: most apps don't offer it (mobile apps, static websites) — that's not an error.
+  if (res.status === 404 || res.status === 405) return [];
   if (!res.ok) {
     throw new Error(`${appBaseUrl}/api/day2-friction-signals returned ${res.status}`);
   }

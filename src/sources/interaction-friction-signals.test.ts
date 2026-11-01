@@ -54,3 +54,15 @@ describe("fetchFrictionSignals", () => {
     await expect(fetchFrictionSignals("app-one", "https://app-one.example.com")).rejects.toThrow("503");
   });
 });
+
+describe("apps without the endpoint", () => {
+  test("a 404 (mobile apps, static websites) means no friction signals, not an error", async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("Not found", { status: 404 })) as unknown as typeof fetch;
+    try {
+      expect(await fetchFrictionSignals("dotty", "https://dottysocial.app")).toEqual([]);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
