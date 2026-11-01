@@ -424,6 +424,37 @@ async function prState(repoPath: string, pr: number): Promise<"MERGED" | "CLOSED
   }
 }
 
+/** Never: a closed pull request isn't rebuilt by day2 by itself; someone starts it again (maybe after saying what to change). */
+const NOT_BY_ITSELF = "9999-12-31T00:00:00.000Z";
+
+/**
+ * Pure. A ticket whose pull request was closed without merging: back to To
+ * do, but day2 doesn't build it again by itself — the owner said no to that
+ * change. A comment saying what to do differently, then "work on it", starts
+ * it again.
+ */
+export function closedWithoutMerge(b: Backlog, id: string, now: Date, by: { kind: "user" | "day2"; name?: string | null }, what: string): Backlog {
+  const r = updateTicket(b, id, { state: "todo" }, now, { kind: by.kind, ...(by.name ? { name: by.name } : {}) });
+  const { approval: _a, ...rest } = r.ticket;
+  return putTicket(r.backlog, {
+    ...rest,
+    autoStartAfter: NOT_BY_ITSELF,
+    failedRuns: 0,
+    activity: [...rest.activity, { at: now.toISOString(), actor: by.kind, ...(by.name ? { name: by.name } : {}), kind: "work", text: `${what}. day2 won't build it again by itself — say what to change in a comment and start it when you want another try.` }],
+  });
+}
+
+/** Pure. The ticket behind a pull request day2 opened, settled when the owner merges or closes it (Approvals). */
+export function settleByPr(b: Backlog, pr: number, outcome: "merged" | "closed", now: Date, name: string | null): { backlog: Backlog; ticketId: string | null } {
+  const t = b.tickets.find((x) => x.state === "to_approve" && x.approval?.kind === "pr" && x.approval.number === pr);
+  if (!t) return { backlog: b, ticketId: null };
+  if (outcome === "merged") {
+    const r = updateTicket(b, t.id, { state: "done" }, now, { kind: "user", ...(name ? { name } : {}) });
+    return { backlog: putTicket(r.backlog, { ...r.ticket, activity: [...r.ticket.activity, { at: now.toISOString(), actor: "user", ...(name ? { name } : {}), kind: "work", text: `merged PR #${pr}.` }] }), ticketId: t.id };
+  }
+  return { backlog: closedWithoutMerge(b, t.id, now, { kind: "user", name }, `closed PR #${pr} without merging`), ticketId: t.id };
+}
+
 export function reconcileApprovals(b: Backlog, states: Map<string, "MERGED" | "CLOSED" | "OPEN" | null>, now: Date): { backlog: Backlog; changed: string[] } {
   let out = b;
   const changed: string[] = [];
@@ -434,7 +465,7 @@ export function reconcileApprovals(b: Backlog, states: Map<string, "MERGED" | "C
       out = updateTicket(out, t.id, { state: "done" }, now, { kind: "day2" }).backlog;
       changed.push(t.id);
     } else if (s === "CLOSED") {
-      out = updateTicket(out, t.id, { state: "todo" }, now, { kind: "day2" }).backlog;
+      out = closedWithoutMerge(out, t.id, now, { kind: "day2" }, `PR #${t.approval.number} was closed without merging`);
       changed.push(t.id);
     }
   }

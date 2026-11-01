@@ -198,7 +198,7 @@ import {
   type TicketType,
   type Ticket,
 } from "./backlog";
-import { backlogFile, isRunning, startTicket, syncAppTrackers, tick, trackerClientsFor } from "./backlog-work";
+import { backlogFile, closedWithoutMerge, isRunning, settleByPr, startTicket, syncAppTrackers, tick, trackerClientsFor } from "./backlog-work";
 import {
   applyTellPlan,
   buildTellPrompt,
@@ -758,14 +758,21 @@ route("GET", "/api/apps/:id/approvals", async (_req, params, t) => {
 route("POST", "/api/apps/:id/approvals/:pr/apply", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireGitRemote(app);
-  await applyChange(app.repoPath, Number(params.pr));
+  const pr = Number(params.pr);
+  await applyChange(app.repoPath, pr);
+  // Its ticket is done now, not on the next backlog pass.
+  const name = (await actorName(t)) ?? null;
+  await withBacklog(backlogFile(app), (b) => ({ backlog: settleByPr(b, pr, "merged", new Date(), name).backlog, result: null }));
   return json({ ok: true });
 });
 
 route("POST", "/api/apps/:id/approvals/:pr/undo", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireGitRemote(app);
-  await undoChange(app.repoPath, Number(params.pr));
+  const pr = Number(params.pr);
+  await undoChange(app.repoPath, pr);
+  const name = (await actorName(t)) ?? null;
+  await withBacklog(backlogFile(app), (b) => ({ backlog: settleByPr(b, pr, "closed", new Date(), name).backlog, result: null }));
   return json({ ok: true });
 });
 
@@ -1254,6 +1261,10 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/reject", async (req, params, t
   const reason = typeof body.reason === "string" && body.reason.trim() ? `: ${body.reason.trim().slice(0, 500)}` : ".";
   const what = tk.approval.kind === "pr" ? `closed PR #${tk.approval.number} without merging` : "sent the plan back";
   const ticket = await withBacklog(backlogFile(app), (bb) => {
+    if (tk.approval!.kind === "pr") {
+      const next = closedWithoutMerge(bb, tk.id, new Date(), { kind: "user" }, `${what}${reason === "." ? "" : reason}`);
+      return { backlog: next, result: findTicket(next, tk.id)! };
+    }
     const r = updateTicket(bb, tk.id, { state: "todo" }, new Date(), { kind: "user" });
     const next: Ticket = {
       ...r.ticket,

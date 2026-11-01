@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppEntry } from "./apps-registry";
-import { createTicket, emptyBacklog, findTicket, loadBacklog, saveBacklog, updateTicket } from "./backlog";
-import { backlogFile, parsePlan, proposalItems, reconcileApprovals, reportForTicket, runTicket, signalItems, startTicket, tick } from "./backlog-work";
+import { createTicket, emptyBacklog, findTicket, loadBacklog, nextToStart, saveBacklog, updateTicket } from "./backlog";
+import { backlogFile, settleByPr, parsePlan, proposalItems, reconcileApprovals, reportForTicket, runTicket, signalItems, startTicket, tick } from "./backlog-work";
 import type { PipelineDeps } from "./pipeline";
 
 const ROOT = mkdtempSync(join(tmpdir(), "day2-backlog-work-"));
@@ -104,6 +104,22 @@ describe("working on a ticket", () => {
     const t = findTicket(loadBacklog(backlogFile(app)), "D2-1")!;
     expect(t.state).toBe("todo");
     expect(t.activity.at(-1)!.text).toContain("day2 was restarted while working on this");
+  });
+
+  test("merging or closing on Approvals settles the ticket at once; a closed one isn't rebuilt by itself", () => {
+    let b = emptyBacklog();
+    for (const title of ["Sitemap", "Pages"]) b = createTicket(b, { title, type: "task", source: { kind: "user" } }, now).backlog;
+    b = { ...b, tickets: b.tickets.map((t, i) => ({ ...t, state: "to_approve" as const, approval: { kind: "pr" as const, number: i + 1, url: `https://github.com/x/y/pull/${i + 1}` } })) };
+    const merged = settleByPr(b, 1, "merged", now, "Pablo");
+    expect(merged.ticketId).toBe("D2-1");
+    expect(findTicket(merged.backlog, "D2-1")!.state).toBe("done");
+    const closed = settleByPr(merged.backlog, 2, "closed", now, "Pablo").backlog;
+    const t = findTicket(closed, "D2-2")!;
+    expect(t.state).toBe("todo");
+    expect(t.approval).toBeUndefined();
+    expect(t.activity.at(-1)!.text).toContain("won't build it again by itself");
+    expect(nextToStart(closed, new Date("2030-01-01T00:00:00Z")).map((x) => x.id)).not.toContain("D2-2");
+    expect(settleByPr(closed, 99, "merged", now, null).ticketId).toBeNull();
   });
 
   test("features get a plan first when the rule says so", async () => {
