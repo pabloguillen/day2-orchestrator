@@ -242,6 +242,12 @@ For **each** platform you want:
   - Checks then run as **EAS Workflows**: Maestro on EAS's simulators and emulators. The results and a link come back to day2.
   - **Cost:** this uses the **app owner's Expo build minutes**, not day2's.
 - **Status: built, not yet verified end to end.** How it works, and the local setup: [device-checks.md](device-checks.md).
+- [ ] **To build before going public: [e2e by TesterArmy](https://github.com/tester-army/e2e)** (Apache-2.0, pre-1.0) as the cloud test runner next to Maestro. Expo documents it ([guide](https://docs.expo.dev/guides/using-e2e/)), including EAS Workflows and Expo Simulators.
+  - **Runner:** if an app has `e2e.config.ts`, the EAS device-check workflow runs `npx e2e run --config e2e.ci.config.ts` on an iOS Simulator build (`ios.simulator: true` profile). day2 reads `.e2e/report.json` and shows the failure screenshots and `screen.txt` from `.e2e/artifacts/` with the change. Apps without it keep using Maestro.
+  - **Tests:** the build agent writes exact-step tests (`tests/day2/*.e2e.ts`: locators and `expect`, one `app.open()` per test). It can use e2e's MCP server to look at the running app while writing them.
+  - **No agent steps:** e2e's `agent.act()` needs its own model (ChatGPT/Copilot/Grok subscription, an API key or a local model). It can't use the Claude subscription, and the deployed server has `ANTHROPIC_API_KEY` for day2's own agents only. Decide then whether agent steps are worth a model key. Exact steps need no model.
+  - **Setup per app:** day2 opens one PR that adds `e2e`, `@e2e-dev/mobile`, the configs and a first start-screen test.
+  - **Settings:** set `E2E_TELEMETRY_DISABLED=1` on the workers. Pin the e2e version, because its config can change between minor releases. Before/after screenshots stay day2's own, since e2e takes screenshots only on failure.
 
 ---
 
