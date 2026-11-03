@@ -146,7 +146,7 @@ People need at least one way in. Set up the ones you want, and the login page sh
 - **Pull requests.** `gh pr create` (`src/pr.ts`) runs with that account's token.
 - **Commit identity.** Commits are authored as `day2 <bot@day2.dev>`, set in the Dockerfile.
 - **Contrast with local mode.** There is no installation, so git and gh use **your Mac's own** `gh` login and git config.
-- **New-app repos (Lovable path only):** `DAY2_GITHUB_OWNER` puts them under an org. That feature is off (section 11).
+- **New-app repos (Lovable and Expo Create):** `DAY2_GITHUB_OWNER` puts them under an org. Both create the repo with the machine's `gh` login, which a deployed server doesn't have: there, a newly created app stays a repository on the server until repo creation through the GitHub App is built ([expo-apps.md](expo-apps.md), "Not verified / not built").
 
 ---
 
@@ -249,6 +249,37 @@ For **each** platform you want:
   - **Setup per app:** day2 opens one PR that adds `e2e`, `@e2e-dev/mobile`, the configs and a first start-screen test.
   - **Settings:** set `E2E_TELEMETRY_DISABLED=1` on the workers. Pin the e2e version, because its config can change between minor releases. Before/after screenshots stay day2's own, since e2e takes screenshots only on failure.
 
+### Live: settings and experiments over the air
+
+- [ ] **Nothing to set on the server.** Live needs no keys or accounts. Apps fetch their config from `/api/ingest/<key>/config` on day2's public address, and the migration `012_live.sql` (applied on start) adds its tables. See [live.md](live.md).
+- [ ] **Each app gets one "Native foundations" ticket** (expo-updates, AsyncStorage, expo-application, plus what Money and Messages need). It has to reach users in one store release before experiments that need new settings can run.
+- [ ] **Credits:** experiment ideas and "describe an experiment" are agent runs paid from the workspace's credits (`agent_work`, at most $1 each). Ideas come every 14 days at most.
+- [ ] **Status: built and tested with fakes, not verified on a phone.** Run one settings-only experiment on a test app (Dotty) end to end: set a value, see it on the next launch, start an experiment, watch the exposures arrive.
+
+### Push notifications and in-app messages (Messages)
+
+- [ ] **No server settings.** day2 sends through Expo's push service with each app's Expo token, the one connected on **Releases**. Tokens, campaigns and send records are in Postgres (`016_messages.sql`: `push_tokens`, `message_optouts`, `message_sends`, `app_messages`). Locally they're files under `<data>/messages/`.
+- [ ] **Outbound HTTPS to `exp.host`** must be allowed from the server.
+- [ ] **Per app, the owner:** for Android, uploads the FCM V1 service account key in EAS once. iOS needs nothing in most cases. See [messages.md](messages.md), "What the owner sets up".
+- [ ] **Ingest:** the app sends its push token to `POST /api/ingest/<key>/push`. It's public like the other ingest routes. The inbox Worker keeps these POSTs while day2 is away and replays them later (Live owns that route).
+- **Local mode:** pushes wait while the Mac sleeps. They go at the next good local time, or are skipped after 30 hours.
+- **Status: built, not verified** against a real Expo project and real devices.
+
+### Money: purchases, ads and prices
+
+- [ ] **Nothing to set on the server** beyond `DAY2_PUBLIC_URL` (https) and `DAY2_SECRETS_KEY`. Migration `015_money.sql` (applied on start) adds the ledger, the notification queue and Money's encrypted keys. See [money.md](money.md).
+- [ ] **Public webhooks:** `/api/store-notify/apple/<app>` and `/api/store-notify/google/<app>` must be reachable from Apple and Google (they're in the tunnel allowlist and buffered by the inbox Worker). Apps that already use RevenueCat use `/api/store-notify/revenuecat/<app>` — **add that path to the tunnel allowlist and the Worker** if such an app is onboarded (not done yet).
+- [ ] **Per app, the owner** signs Apple's Paid Apps agreement and Google's payments profile, creates the In-App Purchase key and the Pub/Sub push (walkthroughs on the Money page), and an AdMob account if the plan has ads.
+- [ ] **Credits:** a plan ("how the app earns") is an agent run paid from credits (`scan_answer`, at most $2), every 60 days or when users grow 5×.
+- [ ] **Status: built and tested with fakes, not verified against real Apple/Google accounts.** First real check on Dotty: create the In-App Purchase key, set the server notification URL, press "Send a test notification", buy the subscription with a sandbox account in TestFlight and watch it arrive as a sandbox record.
+
+### Store: listing, screenshots, tests and reviews
+
+- [ ] **Nothing new to set on the server.** Store uses the App Store Connect key and Google Play service account each app connected on Releases, and Apple's public iTunes Search API. The migration `013_store_listing.sql` (applied on start) adds `store_listing` and `store_reviews`. See [store-listing.md](store-listing.md).
+- [ ] **Screenshots need a Mac** (iPhone Simulator, Android emulator, Maestro): local mode only. A deployed day2 shows "This server can't run simulators" and skips them.
+- [ ] **Credits:** research (at most about $1.10 a run, every 30 days or after a release), review replies and problems (at most $0.90 every 6 hours, only when there are new reviews) and captions are paid from the workspace's credits.
+- [ ] **Status: built and tested with recorded responses, not verified against a real App Store Connect or Play account.** On Dotty, check: reading the listing, one promotional-text change, a staged subtitle going out with the next version, one review reply, and the 6.9" screenshot type. The list of unverified calls is in [store-listing.md](store-listing.md).
+
 ---
 
 ## 11. Optional and off-by-default features
@@ -256,6 +287,10 @@ For **each** platform you want:
 - [ ] **Creating apps with Lovable.** Keep it off until Lovable confirms the use (`.env.example`).
   → `DAY2_FEATURE_CREATE_APPS=off`
   - If you ever turn it on: `DAY2_LOVABLE_API_KEY`, `DAY2_LOVABLE_MCP_URL`, `DAY2_LOVABLE_CREDITS_PER_BUILD`, `DAY2_LOVABLE_USD_PER_CREDIT`, `DAY2_GITHUB_OWNER`.
+- [ ] **Creating native apps with Expo** (`src/expo-create/`, [expo-apps.md](expo-apps.md)). On by default; it needs no third party beyond the owner's own Expo, Apple and Google accounts. Builds are kept in the `expo_creates` table (migration 014) and resumed when the server starts.
+  → `DAY2_FEATURE_CREATE_EXPO=off` to hide it; `DAY2_EXPO_TEMPLATE` (e.g. `default@sdk-57`) to pin the Expo SDK.
+  - [ ] **Status: built, not verified end to end.** Create one real app on a Mac (plan → screens → build → repo) before offering it.
+  - The server image needs `npx` with network access to npm for `create-expo-app` and `npx expo install` (Node 22 is in the image).
 - [ ] **Weekly growth digest to Slack.** Only used by the `growth-digest` CLI, not by the server.
   → `DAY2_SLACK_WEBHOOK_URL`
 
@@ -264,7 +299,7 @@ For **each** platform you want:
 ## 12. Background work, backups, updates
 
 - [ ] **Timer.** There is no cron and no separate worker. The API process runs one timer every `DAY2_BACKLOG_TICK_MINUTES` (default 15; `0` turns it off). Each pass does, in order:
-  1. growth autopilot for every app (`autopilotAll`), which includes the ad pass;
+  1. growth autopilot for every app (`autopilotAll`), which includes the ad pass and the messages pass (due pushes every run, campaigns every 6 hours, measurement daily);
   2. the backlog pass (`tickAll`): import findings, re-rank, settle PRs, sync JIRA/Linear, start allowed work, mobile releases;
   3. the daily simulation (`simulateAll`);
   4. once a day, it prunes old field reports.
@@ -287,6 +322,13 @@ For **each** platform you want:
 
 Keeps app reports while day2 can't be reached (deploys, outages), then hands them over: [inbox.md](inbox.md). Settings: `DAY2_INBOX_URL`, `DAY2_INBOX_TOKEN`.
 
+It also:
+
+- keeps the last good **Live config** per app and serves it while day2 is away, so apps keep their settings and experiments ([live.md](live.md));
+- keeps **push tokens** and **App Store / Google Play notifications** (`/api/store-notify/apple|google/<app>`) like reports, and day2 replays each to its own path.
+
+- [ ] **Run `deploy/inbox/setup.sh` again after updating.** It adds the `live_config` table and the `store-notify` route. Before that, the Worker passes config requests through but keeps no copy.
+
 ---
 
 ## 12b. What your customers do (and what day2 does for them)
@@ -300,8 +342,13 @@ Once day2 is deployed, an app owner never touches tunnels, addresses or keys for
 | App Store / Google Play privacy answers | **The owner**, because Apple and Google don't let other tools fill these forms. **Do it with me** on the Privacy page walks through it one screen at a time, with the page to open, then confirms. |
 | Connecting Expo, App Store Connect, Google Play (once) | **The owner**, step by step on Releases, with the page to open at each step. day2 tries each connection against the app before saving it, and a mistake says what to fix: wrong role, app not invited, API off. |
 | Building and submitting | **day2**, after the connections. The owner approves release notes if they want to. |
+| Earning money (purchases, ads, prices) | **day2** plans it, creates products and prices, writes the code through tickets and verifies every purchase. **The owner** approves the plan and price changes, signs Apple's Paid Apps agreement and Google's payments profile, creates the In-App Purchase key, the Pub/Sub push and an AdMob account (each with **Do it with me** on the Money page), and adds the first in-app purchase to an app version in App Store Connect. |
+| Live settings and experiments | **day2.** One "Native foundations" release; after that, settings and experiments change over the air. The owner picks **day2 decides** or **Ask me first** on the Live page, and can describe experiments in plain words. |
+| Push notifications | **day2** builds them into the app (a ticket) and writes, sends and measures the messages. **The owner** uploads the Android FCM V1 key in EAS once, and approves announcements day2 writes. |
 
-Still on the owner, not automated yet: the first build of a new app (so EAS has the signing certificates), and the first upload of an Android app in the Play Console.
+| Store listing, screenshots, tests, reviews | **day2** researches, writes, frames, uploads and replies. The owner approves listing changes, screenshots, tests and replies on the Store page (or picks **day2 decides**), and enters test results from App Store Connect / the Play Console. Google Play experiments: **Do it with me**. |
+
+Still on the owner, not automated yet: the first build of a new app (so EAS has the signing certificates), and the first upload of an Android app in the Play Console. For apps day2 created, the done page lists these with a copy-paste command ([expo-apps.md](expo-apps.md), "Owner steps after Create").
 
 ---
 
@@ -319,9 +366,13 @@ What exists locally, and where it lives in accounts mode:
 | `.day2-connectors.json`, `.day2-ad-connections.json`, `.day2-ads-tokens.json`, `.day2-release-credentials.json` | Connected tools, ad accounts, rotated ad tokens, release credentials (encrypted with `.day2-secrets-key`) | Postgres, encrypted with the new key. Reconnect each one |
 | `.day2-ad-identities.json`, `.day2-platform-identities.json`, `.day2-ad-conversions-sent.json` | Ad identities and sent conversions | Postgres |
 | `.day2-ingest-keys.json`, `field/` | Apps' report keys, and what devices reported | Postgres. **New keys** (see below) |
+| `messages/` | Push tokens, campaigns and send records (Messages) | Postgres. Tokens come back on their own once apps report to production |
 | `ad-assets/`, `.day2-fx.json`, `.day2-lovable*.json` | Ad images and videos, exchange-rate cache, Lovable account | Files under `/data` (`DAY2_DATA_DIR`) |
+| `.day2-expo-creates.json`, `mockups/` | Native apps being created (plan, drawings, progress) | Postgres (`expo_creates`); drawings under `/data/mockups` |
 | `managed-repos/` | App checkouts | `managed-repos/<accountId>/<appId>` on the volume, cloned again through the GitHub App |
 | `day2-*.json` / `day2-*.jsonl` **inside each app's checkout** (`day2-backlog.json`, `day2-growth-bets.json`, `day2-autopilot-log.jsonl`, `day2-mobile-releases.json`, `day2-retention.json`…) | Each app's backlog, growth, ads and release state | **Still files** in the app's checkout. Not Postgres |
+| `day2-live.json` inside each app's checkout | Live settings, experiments, ideas and their log | Postgres (`live_state`, `live_served`). Not copied: set settings again, and experiments start over |
+| `day2-store-listing.json`, `day2-store-reviews.json` inside each app's checkout; `store-screens/` | Store settings, proposals, research, tests, custom pages, reviews and drafted replies; framed screenshots | Postgres (`store_listing`, `store_reviews`); screenshots under `/data`. Not copied: day2 reads the listing and reviews again; approve proposals again |
 
 If you want to keep a demo app's history, do it by hand. This hasn't been tested.
 

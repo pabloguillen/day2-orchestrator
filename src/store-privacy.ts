@@ -4,6 +4,11 @@ import type { NewTicketInput, Ticket } from "./backlog";
 import { INSTALL_KEY } from "./field-work";
 import { IDENTIFY_KEY } from "./retention";
 
+// Money's ticket keys (src/money/tickets.ts), repeated here to keep this module free of Money's imports.
+const MONEY_PURCHASES_KEY = "money:purchases";
+const MONEY_ADS_KEY = "money:ads";
+const MONEY_ADS_ATT_KEY = "money:ads+att";
+
 /**
  * App Store privacy ("nutrition label") and Google Play Data safety answers
  * for what day2 adds to a mobile app — and what to change when that grows.
@@ -23,6 +28,9 @@ import { IDENTIFY_KEY } from "./retention";
  *    Interaction becomes linked to the user.
  *  - retention treatments → adds Product Personalization.
  *  - a fixed device id (identity "device") → Identifiers → Device ID.
+ *  - push notifications (Messages) → Identifiers → Device ID (Apple) and
+ *    Device or other IDs (Google): the Expo push token, linked to the user,
+ *    for App Functionality and the app's own marketing messages.
  *  - ad conversions (sending the ad's click id back to the ad platform) →
  *    tracking under Apple's rules: Advertising Data, "Used to track you",
  *    and the App Tracking Transparency prompt before the click id is sent.
@@ -34,6 +42,8 @@ import { IDENTIFY_KEY } from "./retention";
 
 export const STORE_PRIVACY_FILENAME = "day2-store-privacy.json";
 export const ATT_KEY = "store-privacy:att";
+/** The Messages setup ticket (messages/setup.ts SETUP_KEY; not imported to keep this file free of the messages module). */
+export const PUSH_KEY = "messages:setup";
 
 export type Store = "ios" | "android";
 export const STORE_NAME: Record<Store, string> = { ios: "App Store Connect → App Privacy", android: "Play Console → App content → Data safety" };
@@ -45,6 +55,14 @@ export type Practices = {
   deviceId: boolean;
   /** Click ids sent back to ad platforms — only after the App Tracking Transparency prompt. */
   adConversions: boolean;
+  /** Push notifications from day2 (messages/): an Expo push token per device, linked to the hashed user. Absent in answers confirmed before Messages. */
+  push?: boolean;
+  /** Money: in-app purchases verified by day2 (purchase history per hashed user). */
+  purchases?: boolean;
+  /** Money: in-app ads through Google AdMob (its SDK collects device ids, coarse location, ad interactions). */
+  ads?: boolean;
+  /** Money: the ads may be personalized after the App Tracking Transparency prompt (not for apps where many users may be minors). */
+  adTracking?: boolean;
 };
 
 export type Settings = {
@@ -91,6 +109,11 @@ export function practicesFrom(tickets: Ticket[], settings: Settings, wiredByHand
     treatments: done(tickets, (k) => k.startsWith("retention:") && k !== IDENTIFY_KEY && !k.startsWith("retention:undo:")),
     deviceId: fieldChecks && settings.deviceId,
     adConversions: fieldChecks && settings.adConversions === "with_consent" && done(tickets, (k) => k === ATT_KEY),
+    push: done(tickets, (k) => k === PUSH_KEY),
+    // Money (src/money/tickets.ts): the purchase layer and AdMob, once merged (only set when true).
+    ...(done(tickets, (k) => k === MONEY_PURCHASES_KEY) ? { purchases: true } : {}),
+    ...(done(tickets, (k) => k === MONEY_ADS_KEY || k === MONEY_ADS_ATT_KEY) ? { ads: true } : {}),
+    ...(done(tickets, (k) => k === MONEY_ADS_ATT_KEY) ? { adTracking: true } : {}),
   };
 }
 
@@ -131,10 +154,60 @@ export function disclosure(p: Practices): Disclosure {
     apple.push({ category: "Identifiers", type: "Device ID", purposes: ["Analytics"], linked: p.identify, tracking: false, covers: "a random id kept on the device, not the advertising id" });
     play.push({ category: "Device or other IDs", type: "Device or other IDs", collected: true, shared: false, purposes: ["Analytics"], covers: "a random id kept on the device, not the advertising id" });
   }
+  if (p.push) {
+    // Push tokens: Apple's "Device ID" (a device-level identifier) and Google's
+    // "Device or other IDs" (identifiers that relate to a device or app
+    // install). Linked to the user (kept per hashed user); not tracking.
+    // Purposes: sending the notifications (App functionality) and lifecycle
+    // messages (Apple: Developer's Advertising or Marketing — "sending
+    // marketing communications directly to your users"; Google: Developer
+    // communications, Advertising or marketing).
+    const covers = "the Expo push token, to send notifications";
+    const a = apple.find((r) => r.category === "Identifiers" && r.type === "Device ID");
+    const applePurposes = ["App Functionality", "Developer's Advertising or Marketing"];
+    if (a) Object.assign(a, { purposes: [...new Set([...a.purposes, ...applePurposes])], linked: true, covers: `${a.covers}; ${covers}` });
+    else apple.push({ category: "Identifiers", type: "Device ID", purposes: applePurposes, linked: true, tracking: false, covers });
+    const g = play.find((r) => r.category === "Device or other IDs");
+    const playPurposes = ["App functionality", "Developer communications", "Advertising or marketing"];
+    if (g) Object.assign(g, { purposes: [...new Set([...g.purposes, ...playPurposes])], covers: `${g.covers}; ${covers}` });
+    else play.push({ category: "Device or other IDs", type: "Device or other IDs", collected: true, shared: false, purposes: playPurposes, covers });
+  }
   if (p.adConversions) {
     apple.push({ category: "Usage Data", type: "Advertising Data", purposes: ["Developer's Advertising or Marketing"], linked: true, tracking: true, covers: "which ad brought the user: the ad platform's click id, sent back to that platform" });
   }
-  return { ios: { rows: apple, trackingPrompt: p.adConversions }, android: { rows: play, encryptedInTransit: true } };
+  if (p.purchases) {
+    merge(apple, { category: "Purchases", type: "Purchase History", purposes: ["App Functionality", "Analytics"], linked: p.identify, tracking: false, covers: "what the user bought, checked with Apple (no payment details)" });
+    merge(play, { category: "Financial info", type: "Purchase history", collected: true, shared: false, purposes: ["App functionality", "Analytics"], covers: "what the user bought, checked with Google (no payment details)" });
+  }
+  if (p.ads) {
+    // Google Mobile Ads SDK, per Google's data disclosure guidance for AdMob.
+    const t = Boolean(p.adTracking);
+    const adP = ["Third-Party Advertising", "Analytics"];
+    merge(apple, { category: "Location", type: "Coarse Location", purposes: adP, linked: false, tracking: t, covers: "approximate location from the IP address, used by Google AdMob" });
+    merge(apple, { category: "Identifiers", type: "Device ID", purposes: adP, linked: false, tracking: t, covers: t ? "the advertising id (only after the tracking prompt), used by Google AdMob" : "a device id for ads (not the advertising id), used by Google AdMob" });
+    merge(apple, { category: "Usage Data", type: "Product Interaction", purposes: adP, linked: false, tracking: t, covers: "ad views and taps, used by Google AdMob" });
+    merge(apple, { category: "Usage Data", type: "Advertising Data", purposes: adP, linked: false, tracking: t, covers: "the ads shown, used by Google AdMob" });
+    merge(apple, { category: "Diagnostics", type: "Performance Data", purposes: ["Analytics"], linked: false, tracking: false, covers: "ad loading times, used by Google AdMob" });
+    const gP = ["Advertising or marketing", "Analytics", "Fraud prevention, security, and compliance"];
+    merge(play, { category: "Location", type: "Approximate location", collected: true, shared: true, purposes: gP, covers: "approximate location from the IP address, used by Google AdMob" });
+    merge(play, { category: "Device or other IDs", type: "Device or other IDs", collected: true, shared: true, purposes: gP, covers: "the advertising id, used by Google AdMob" });
+    merge(play, { category: "App activity", type: "App interactions", collected: true, shared: true, purposes: gP, covers: "ad views and taps, used by Google AdMob" });
+    merge(play, { category: "App info and performance", type: "Diagnostics", collected: true, shared: true, purposes: ["Analytics"], covers: "ad loading and errors, used by Google AdMob" });
+  }
+  return { ios: { rows: apple, trackingPrompt: p.adConversions || Boolean(p.ads && p.adTracking) }, android: { rows: play, encryptedInTransit: true } };
+}
+
+/** Adds a row, or folds it into the row for the same data type (purposes joined, linked/tracking/shared if either is). */
+function merge<R extends AppleRow | PlayRow>(rows: R[], row: R): void {
+  const i = rows.findIndex((r) => r.category === row.category && r.type === row.type);
+  if (i === -1) {
+    rows.push(row);
+    return;
+  }
+  const o = rows[i]!;
+  const purposes = [...o.purposes, ...row.purposes.filter((x) => !o.purposes.includes(x))];
+  if ("linked" in o && "linked" in row) rows[i] = { ...o, purposes, linked: o.linked || row.linked, tracking: o.tracking || row.tracking, covers: `${o.covers}; ${row.covers}` } as R;
+  else rows[i] = { ...o, purposes, shared: (o as PlayRow).shared || (row as PlayRow).shared, covers: `${o.covers}; ${row.covers}` } as R;
 }
 
 /** Changes when the answers change — not when wording elsewhere does. */

@@ -50,16 +50,18 @@ import { beginConnector, connectorMcpServers, connectorStatuses, disconnectConne
 import { addBet, betLink, BETS_FILENAME, betTicket, loadBets, measureBet, saveBets, syncBetStatus, validateNewBet } from "./growth-bets";
 import { appEvents, appKind, describeBroken, existingIntegration, FIELD_WINDOW_DAYS, INSTALL_KEY } from "./field-work";
 import { drainInbox } from "./ingest-inbox";
+import { pathProblem, PUBLIC_PATH, viaCloudflare } from "./request-path";
 import { isLaunchKey, launchChecklist } from "./launch";
 import { TURN_ON_KEY } from "./field-turn-on";
 import { loadDeviceReport, shotPath, type DeviceReport } from "./device-checks";
 import { MOCKUP_MAX_USD, mockupPath } from "./mockups";
 import { loadReleases, RELEASES_FILENAME, saveReleases } from "./mobile-release/pass";
 import { APP_LINKS_FILENAME, loadAppLinks, refreshAppLinks, smartLink, storeChooserHtml, storeFor, storeIdsFromRepo, storeUrl } from "./ads/app-links";
-import { betTicketOpts, checkHandoff, destinationFor, handoffJs, type Destination } from "./ads/destination";
+import { betTicketOpts, checkHandoff, customProductPage, destinationFor, handoffJs, type Destination } from "./ads/destination";
 import { parseCredential, type AscCredential, type ExpoCredential, type PlayCredential } from "./mobile-release/credentials";
 import { checkAsc, checkExpo, checkPlay } from "./mobile-release/check-access";
 import { walkthrough } from "./store-walkthrough";
+import { registerStoreRoutes } from "./store-listing/routes";
 import { readiness } from "./mobile-release/setup";
 import { runReleases, SETUP_KEY } from "./mobile-release/run";
 import type { Release } from "./mobile-release/types";
@@ -88,6 +90,8 @@ import { cloneWithInstallation, GitHubAccessError, hasGitHubApp, installUrl, lis
 import { isMetaPageId } from "./ad-identities";
 import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
+import { liveConfigFor } from "./live/runtime";
+import { registerLiveRoutes } from "./live/routes";
 import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
 import { ALL_PLATFORMS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
@@ -220,9 +224,13 @@ import { linearClient, publicIntegrations, type AppIntegrations } from "./backlo
 import { gatherSignalsForApp } from "./health-scout-cli";
 import { tickAll } from "./backlog-cli";
 import { autopilotAll } from "./growth-autopilot-run";
+import { messagesRoutes } from "./messages/routes";
+import { ingestPushTokens } from "./messages/runtime";
 import { simulateAll } from "./simulation-run";
 import { addTreatment, computeSnapshot, loadRetention, RETENTION_FILENAME, retentionView, saveRetention, treatmentKey, treatmentTicket } from "./retention";
 import { features } from "./features";
+import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/routes";
+import { registerMoneyRoutes } from "./money/routes";
 import {
   answerBuild,
   beginConnect,
@@ -411,6 +419,10 @@ const routes: Route[] = [];
 function route(method: string, pathname: string, handler: Handler, opts: { public?: boolean } = {}): void {
   routes.push({ method, pattern: new URLPattern({ pathname }), handler, public: opts.public ?? false });
 }
+
+registerMoneyRoutes({ route, json, httpError: (status, message) => new HttpError(status, message), requireApp, requireManager, actorName, runWithCredits });
+// ---- Live: settings and experiments over the air (src/live/routes.ts) ----
+registerLiveRoutes(route, { json, requireApp, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
 
 // ---- Apps (plan §4/§5) ----
 
@@ -1629,6 +1641,10 @@ route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, param
   return json(await retentionResponse(app), { status: 201 });
 });
 
+// ---- Messages (src/messages/): push notifications and in-app messages ----
+
+for (const r of messagesRoutes({ requireApp, runWithCredits, actorName, fail: (status, message) => new HttpError(status, message) })) route(r.method, r.path, r.handler);
+
 // ---- Mobile releases (src/mobile-release/): updates and store releases by day2 ----
 
 async function mobileReleasesResponse(app: AppEntry) {
@@ -2349,7 +2365,7 @@ route(
     const links = loadAppLinks(appFile(app, APP_LINKS_FILENAME));
     const ua = req.headers.get("user-agent") ?? "";
     const store = storeFor(ua);
-    const ios = storeUrl("ios", links, tag);
+    const ios = storeUrl("ios", links, tag, { ppid: await customProductPage(app, tag) });
     const android = storeUrl("android", links, tag);
     // The tap, per ad (a random id per tap; nothing about the person).
     const device = { id: `lnk-${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`, platform: store ?? ("web" as const) };
@@ -2697,6 +2713,10 @@ route("POST", "/api/lovable/builds/:bid/answer", async (req, params, t) => {
   }
 });
 
+// ---- Create a native Expo app (src/expo-create/) ----
+
+registerExpoCreateRoutes({ route, httpError: (status, message) => new HttpError(status, message), json, requirePlan: (t) => requirePlanFeature(t, "createApps"), requireAppSlot, managedRepoDir });
+
 // ---- Sign-in, the signed-in person, and the account's people ----
 
 function redirect(location: string, cookie?: string): Response {
@@ -3021,6 +3041,8 @@ route("DELETE", "/api/account/members/:userId", async (_req, params, t) => {
   return json(await membersResponse(t));
 });
 
+registerStoreRoutes({ route, json, requireApp, requireManager, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });
+
 // ---- Dispatch ----
 
 /** Where the console is. In production it's the same origin as this API
@@ -3055,7 +3077,7 @@ function sameOrigin(req: Request): boolean {
 
 /** Routes whose handler waits on a Claude agent run (tens of seconds+). */
 export function isAgentBackedPath(pathname: string): boolean {
-  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|growth\/research|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname) || pathname === "/api/apps";
+  return /^\/api\/apps\/[^/]+\/(onboarding\/scan|ask|growth\/research|live\/(describe|ideas)|store\/(research|reviews\/refresh)|backlog\/(tell|refresh|sync)|backlog\/tickets\/[^/]+\/(approve|reject)|integrations\/[^/]+|messages\/announcements)$/.test(pathname) || /^\/api\/lovable\/(connect|builds\/[^/]+\/answer)$/.test(pathname) || pathname === "/api/apps";
 }
 
 async function ingestAppBaseUrl(appId: string, accountId: string): Promise<string | null> {
@@ -3071,11 +3093,20 @@ const SIGNED_OUT = () => json({ error: "Sign in to continue.", code: "signed_out
  * can call it directly (no port binding, no real network).
  */
 export async function handleRequest(req: Request): Promise<Response> {
+  // Paths that change when normalized (`/api/ingest/%2e%2e/apps` is `/api/apps`)
+  // could slip past the tunnel's allowlist: refused before anything else.
+  const bad = pathProblem(req.url);
+  if (bad) return new Response(JSON.stringify({ error: `Bad request path (${bad}).` }), { status: 400, headers: { "content-type": "application/json" } });
+  // Locally there's no sign-in: what came through Cloudflare (the tunnel) may
+  // only reach the public paths, whatever the tunnel's own rules let through.
+  if (serverMode() === "local" && viaCloudflare(req) && !PUBLIC_PATH.test(new URL(req.url).pathname)) {
+    return new Response(JSON.stringify({ error: "Not found." }), { status: 404, headers: { "content-type": "application/json" } });
+  }
   // Reports from apps on users' devices: their own rules (public key,
   // any origin the app runs on, size and rate limits) — field-ingest.ts.
   if (new URL(req.url).pathname.startsWith("/api/ingest/")) {
     try {
-      return await handleIngest(req, { keys: ingestKeys(), store: fieldStore(), appBaseUrl: ingestAppBaseUrl });
+      return await handleIngest(req, { keys: ingestKeys(), store: fieldStore(), appBaseUrl: ingestAppBaseUrl, liveConfig: liveConfigFor, pushTokens: ingestPushTokens });
     } catch (err) {
       console.error("[day2-ingest]", err);
       return new Response(null, { status: 500, headers: { "access-control-allow-origin": "*" } });
@@ -3087,7 +3118,9 @@ export async function handleRequest(req: Request): Promise<Response> {
 
   const url = new URL(req.url);
   const accounts = serverMode() === "accounts";
-  if (accounts && !SAFE_METHODS.has(req.method) && !sameOrigin(req)) {
+  // Store notification webhooks (App Store, Google Play) carry no cookies: no CSRF check.
+  const webhook = url.pathname.startsWith("/api/store-notify/");
+  if (accounts && !webhook && !SAFE_METHODS.has(req.method) && !sameOrigin(req)) {
     return json({ error: "Requests must come from day2 itself." }, { status: 403 });
   }
   for (const r of routes) {
@@ -3151,6 +3184,7 @@ if (import.meta.main) {
   }
   startBacklogTimer();
   startInboxDrain();
+  void resumeExpoCreates({ managedRepoDir }).catch((err: Error) => console.error("[day2-create] couldn't resume:", err.message));
 }
 
 /**

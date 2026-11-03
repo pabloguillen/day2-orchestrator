@@ -31,8 +31,13 @@ import { billAdSpend, type AdPlatform } from "./ads";
 import type { CompetitorAngleInsight } from "./competitor-feed";
 import type { EventLike } from "./metrics/types";
 import { retentionPass, type RetentionDeps } from "./retention-pass";
+import { messagesPass, type MessagesDeps } from "./messages/pass";
+import { assistantActionsPass } from "./assistant-actions";
+import { livePass, type LivePassDeps } from "./live/pass";
+import { moneyPass, type MoneyPassDeps } from "./money/pass";
 import { ADS_FILENAME, loadAds, pausePlatformAds, runPlatformAds, type PlatformAdsDeps } from "./ads/autopilot";
 import { researchHint } from "./ads/learnings";
+import { storePass, type StorePassDeps } from "./store-listing/pass";
 
 /**
  * The growth autopilot: day2 growing an app with nobody triggering anything.
@@ -85,7 +90,7 @@ export function saveAutopilot(path: string, s: AutopilotSettings): void {
   renameSync(tmp, path);
 }
 
-export type AutopilotEntry = { at: string; step: "built_in" | "retention" | "research" | "experiment" | "ads" | "skipped"; text: string; credits?: number };
+export type AutopilotEntry = { at: string; step: "built_in" | "retention" | "live" | "messages" | "money" | "store" | "research" | "experiment" | "ads" | "skipped"; text: string; credits?: number };
 
 const KEEP_LOG = 300;
 
@@ -153,6 +158,14 @@ export type AutopilotDeps = {
   platformAds?: Omit<PlatformAdsDeps, "credits" | "events" | "pageHealth" | "paidGate">;
   /** Retention (retention.ts): the field store and the research agent; absent = skipped. */
   retention?: RetentionDeps;
+  /** Live settings and experiments (src/live/pass.ts); absent = skipped. */
+  live?: Omit<LivePassDeps, "now" | "log">;
+  /** Messages (messages/pass.ts): push and in-app messages; absent = skipped. */
+  messages?: MessagesDeps;
+  /** Money (money/pass.ts): how the app earns, verified revenue, products, tests; absent = skipped. */
+  money?: MoneyPassDeps;
+  /** Store listing, reviews and store tests (store-listing/); absent = skipped (not a store app). */
+  store?: StorePassDeps;
   now?: Date;
 };
 
@@ -162,6 +175,9 @@ export type AutopilotReport = {
   improvementsCreated: string[];
   undone: string[];
   retentionTickets: string[];
+  liveTickets: string[];
+  liveDecided: string[];
+  moneyTickets: string[];
   researched: boolean; experimentsCreated: string[]; launched: string[]; paused: string[]; scaled: string[]; skipped: string[] };
 
 export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise<AutopilotReport> {
@@ -169,7 +185,7 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
   const at = now.toISOString();
   const file = (f: string) => resolve(app.repoPath, f);
   const logPath = file(AUTOPILOT_LOG_FILENAME);
-  const report: AutopilotReport = { ticketsCreated: [], benchmarked: false, improvementsCreated: [], undone: [], retentionTickets: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
+  const report: AutopilotReport = { ticketsCreated: [], benchmarked: false, improvementsCreated: [], undone: [], retentionTickets: [], liveTickets: [], liveDecided: [], moneyTickets: [], researched: false, experimentsCreated: [], launched: [], paused: [], scaled: [], skipped: [] };
   const settings = loadAutopilot(file(AUTOPILOT_FILENAME));
   const killSwitch = loadGrowthConfig(file(GROWTH_CONFIG_FILENAME)).budget.killSwitch;
 
@@ -203,6 +219,17 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
     report.ticketsCreated.push(...created.map((m) => m.id));
   }
 
+  // 1a. Expo apps with deep links: their main actions in Siri/Shortcuts and Android shortcuts.
+  try {
+    const id = await assistantActionsPass(app, { field: deps.retention?.store, now });
+    if (id) {
+      log(logPath, { at, step: "built_in", text: `Your app's main actions could be one sentence away in Siri and a long press on Android — added ${id} to build it.` });
+      report.ticketsCreated.push(id);
+    }
+  } catch (err) {
+    report.skipped.push(`assistant actions: ${(err as Error).message}`);
+  }
+
   const profile = loadAppProfile(file(APP_PROFILE_FILENAME));
   if (!profile) {
     report.skipped.push("No app profile yet — research and experiments start after the app scan.");
@@ -221,6 +248,50 @@ export async function autopilotPass(app: AppEntry, deps: AutopilotDeps): Promise
       report.skipped.push(...r.skipped);
     } catch (err) {
       report.skipped.push(`retention: ${(err as Error).message}`);
+    }
+  }
+
+  // 1d. Live: settings and experiments over the air (React Native / Expo apps).
+  if (deps.live) {
+    try {
+      const r = await livePass(app, profile, { ...deps.live, now, log: (text, credits) => log(logPath, { at, step: "live", text, ...(credits ? { credits } : {}) }) });
+      report.liveTickets.push(...r.ticketsCreated);
+      report.liveDecided.push(...r.decided);
+      report.skipped.push(...r.skipped);
+    } catch (err) {
+      report.skipped.push(`live: ${(err as Error).message}`);
+    }
+  }
+
+  // 1e. Talk to them: lifecycle pushes and in-app messages, measured against holdouts.
+  if (deps.messages) {
+    try {
+      const r = await messagesPass(app, profile, deps.messages, (text, credits) => log(logPath, { at, step: "messages", text, ...(credits ? { credits } : {}) }), now);
+      report.retentionTickets.push(...r.ticketsCreated);
+      report.skipped.push(...r.notes.map((n) => `messages: ${n}`));
+    } catch (err) {
+      report.skipped.push(`messages: ${(err as Error).message}`);
+    }
+  }
+
+  // 1f. Earn: strategy, verified revenue, products, tests (mobile apps).
+  if (deps.money) {
+    try {
+      const r = await moneyPass(app, profile, deps.money, (text, credits) => log(logPath, { at, step: "money", text, ...(credits ? { credits } : {}) }), now);
+      report.moneyTickets.push(...r.ticketsCreated);
+      report.skipped.push(...r.skipped);
+    } catch (err) {
+      report.skipped.push(`money: ${(err as Error).message}`);
+    }
+  }
+
+  // 1g. The store listing, reviews and store tests (App Store / Google Play apps).
+  if (deps.store) {
+    try {
+      const r = await storePass(app, { ...deps.store, log: (text, credits) => log(logPath, { at, step: "store", text, ...(credits ? { credits } : {}) }) });
+      report.skipped.push(...r.skipped.map((s) => `store ${s}`));
+    } catch (err) {
+      report.skipped.push(`store: ${(err as Error).message}`);
     }
   }
 

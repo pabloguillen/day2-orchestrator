@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import type { NewTicketInput } from "../backlog";
 import { APP_LINKS_FILENAME, hasStores, loadAppLinks, smartLink, type AppLinks } from "./app-links";
+import { customPageUrl } from "../store-listing/service";
+import { storeListingFor } from "../store-listing/store";
 
 /**
  * Where an app's ads lead, when it has both a website and store listings —
@@ -34,6 +36,16 @@ export function destinationFor(app: AppEntry, choice: Destination | null | undef
   const links = loadAppLinks(join(app.repoPath, APP_LINKS_FILENAME));
   const storeApp = hasStores(links);
   return { storeApp, links, destination: effectiveDestination(choice, Boolean(app.appBaseUrl), storeApp) };
+}
+
+/**
+ * The App Store custom product page an ad leads to (Store page → Custom
+ * product pages): a page made for a campaign or experiment ("B-4"), live in
+ * the App Store, gives its ads their own store page (?ppid=…). Null = the
+ * normal page.
+ */
+export async function customProductPage(app: AppEntry, tag: string): Promise<string | null> {
+  return customPageUrl(storeListingFor(app), app.id, tag).catch(() => null);
 }
 
 export const handoffScriptUrl = (publicUrl: string, appId: string) => `${smartLink(publicUrl, appId)}/handoff.js`;

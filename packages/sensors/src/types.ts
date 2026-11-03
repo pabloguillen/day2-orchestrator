@@ -126,6 +126,10 @@ export type GrowthEvent = {
   user?: string;
   /** `click`: the ad platform's click id from the landing URL (fbclid, ttclid, gclid…), for conversions. */
   acquisition?: { campaignId?: string; channel?: string; click?: { param: string; value: string; /** Added by day2's server, kept 7 days. */ ip?: string; ua?: string } };
+  /** Small facts about the event: ≤ 8 keys (`^[a-z][a-z0-9_]{0,31}$`), strings ≤ 80 characters. Never personal data. */
+  props?: Record<string, string | number | boolean>;
+  /** Money the event brought (revenue): amount ≥ 0 and < 10 000, ISO 4217 currency. */
+  value?: { amount: number; currency: string };
 };
 
 export type DeviceInfo = {
@@ -150,6 +154,64 @@ export type Batch = {
   passes: Record<string, number>;
   failures: Failure[];
   events: GrowthEvent[];
+  /** Live experiments this unit was exposed to: experiment id → variant (≤ 20). */
+  variants?: Record<string, string>;
 };
 
 export const MAX_BATCH_BYTES = 64_000;
+
+// ---------------------------------------------------------------------------
+// Live config (docs/live.md): settings and experiments served to the app
+// ---------------------------------------------------------------------------
+
+export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
+
+/** Who a setting, experiment, ad or message is for. All listed conditions must hold. */
+export type Audience = {
+  platforms?: ("ios" | "android")[];
+  /** "de" matches "de-DE"; "pt-BR" only "pt-BR". */
+  locales?: string[];
+  /** Installed (first launch with day2) at most this many days ago. */
+  newWithinDays?: number;
+  /** Came from one of day2's ads. */
+  fromAds?: boolean;
+  /** The app's version is at least this ("1.4.0"; the release tag's version part is compared). */
+  minRelease?: string;
+  /** A stable share of units, 0–100. */
+  percent?: number;
+};
+
+export type LiveExperiment = {
+  id: string;
+  keys: string[];
+  /** Includes "control". */
+  variants: Array<{ name: string; weight: number; values: Record<string, Json> }>;
+  audience?: Audience;
+};
+
+export type AdCap = { perSession?: number; perDay?: number; minSecondsBetween?: number };
+export type LiveAd = { format: "banner" | "interstitial" | "rewarded" | "native"; unitId: { ios?: string; android?: string }; cap: AdCap; audience?: Audience; enabled: boolean };
+
+export type LiveMessage = {
+  id: string;
+  trigger: string;
+  title: string;
+  body: string;
+  cta?: { label: string; route?: string; url?: string };
+  cap: { total: number; perDay: number };
+  audience?: Audience;
+  locale?: Record<string, { title: string; body: string; cta?: string }>;
+};
+
+export type LiveReview = { afterEvents: Record<string, number>; minDaysSinceInstall: number; minDaysBetween: number; notAfterProblem: boolean };
+
+export type LiveConfig = {
+  v: 1;
+  /** Increases on every change. */
+  version: number;
+  values: Record<string, Json>;
+  experiments: LiveExperiment[];
+  ads?: Record<string, LiveAd>;
+  messages?: LiveMessage[];
+  review?: LiveReview;
+};

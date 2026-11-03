@@ -26,8 +26,9 @@ export type EventLike = {
     click?: { param: string; value: string; ip?: string; ua?: string };
   };
   /** Active config-plane assignments at the time of the event (spec §2.1's
-   * `variants`), e.g. `{ entry_path: "invoice_first", exp_42: "B" }`. Not
-   * produced anywhere yet as of M1 — every metric handles its absence the
+   * `variants`), e.g. `{ entry_path: "invoice_first", "X-3": "short" }`.
+   * Filled from the batch's Live assignments (Batch.variants, docs/live.md)
+   * — every metric handles its absence the
    * same way it handles a device with no acquisition context: reported
    * under `variant: "(none)"`, never dropped. */
   variants?: Record<string, string>;
@@ -39,6 +40,10 @@ export type EventLike = {
    * question, which is what every real use of `segment` in this spec
    * (adaptation targeting, evolution proposals) actually needs. */
   segmentId?: string;
+  /** Small facts the app sent with the event (packages/sensors GrowthEvent.props). */
+  props?: Record<string, string | number | boolean>;
+  /** Money the event brought (revenue events): amount and ISO 4217 currency. */
+  value?: { amount: number; currency: string };
   appVersion?: string;
   platform?: string;
 };

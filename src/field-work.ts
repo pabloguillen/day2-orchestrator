@@ -382,7 +382,8 @@ export async function sensorsBundle(kind: "web" | "react-native" = "web"): Promi
   return text;
 }
 
-const TYPES = `export type Day2 = { track(type: string): void; check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void; setIdentity(identity: "session" | "device"): void; identify(userId: string | null): void; treatment(id: string, holdout?: number): "on" | "holdout"; flush(): void; stop(): void };
+const TYPES = `export type Revenue = { kind: "subscription" | "purchase" | "ad"; amount: number; currency: string; productId?: string; placement?: string };
+export type Day2 = { track(type: string): void; check(id: string, ok: boolean, detail?: Record<string, number | boolean>): void; setIdentity(identity: "session" | "device"): void; identify(userId: string | null): void; treatment(id: string, holdout?: number): "on" | "holdout"; value<T>(key: string, fallback: T): T; variant(experimentId: string): string | null; revenue(r: Revenue): void; liveReady(): Promise<void>; flush(): void; stop(): void };
 export type StartOptions = { key: string; endpoint: string; release?: string; contracts?: unknown; fetchContracts?: boolean; identity?: "session" | "device"; layoutSampleRate?: number; enabled?: boolean };
 export declare function startDay2(opts: StartOptions): Day2;
 `;
@@ -395,9 +396,27 @@ const NATIVE_TYPES = `export type Day2Native = {
   action<A extends unknown[], R>(name: string, handler?: (...args: A) => R, opts?: { testID?: string; label?: string }): (...args: A) => R | undefined;
   identify(userId: string | null): void;
   treatment(id: string, holdout?: number): "on" | "holdout";
+  /** A Live setting from day2 (fixed for the session); the fallback when there's none. */
+  value<T>(key: string, fallback: T): T;
+  /** "control", a variant name, or null when this user isn't in the experiment. */
+  variant(experimentId: string): string | null;
+  revenue(r: Revenue): void;
+  /** UUID for Apple's appAccountToken / Google's obfuscatedAccountId, once identified. */
+  purchaseToken(): string | null;
+  adPlacement(id: string): AdPlacement;
+  adShown(id: string): void;
+  setPushToken(token: string | null): void;
+  message(trigger: string): Day2Message | null;
+  messageEvent(id: string, what: "shown" | "tapped" | "dismissed"): void;
+  shouldAskForReview(): boolean;
   flush(): void;
   stop(): void;
 };
+export type Revenue = { kind: "subscription" | "purchase" | "ad"; amount: number; currency: string; productId?: string; placement?: string };
+export type AdPlacement = { show: boolean; unitId: string | null; format: "banner" | "interstitial" | "rewarded" | "native" | null };
+export type Day2Message = { id: string; title: string; body: string; cta?: { label: string; route?: string; url?: string } };
+/** A Live setting in a component; re-renders once on the very first launch when the config arrives. */
+export declare function useDay2Value<T>(key: string, fallback: T): T;
 export type NativeOptions = { key: string; endpoint: string; release?: string; contracts?: unknown; fetchContracts?: boolean; identity?: "session" | "device"; storage?: { getItem(key: string): Promise<string | null>; setItem(key: string, value: string): Promise<void> }; model?: string; enabled?: boolean };
 export declare function startDay2(opts: NativeOptions): Day2Native;
 export declare function useDay2Mark(id: string): { onLayout: (e: { nativeEvent: { layout: { width: number; height: number } } }) => void };

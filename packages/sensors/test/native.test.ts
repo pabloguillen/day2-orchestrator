@@ -15,6 +15,7 @@ const effects: Array<() => void | (() => void)> = [];
 mock.module("react", () => ({
   useRef: <T>(v: T) => ({ current: v }),
   useEffect: (fn: () => void | (() => void)) => effects.push(fn),
+  useState: <T>(v: T) => [v, () => {}],
 }));
 mock.module("react-native", () => ({
   Platform: { OS: "ios", Version: "18.1" },
@@ -143,6 +144,16 @@ describe("React Native / Expo", () => {
     day2.flush();
     const clicks = sent.flatMap((b) => b.events).filter((e) => e.type === "ad_click");
     expect(clicks).toEqual([expect.objectContaining({ acquisition: { campaignId: "B-4.tiktok.v1", channel: "paid", click: { param: "ttclid", value: "E.C.P.abc123" } } })]);
+  });
+
+  test("Live through the app's day2: fallbacks without config, revenue in the batch, the hook gives the value", async () => {
+    expect(day2.value("onboarding.title", "Welcome")).toBe("Welcome");
+    expect(day2.variant("X-1")).toBeNull();
+    expect(day2.adPlacement("home")).toEqual({ show: false, unitId: null, format: null });
+    expect(mod.useDay2Value("onboarding.title", "Welcome")).toBe("Welcome");
+    day2.revenue({ kind: "subscription", amount: 4.99, currency: "EUR", productId: "pro" });
+    day2.flush();
+    expect(sent.flatMap((b) => b.events).find((e) => e.type === "revenue")).toMatchObject({ value: { amount: 4.99, currency: "EUR" }, props: { kind: "subscription", product: "pro" } });
   });
 
   test("release tags: store version, build, and the update it runs", () => {

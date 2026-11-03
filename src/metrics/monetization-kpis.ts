@@ -8,8 +8,8 @@
  */
 
 import type { PaymentIngestRow } from "../external-ingest";
-import { hasSufficientData, wilsonScoreInterval } from "./confidence";
-import { computeRateMetric } from "./core";
+import { hasSufficientData, meanConfidenceInterval, wilsonScoreInterval } from "./confidence";
+import { computeRateMetric, groupAllDevices } from "./core";
 import { BreakdownDimension, EventLike, MetricValue } from "./types";
 
 /** subscription_started / trial_started. */
@@ -113,4 +113,83 @@ export function computeLtvToCac(ltvUsd: number | null, cacUsd: number | null, n:
 export function computeCacPaybackMonths(cacUsd: number | null, monthlyArpuUsd: number | null, n: number): MetricValue {
   const value = cacUsd !== null && monthlyArpuUsd !== null && monthlyArpuUsd > 0 ? cacUsd / monthlyArpuUsd : null;
   return { metric: "cac_payback_months", breakdown: {}, value, n, ci: null, sufficientData: hasSufficientData(n) };
+}
+
+// ---------------------------------------------------------------------------
+// Revenue from the app's own events (Live, docs/live.md): `revenue` events
+// carry `value: { amount, currency }`; `refund` events subtract. Lets Live
+// judge money experiments without depending on the Money module.
+// ---------------------------------------------------------------------------
+
+/** Event types that carry money, and their sign. */
+export const REVENUE_EVENT_SIGN: Record<string, 1 | -1> = { revenue: 1, refund: -1 };
+
+/** The currency most of the money is in — amounts in other currencies are left out rather than mixed. */
+export function mainCurrency(events: EventLike[]): string | null {
+  const counts = new Map<string, number>();
+  for (const e of events) if (e.value && REVENUE_EVENT_SIGN[e.type]) counts.set(e.value.currency, (counts.get(e.value.currency) ?? 0) + 1);
+  let best: string | null = null;
+  for (const [c, n] of counts) if (best === null || n > counts.get(best)!) best = c;
+  return best;
+}
+
+/** Who an event belongs to: the hashed user when known, else the device. */
+export const unitOf = (e: EventLike) => e.userId ?? e.deviceId;
+
+/** Money per unit (user, else device), in one currency; units without money count as 0 when listed in `units`. */
+export function revenueByUnit(events: EventLike[], currency: string | null = mainCurrency(events)): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const e of events) {
+    const sign = REVENUE_EVENT_SIGN[e.type];
+    if (!sign || !e.value || e.value.currency !== currency) continue;
+    out.set(unitOf(e), (out.get(unitOf(e)) ?? 0) + sign * e.value.amount);
+  }
+  return out;
+}
+
+/** Revenue per user (all units that sent any event), by a breakdown dimension, with a mean CI. */
+export function computeRevenuePerUser(events: EventLike[], dimension: BreakdownDimension = "app"): MetricValue[] {
+  const currency = mainCurrency(events);
+  const { groups } = groupAllDevices(events, dimension);
+  const perDevice = new Map<string, number>();
+  for (const e of events) {
+    const sign = REVENUE_EVENT_SIGN[e.type];
+    if (!sign || !e.value || e.value.currency !== currency) continue;
+    perDevice.set(e.deviceId, (perDevice.get(e.deviceId) ?? 0) + sign * e.value.amount);
+  }
+  const out: MetricValue[] = [];
+  for (const [key, devices] of groups) {
+    const xs = devices.map((d) => perDevice.get(d) ?? 0);
+    const n = xs.length;
+    const value = n ? xs.reduce((a, b) => a + b, 0) / n : null;
+    out.push({ metric: "revenue_per_user", breakdown: dimension === "app" ? {} : { [dimension]: key }, value, n, ci: n >= 2 ? meanConfidenceInterval(xs) : null, sufficientData: hasSufficientData(n) });
+  }
+  return out;
+}
+
+/** Revenue per exposed unit in each variant of one Live experiment (from its `exposure` events onwards). */
+export function revenuePerUserByVariant(events: EventLike[], experimentId: string): Record<string, { n: number; total: number; perUser: number | null; currency: string | null }> {
+  const currency = mainCurrency(events);
+  const firstSeen = new Map<string, { at: string; variant: string }>();
+  for (const e of events) {
+    if (e.type !== "exposure" || e.props?.exp !== experimentId || typeof e.props.variant !== "string") continue;
+    const u = unitOf(e);
+    const have = firstSeen.get(u);
+    if (!have || e.at < have.at) firstSeen.set(u, { at: e.at, variant: e.props.variant });
+  }
+  const money = new Map<string, number>();
+  for (const e of events) {
+    const sign = REVENUE_EVENT_SIGN[e.type];
+    const f = firstSeen.get(unitOf(e));
+    if (!sign || !e.value || e.value.currency !== currency || !f || e.at < f.at) continue;
+    money.set(unitOf(e), (money.get(unitOf(e)) ?? 0) + sign * e.value.amount);
+  }
+  const out: Record<string, { n: number; total: number; perUser: number | null; currency: string | null }> = {};
+  for (const [u, f] of firstSeen) {
+    const v = (out[f.variant] ??= { n: 0, total: 0, perUser: null, currency });
+    v.n += 1;
+    v.total += money.get(u) ?? 0;
+  }
+  for (const v of Object.values(out)) v.perUser = v.n ? v.total / v.n : null;
+  return out;
 }

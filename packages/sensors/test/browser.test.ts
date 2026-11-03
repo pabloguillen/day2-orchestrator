@@ -63,6 +63,7 @@ beforeAll(async () => {
     async fetch(req) {
       const url = new URL(req.url);
       if (url.pathname === "/sensors.js") return new Response(bundle, { headers: { "content-type": "text/javascript" } });
+      if (url.pathname.endsWith("/config")) return new Response(null, { status: 404, headers: { "access-control-allow-origin": "*" } });
       if (url.pathname.startsWith("/api/ingest/")) {
         received.push(JSON.parse(await req.text()) as Batch);
         return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*" } });

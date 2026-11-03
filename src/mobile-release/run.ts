@@ -11,6 +11,7 @@ import { gitWorkdirs, mainReader } from "./git-workdir";
 import { loadReleases, releasePass, RELEASES_FILENAME, saveReleases, type ReleaseReport } from "./pass";
 import { readiness, SETUP_KEY, setupTicket } from "./setup";
 import { createPlay } from "./play";
+import { prepareForRelease } from "../store-listing/release-hook";
 
 /**
  * Releases for one app, on the backlog timer: makes sure the app is set up
@@ -64,6 +65,7 @@ export async function runReleases(app: AppEntry, log: (text: string) => void = (
       },
       ticket,
       log,
+      ...(asc ? { beforeIosSubmit: (o: { appId: string; versionId: string; version: string }) => prepareForRelease(app, asc.value, o, log) } : {}),
     });
     saveReleases(path, next);
     return report;

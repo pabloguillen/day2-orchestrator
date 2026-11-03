@@ -24,8 +24,14 @@ import { researchRetention } from "./retention";
 import { resolvePlatforms, videoProviders } from "./ads/registry";
 import { recheckIdentities } from "./ads/connect-flow";
 import { refreshRates } from "./ads/fx";
-import { USER_DAY_DAYS } from "./field-store";
-import { adConnections, assetStore, platformIdentities, sentConversions } from "./tenant";
+import { CRASH_CONTRACT, USER_DAY_DAYS } from "./field-store";
+import { liveStore } from "./live/runtime";
+import { IDEAS_MAX_USD, proposeIdeas } from "./live/ideas";
+import { adConnections, assetStore, platformIdentities, releaseCredentials, sentConversions } from "./tenant";
+import { messagesStore, pushTokens } from "./messages/runtime";
+import { draftTexts, reviewTexts } from "./messages/texts";
+import { moneyPassDeps } from "./money/run";
+import { storeDeps } from "./store-listing/deps";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -35,6 +41,7 @@ import { adConnections, assetStore, platformIdentities, sentConversions } from "
 
 const RESEARCH_MAX_USD = 1;
 const BENCHMARK_MAX_USD = 1.5;
+const MESSAGE_TEXTS_MAX_USD = 1;
 const callbackUrl = () => `${authConfig().publicUrl}/api/connectors/callback`;
 
 export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<AutopilotDeps> {
@@ -120,6 +127,22 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
         })()),
       };
     })(),
+    live: {
+      store: liveStore(),
+      events: (since) => fieldStore().events(app.id, since),
+      crashes: async (since) => (await fieldStore().failures(app.id, CRASH_CONTRACT, 5000)).filter((f) => f.at >= since.toISOString()).map((f) => ({ deviceId: f.deviceId, at: f.at })),
+      releaseDevices: async (keys, since) => (await fieldStore().releaseHealth(app.id, keys, since)).reduce((n, h) => n + h.devices, 0),
+      retention: () => fieldStore().retention(app.id),
+      async ideas(input) {
+        const check = await authorize(tenant.credits, { appId: app.id, appName: app.name, service: "agent_work", maxCostUsd: IDEAS_MAX_USD });
+        if (!check.ok) throw new CreditsError(check);
+        const ctx: CreditContext = { appId: app.id, appName: app.name, service: "agent_work", description: "Live experiment ideas (autopilot)" };
+        const ideas = await withCreditContext(ctx, () => proposeIdeas(input));
+        return { ideas, credits: ctx.charged ?? 0 };
+      },
+    },
+    money: moneyPassDeps(tenant, app),
+    ...(appKind(app.repoPath) === "react-native" ? { store: await storeDeps(tenant, app) } : {}),
     retention: {
       store: fieldStore(),
       async research(input) {
@@ -128,6 +151,22 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
         const ctx: CreditContext = { appId: app.id, appName: app.name, service: "scan_answer", description: "Retention research (autopilot)" };
         const result = await withCreditContext(ctx, () => researchRetention(input));
         return { result, credits: ctx.charged ?? 0 };
+      },
+    },
+    messages: {
+      store: messagesStore(),
+      tokens: pushTokens(),
+      field: fieldStore(),
+      expo: { fetch: (url, init) => fetch(url, init), accessToken: async () => (await releaseCredentials().get(app.id, "expo"))?.value.token ?? null },
+      async write(input) {
+        const check = await authorize(tenant.credits, { appId: app.id, appName: app.name, service: "content_generation", maxCostUsd: MESSAGE_TEXTS_MAX_USD });
+        if (!check.ok) throw new CreditsError(check);
+        const ctx: CreditContext = { appId: app.id, appName: app.name, service: "content_generation", description: "Message texts (autopilot)" };
+        const result = await withCreditContext(ctx, async () => {
+          const draft = await draftTexts(input);
+          return { draft, review: draft ? await reviewTexts(draft.texts, draft.claims, input) : null };
+        });
+        return { ...result, credits: ctx.charged ?? 0 };
       },
     },
   };
@@ -142,7 +181,10 @@ export async function autopilotAll(): Promise<void> {
           r.ticketsCreated.length && `${r.ticketsCreated.length} growth tickets`,
           r.benchmarked && "compared with leading apps",
           r.improvementsCreated.length && `${r.improvementsCreated.length} improvements`,
-          r.retentionTickets.length && `${r.retentionTickets.length} retention tickets`,
+          r.retentionTickets.length && `${r.retentionTickets.length} retention and message tickets`,
+          r.liveTickets.length && `${r.liveTickets.length} Live tickets`,
+          r.liveDecided.length && `${r.liveDecided.length} experiments decided`,
+          r.moneyTickets.length && `${r.moneyTickets.length} money tickets`,
           r.undone.length && `${r.undone.length} changes to undo`,
           r.researched && "research",
           r.experimentsCreated.length && `${r.experimentsCreated.length} experiments`,

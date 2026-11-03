@@ -7,6 +7,9 @@ import {
   computeMrr,
   computeRefundRate,
   computeTrialToPaid,
+  computeRevenuePerUser,
+  mainCurrency,
+  revenuePerUserByVariant,
 } from "./monetization-kpis";
 import type { PaymentIngestRow } from "../external-ingest";
 import { EventLike } from "./types";
@@ -89,5 +92,31 @@ describe("computeLtvToCac / computeCacPaybackMonths", () => {
   test("CAC payback months is CAC / monthly ARPU", () => {
     const result = computeCacPaybackMonths(100, 25, 50);
     expect(result.value).toBeCloseTo(4, 5);
+  });
+});
+
+describe("revenue from the app's own events (Live)", () => {
+  const ev = (type: string, deviceId: string, at: string, extra: Partial<EventLike> = {}): EventLike => ({ type, at, deviceId, ...extra });
+  test("revenue per user, by variant, in the main currency; refunds subtract; before exposure doesn't count", () => {
+    const events: EventLike[] = [
+      ev("exposure", "d1", "2026-10-01T10:00:00Z", { userId: "u1", props: { exp: "X-1", variant: "control" }, variants: { "X-1": "control" } }),
+      ev("exposure", "d2", "2026-10-01T10:00:00Z", { userId: "u2", props: { exp: "X-1", variant: "control" }, variants: { "X-1": "control" } }),
+      ev("exposure", "d3", "2026-10-01T10:00:00Z", { userId: "u3", props: { exp: "X-1", variant: "annual" }, variants: { "X-1": "annual" } }),
+      ev("revenue", "d1", "2026-09-30T10:00:00Z", { userId: "u1", value: { amount: 100, currency: "EUR" } }),
+      ev("revenue", "d1", "2026-10-02T10:00:00Z", { userId: "u1", value: { amount: 4, currency: "EUR" }, variants: { "X-1": "control" } }),
+      ev("revenue", "d3", "2026-10-02T10:00:00Z", { userId: "u3", value: { amount: 30, currency: "EUR" }, variants: { "X-1": "annual" } }),
+      ev("refund", "d3", "2026-10-03T10:00:00Z", { userId: "u3", value: { amount: 10, currency: "EUR" }, variants: { "X-1": "annual" } }),
+      ev("revenue", "d3", "2026-10-03T10:00:00Z", { userId: "u3", value: { amount: 999, currency: "USD" } }),
+    ];
+    expect(mainCurrency(events)).toBe("EUR");
+    expect(revenuePerUserByVariant(events, "X-1")).toEqual({
+      control: { n: 2, total: 4, perUser: 2, currency: "EUR" },
+      annual: { n: 1, total: 20, perUser: 20, currency: "EUR" },
+    });
+    const all = computeRevenuePerUser(events);
+    expect(all[0]).toMatchObject({ metric: "revenue_per_user", n: 3 });
+    expect(all[0]!.value).toBeCloseTo((104 + 20) / 3);
+    const byVariant = computeRevenuePerUser(events, "variant");
+    expect(byVariant.find((m) => m.breakdown.variant === "X-1=annual")?.value).toBe(20);
   });
 });

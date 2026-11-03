@@ -33,3 +33,7 @@ Every app (web and mobile) gets a drafted section for its privacy notice, from t
 - When what day2 does changes, the section's version changes and the page (and the app's home) asks again.
 
 It's a draft from what day2 actually does — not legal advice; the owner checks it against the rest of the notice.
+
+## Purchases and ads (Money)
+
+Once Money's purchase layer (`money:purchases`) or ad ticket (`money:ads`, `money:ads+att`) is merged, the answers gain Purchase History and the Google Mobile Ads SDK's data types (location, device id, ad interactions and diagnostics); tracking only with the App Tracking Transparency prompt (`money:ads+att`). Details in [money.md](money.md).

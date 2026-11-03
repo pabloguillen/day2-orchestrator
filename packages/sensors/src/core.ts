@@ -161,6 +161,8 @@ export class Engine {
   private failures: Failure[] = [];
   private failuresBy: Record<string, number> = {};
   private events: GrowthEvent[] = [];
+  private variants: Record<string, string> = {};
+  private problems = 0;
   private user: string | null = null;
   private activeDay = "";
   private crumbs: Breadcrumb[] = [];
@@ -273,9 +275,27 @@ export class Engine {
     else this.fail(id, "holds", "broken", detail ? { detail } : undefined);
   }
 
-  /** Growth events: visit, signup, activated, shared, invite_sent… */
-  track(type: string, acquisition?: GrowthEvent["acquisition"]): void {
-    this.events.push({ type: type.slice(0, 40), at: new Date(this.env.now()).toISOString(), ...(this.user ? { user: this.user } : {}), ...(acquisition ? { acquisition } : {}) });
+  /** Growth events: visit, signup, activated, shared, invite_sent… with optional props and value (revenue). */
+  track(type: string, extra?: { acquisition?: GrowthEvent["acquisition"]; props?: GrowthEvent["props"]; value?: GrowthEvent["value"] }): void {
+    this.events.push({
+      type: type.slice(0, 40),
+      at: new Date(this.env.now()).toISOString(),
+      ...(this.user ? { user: this.user } : {}),
+      ...(extra?.acquisition ? { acquisition: extra.acquisition } : {}),
+      ...(extra?.props ? { props: extra.props } : {}),
+      ...(extra?.value ? { value: extra.value } : {}),
+    });
+  }
+
+  /** A Live experiment this unit is exposed to; every batch from now on carries it. */
+  setVariant(experiment: string, variant: string): void {
+    if (this.variants[experiment] === variant || Object.keys(this.variants).length >= 20) return;
+    this.variants[experiment] = variant;
+  }
+
+  /** Crashes and broken checks in this session (a bad moment to ask for a review). */
+  get problemCount(): number {
+    return this.problems;
   }
 
   /**
@@ -508,6 +528,7 @@ export class Engine {
   }
 
   private fail(contract: string, expected: unknown, actual: unknown, evidence?: Failure["evidence"]): void {
+    this.problems += 1;
     const n = this.failuresBy[contract] ?? 0;
     this.failuresBy[contract] = n + 1;
     // Each broken contract is reported a few times per session, then only counted.
@@ -537,7 +558,15 @@ export class Engine {
   /** Sends what's collected. Called on a timer and when the app goes away. */
   flush(urgent: boolean): void {
     if (!this.failures.length && !this.events.length && !Object.keys(this.passes).length) return;
-    let batch: Batch = { v: 1, ...(this.opts.release ? { release: this.opts.release } : {}), device: this.env.device(), passes: this.passes, failures: this.failures, events: this.events };
+    let batch: Batch = {
+      v: 1,
+      ...(this.opts.release ? { release: this.opts.release } : {}),
+      device: this.env.device(),
+      passes: this.passes,
+      failures: this.failures,
+      events: this.events,
+      ...(Object.keys(this.variants).length ? { variants: { ...this.variants } } : {}),
+    };
     // Stay under the size limit: drop the oldest failures' steps, then failures.
     while (JSON.stringify(batch).length > MAX_BATCH_BYTES && batch.failures.length) {
       const [, ...rest] = batch.failures;

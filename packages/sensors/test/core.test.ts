@@ -245,7 +245,7 @@ describe("sending", () => {
   test("batches on a timer; a broken contract is reported a few times, then only counted", () => {
     const e = engine([], 0, 10_000);
     for (let i = 0; i < 6; i++) e.onError("boom");
-    e.track("signup", { campaignId: "B-3" });
+    e.track("signup", { acquisition: { campaignId: "B-3" } });
     env.advance(10_000);
     const b = env.sent.at(-1)!;
     expect(b.failures.filter((f) => f.contract === "builtin:stability.error")).toHaveLength(3);

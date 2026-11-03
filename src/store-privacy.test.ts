@@ -7,7 +7,7 @@ import { ATT_KEY, attTicket, changesFor, disclosure, practicesFrom, storeStatus,
 /** What the owner has to change in App Store Connect and the Play Console when day2 adds something to a mobile app. */
 
 const ticket = (key: string, state: Ticket["state"] = "done") => ({ id: key, state, source: { kind: "day2_proposal", key } }) as unknown as Ticket;
-const off: Practices = { fieldChecks: false, identify: false, treatments: false, deviceId: false, adConversions: false };
+const off: Practices = { fieldChecks: false, identify: false, treatments: false, deviceId: false, adConversions: false, push: false };
 const installed: Practices = { ...off, fieldChecks: true, identify: true };
 const file = (over: Partial<StorePrivacyFile> = {}): StorePrivacyFile => ({ settings: { adConversions: "off", deviceId: false }, confirmed: {}, ...over });
 
@@ -88,5 +88,23 @@ describe("asking again when something changes", () => {
     expect(t.description).toContain('adClickIds: "after_consent"');
     expect(t.description).toContain("day2.allowAdTracking()");
     expect(t.doneWhen).toContain("NSUserTrackingUsageDescription is set");
+  });
+});
+
+describe("push notifications (Messages)", () => {
+  test("once the setup ticket is merged: Device ID (Apple) and Device or other IDs (Google), linked, not tracking", () => {
+    const p = practicesFrom([ticket(INSTALL_KEY), ticket("messages:setup")], file().settings);
+    expect(p.push).toBe(true);
+    const d = disclosure(p);
+    expect(d.ios.rows.find((r) => r.type === "Device ID")).toMatchObject({ category: "Identifiers", linked: true, tracking: false, purposes: ["App Functionality", "Developer's Advertising or Marketing"] });
+    expect(d.ios.trackingPrompt).toBe(false);
+    expect(d.android.rows.find((r) => r.category === "Device or other IDs")).toMatchObject({ collected: true, shared: false, purposes: ["App functionality", "Developer communications", "Advertising or marketing"] });
+    expect(changesFor("ios", installed, p).join("\n")).toContain("Add Identifiers → Device ID");
+  });
+  test("with a fixed device id as well: one row, both purposes", () => {
+    const d = disclosure({ ...installed, deviceId: true, push: true });
+    expect(d.ios.rows.filter((r) => r.type === "Device ID")).toHaveLength(1);
+    expect(d.ios.rows.find((r) => r.type === "Device ID")!.purposes).toEqual(["Analytics", "App Functionality", "Developer's Advertising or Marketing"]);
+    expect(d.android.rows.filter((r) => r.category === "Device or other IDs")).toHaveLength(1);
   });
 });

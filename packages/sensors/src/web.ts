@@ -1,6 +1,7 @@
 import { Engine, normalizePath, type Env, type Tap } from "./core";
 import { acquisitionFrom, cameFromTag, type CameFrom } from "./acquisition";
 import { arm, hashUser } from "./lifecycle";
+import { NOOP_LIVE, startLive, type Revenue } from "./live";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
 
 export { acquisitionFrom };
@@ -65,12 +66,33 @@ export type Day2 = {
    * (open on the feature the ad showed). Null otherwise.
    */
   cameFrom(): CameFrom | null;
+  /** A Live setting from day2 (an experiment's variant wins over the default), fixed for the page load; the fallback when there's none. */
+  value<T>(key: string, fallback: T): T;
+  /** "control", a variant name, or null when this visitor isn't in the experiment. */
+  variant(experimentId: string): string | null;
+  /** Money the app earned (judged per experiment by day2). */
+  revenue(r: Revenue): void;
+  /** Resolves once Live settings are loaded (cached, or the first fetch, at most 1.5 s). */
+  liveReady(): Promise<void>;
   /** Send what's collected now. */
   flush(): void;
   stop(): void;
 };
 
-const NOOP: Day2 = { track() {}, check() {}, setIdentity() {}, identify() {}, treatment: () => "on", cameFrom: () => null, flush() {}, stop() {} };
+const NOOP: Day2 = {
+  track() {},
+  check() {},
+  setIdentity() {},
+  identify() {},
+  treatment: () => "on",
+  cameFrom: () => null,
+  value: (_k, f) => f,
+  variant: () => null,
+  revenue() {},
+  liveReady: () => Promise.resolve(),
+  flush() {},
+  stop() {},
+};
 const FROM_KEY = "day2.from";
 
 const store = (kind: "session" | "local") => {
@@ -380,7 +402,7 @@ export function startDay2(opts: StartOptions): Day2 {
     if (!ss?.getItem("day2.visit")) {
       ss?.setItem("day2.visit", "1");
       const acq = acquisitionFrom(location.href, document.referrer, location.hostname);
-      engine.track("visit", acq);
+      engine.track("visit", { acquisition: acq });
       // First touch only: kept for the session, and across visits only with device identity (consent).
       if (acq?.campaignId && !ss?.getItem(FROM_KEY) && !(identity === "device" && store("local")?.getItem(FROM_KEY))) {
         ss?.setItem(FROM_KEY, acq.campaignId);
@@ -420,6 +442,33 @@ export function startDay2(opts: StartOptions): Day2 {
 
   engine.start();
 
+  // Live settings: cached with the visitor's identity choice (session, or the device after consent).
+  const kv = () => store(identity === "device" ? "local" : "session");
+  const live = (() => {
+    try {
+      return startLive({
+        key: opts.key,
+        ingest,
+        platform: "web",
+        release: opts.release ?? null,
+        locale: navigator.language,
+        storage: {
+          getItem: async (k) => kv()?.getItem(k) ?? null,
+          setItem: async (k, v) => kv()?.setItem(k, v),
+        },
+        fetch: originalFetch,
+        now: () => Date.now(),
+        user: () => engine.userId,
+        device: () => (identity === "device" ? deviceId : null),
+        track: (type, extra) => engine.track(type, extra),
+        setVariant: (exp, v) => engine.setVariant(exp, v),
+        problems: () => engine.problemCount,
+      });
+    } catch {
+      return NOOP_LIVE;
+    }
+  })();
+
   return {
     track: (type) => engine.track(type),
     check: (id, ok, detail) => engine.check(id, ok, detail),
@@ -436,6 +485,10 @@ export function startDay2(opts: StartOptions): Day2 {
         return null;
       }
     },
+    value: (key, fallback) => live.value(key, fallback),
+    variant: (id) => live.variant(id),
+    revenue: (r) => live.revenue(r),
+    liveReady: () => live.settled,
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);

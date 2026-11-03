@@ -200,7 +200,7 @@ export function createAppStore(cred: AscCredential, deps: { fetch?: typeof fetch
       });
     },
 
-    async submitForReview({ appId, version, buildId, notes, phased }) {
+    async submitForReview({ appId, version, buildId, notes, phased, prepare }) {
       // 1. The App Store version: reuse an editable one, or create it.
       const editable = await api<Doc<Array<Resource<{ versionString?: string }>>>>(
         `/v1/apps/${encodeURIComponent(appId)}/appStoreVersions?${qs({ "filter[platform]": "IOS", "filter[appVersionState]": EDITABLE_STATES.join(","), limit: 5 })}`,
@@ -266,6 +266,9 @@ export function createAppStore(cred: AscCredential, deps: { fetch?: typeof fetch
           if (!is(err, 409)) throw err;
         }
       }
+
+      // Staged listing changes (Store module) ride along with this version.
+      if (prepare) await prepare(versionId);
 
       // 5. Review submission: reuse an open one or create it, add the version, submit.
       const open = await api<Doc<Resource[]>>(

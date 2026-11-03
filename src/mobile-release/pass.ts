@@ -71,6 +71,8 @@ export type ReleaseDeps = {
   /** What still has to change in the store privacy answers (store-privacy.ts), empty when up to date. */
   privacyDue: (platform: Platform) => Promise<string[]>;
   writeNotes?: (changes: Change[]) => Promise<string>;
+  /** Runs before an App Store version is submitted: the Store module's staged listing changes go into it. */
+  beforeIosSubmit?: (o: { appId: string; versionId: string; version: string }) => Promise<void>;
   ticket: (t: NewTicketInput) => Promise<{ id: string }>;
   log: (text: string) => void;
 };
@@ -429,7 +431,8 @@ async function advanceStore(f: ReleasesFile, r: StoreRelease, deps: ReleaseDeps,
         if (p === "ios" && deps.appStore) {
           const c = await cfg();
           const b = await deps.appStore.findBuild({ bundleId: c.bundleId!, version: r.version, buildNumber: r.builds.ios!.buildNumber ?? "" });
-          const v = await deps.appStore.submitForReview({ appId: b!.appId, version: r.version, buildId: b!.buildId, notes: r.notes.text, phased: true });
+          const prepare = deps.beforeIosSubmit ? (versionId: string) => deps.beforeIosSubmit!({ appId: b!.appId, versionId, version: r.version }).catch((err: Error) => void line(r, now, `Listing changes didn't go in: ${err.message}`)) : undefined;
+          const v = await deps.appStore.submitForReview({ appId: b!.appId, version: r.version, buildId: b!.buildId, notes: r.notes.text, phased: true, ...(prepare ? { prepare } : {}) });
           st.ref = v.versionId;
           set("in_review");
           line(r, now, "iOS: submitted for App Review, with a phased release.");

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Sets up day2's inbox at Cloudflare (worker.js): a Worker in front of day2's
 # address that keeps app reports while day2 can't be reached (the computer
-# sleeps), so nothing is lost. day2 fetches them when it's back.
+# sleeps), so nothing is lost. day2 fetches them when it's back. It also keeps
+# each app's last Live config and serves it while day2 is away, and keeps
+# App Store / Google Play purchase notifications the same way as reports.
 #
 # Usage (from the orchestrator folder), after the tunnel is set up:
 #   deploy/inbox/setup.sh
@@ -48,6 +50,7 @@ compatibility_date = "2025-10-01"
 workers_dev = false
 routes = [
   { pattern = "$HOST/api/ingest/*", zone_name = "$ZONE" },
+  { pattern = "$HOST/api/store-notify/*", zone_name = "$ZONE" },
   { pattern = "$HOST/__inbox*", zone_name = "$ZONE" },
 ]
 
@@ -70,5 +73,5 @@ printf '%s' "$TOKEN" | $W secret put INBOX_TOKEN >/dev/null
 $W deploy
 
 echo
-echo "day2's inbox is live at https://$HOST: reports are kept there while day2 can't be reached."
+echo "day2's inbox is live at https://$HOST: reports and store notifications are kept there while day2 can't be reached, and apps get their last Live settings."
 echo "Restart day2's server so it fetches them (DAY2_INBOX_URL and DAY2_INBOX_TOKEN are in $ENV_FILE)."

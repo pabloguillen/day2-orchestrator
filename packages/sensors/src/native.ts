@@ -1,9 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppState, Appearance, Dimensions, Linking, PixelRatio, Platform } from "react-native";
 import { acquisitionFrom, cameFromTag, type CameFrom } from "./acquisition";
 import { arm, hashUser } from "./lifecycle";
 import { Engine, ERROR_SHOWN, LOADING_TARGET, normalizePath, type Env } from "./core";
+import { NOOP_LIVE, startLive, type AdPlacement, type Day2Message, type Live, type Revenue } from "./live";
 import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
+
+export type { AdPlacement, Day2Message, Revenue } from "./live";
 
 /**
  * day2 field contracts for React Native and Expo — the same engine as the
@@ -23,6 +26,10 @@ import type { Batch, Contract, ContractFile, DeviceInfo } from "./types";
  *   // what a screen needs to show; loading and error states
  *   <Text {...useDay2Mark("total")}>…</Text>
  *   <ActivityIndicator {...useDay2Mark("loading")} />
+ *
+ *   // Live settings and experiments (docs/live.md), set from day2 over the air
+ *   const title = useDay2Value("onboarding.title", "Welcome");
+ *   if (day2.adPlacement("home_banner").show) …
  *
  * Network calls are seen through XMLHttpRequest (React Native's fetch runs
  * on it), errors through the global error handler, freezes through a
@@ -77,6 +84,25 @@ export type Day2Native = {
   cameFrom(): CameFrom | null;
   /** The user agreed to ad measurement (iOS: ATT "granted"): sends the ad's click id, once. Needs adClickIds: "after_consent". */
   allowAdTracking(): void;
+  /** A Live setting for this user (an experiment's variant wins over the default); the fallback when there's none. Fixed for the session. */
+  value<T>(key: string, fallback: T): T;
+  /** "control", a variant name, or null when this user isn't in the experiment. */
+  variant(experimentId: string): string | null;
+  /** Money the app earned from this user (shown in day2, judged per experiment). */
+  revenue(r: Revenue): void;
+  /** A UUID for this user's purchases (Apple appAccountToken / Google obfuscatedAccountId), once identified; day2 can match it to the hashed user. */
+  purchaseToken(): string | null;
+  /** Whether to show an ad here now (enabled, audience, frequency caps), and its unit id for this platform. */
+  adPlacement(id: string): AdPlacement;
+  /** An ad was shown: counts toward its caps. */
+  adShown(id: string): void;
+  /** The Expo push token (or null when the user turned push off). Sent to day2 for the identified user, never in events. */
+  setPushToken(token: string | null): void;
+  /** The in-app message to show now for this trigger, honoring its caps; texts in the user's language when given. */
+  message(trigger: string): Day2Message | null;
+  messageEvent(id: string, what: "shown" | "tapped" | "dismissed"): void;
+  /** True at a good moment to call expo-store-review's requestReview() (then remembered, so it isn't asked again too soon). */
+  shouldAskForReview(): boolean;
   flush(): void;
   stop(): void;
 };
@@ -105,6 +131,16 @@ const NOOP: Day2Native = {
   treatment: () => "on",
   cameFrom: () => null,
   allowAdTracking() {},
+  value: (_k, f) => f,
+  variant: () => null,
+  revenue() {},
+  purchaseToken: () => null,
+  adPlacement: () => ({ show: false, unitId: null, format: null }),
+  adShown() {},
+  setPushToken() {},
+  message: () => null,
+  messageEvent() {},
+  shouldAskForReview: () => false,
   flush() {},
   stop() {},
 };
@@ -156,6 +192,26 @@ export function useDay2Mark(id: string): { onLayout: (e: { nativeEvent: { layout
       marks.set(token.current, { id, route: currentRoute, w: width, h: height });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Live values in components
+// ---------------------------------------------------------------------------
+
+let live: Live = NOOP_LIVE;
+
+/**
+ * A Live setting in a component. Values never change during a session; on
+ * the very first launch the component re-renders once when the first config
+ * arrives (at most 1.5 s after start).
+ */
+export function useDay2Value<T>(key: string, fallback: T): T {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (live.ready()) return undefined;
+    return live.onReady(() => setTick((n) => n + 1));
+  }, []);
+  return live.value(key, fallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,9 +277,38 @@ export function startDay2(opts: NativeOptions): Day2Native {
     },
   };
 
+  let locale: string | null = null;
+  let timeZone: string | null = null;
+  try {
+    const o = Intl.DateTimeFormat().resolvedOptions();
+    locale = o.locale ?? null;
+    timeZone = o.timeZone ?? null;
+  } catch {
+    /* no Intl */
+  }
+
   const bundled = Array.isArray(opts.contracts) ? opts.contracts : (opts.contracts?.contracts ?? []);
   const engine = new Engine(env, { contracts: bundled, ...(opts.release ? { release: opts.release } : {}) });
   const undo: Array<() => void> = [];
+  let from: string | null = null;
+  live = startLive({
+    key: opts.key,
+    ingest,
+    platform: Platform.OS === "ios" ? "ios" : "android",
+    release: opts.release ?? null,
+    locale,
+    timeZone,
+    storage: opts.storage ?? null,
+    fetch: (u, init) => fetch(u, init),
+    now: () => Date.now(),
+    user: () => engine.userId,
+    device: () => (opts.identity === "device" && opts.storage ? deviceId : null),
+    pushDevice: () => deviceId,
+    track: (type, extra) => engine.track(type, extra),
+    setVariant: (exp, v) => engine.setVariant(exp, v),
+    problems: () => engine.problemCount,
+    fromAds: () => Boolean(from),
+  });
 
   // Network: XMLHttpRequest sees every call, fetch included.
   const XHR = (globalThis as { XMLHttpRequest?: typeof XMLHttpRequest }).XMLHttpRequest;
@@ -277,12 +362,12 @@ export function startDay2(opts: NativeOptions): Day2Native {
     if (state === "active") {
       last = Date.now();
       engine.touch();
+      live.foreground();
     }
   });
   undo.push(() => sub.remove());
 
   // The visit, with where it came from (the link that opened the app).
-  let from: string | null = null;
   let pendingClick: { campaignId: string; click: { param: string; value: string } } | null = null;
   let clickSent = false;
   if (opts.identity === "device" && opts.storage) void opts.storage.getItem("day2.from").then((v) => (from = from ?? v)).catch(() => {});
@@ -292,7 +377,7 @@ export function startDay2(opts: NativeOptions): Day2Native {
       // The click id never leaves the device unless the user agrees (allowAdTracking).
       const { click, ...acq } = (full ?? {}) as NonNullable<typeof full> & { click?: { param: string; value: string } };
       if (click && opts.adClickIds === "after_consent" && acq.campaignId) pendingClick = { campaignId: acq.campaignId, click };
-      engine.track("visit", full ? acq : undefined);
+      engine.track("visit", full ? { acquisition: acq } : undefined);
       if (acq?.campaignId && !from) {
         from = acq.campaignId;
         if (opts.identity === "device") void opts.storage?.setItem("day2.from", from).catch(() => {});
@@ -320,7 +405,10 @@ export function startDay2(opts: NativeOptions): Day2Native {
   engine.start();
 
   active = {
-    track: (type) => engine.track(type),
+    track: (type) => {
+      engine.track(type);
+      live.counted(type);
+    },
     check: (id, ok, detail) => engine.check(id, ok, detail),
     route: setRoute,
     trackNavigation(ref) {
@@ -339,20 +427,34 @@ export function startDay2(opts: NativeOptions): Day2Native {
         return handler?.(...args);
       };
     },
-    identify: (userId) => engine.identify(userId ? hashUser(opts.key, userId) : null),
+    identify: (userId) => {
+      engine.identify(userId ? hashUser(opts.key, userId) : null);
+      live.identified();
+    },
     treatment: (id, holdout) => arm(engine.userId, id, holdout),
     cameFrom: () => cameFromTag(from),
     allowAdTracking() {
       if (opts.adClickIds !== "after_consent" || clickSent || !pendingClick) return;
       clickSent = true;
-      engine.track("ad_click", { campaignId: pendingClick.campaignId, channel: "paid", click: pendingClick.click });
+      engine.track("ad_click", { acquisition: { campaignId: pendingClick.campaignId, channel: "paid", click: pendingClick.click } });
     },
+    value: (key, fallback) => live.value(key, fallback),
+    variant: (id) => live.variant(id),
+    revenue: (r) => live.revenue(r),
+    purchaseToken: () => live.purchaseToken(),
+    adPlacement: (id) => live.adPlacement(id),
+    adShown: (id) => live.adShown(id),
+    setPushToken: (token) => live.setPushToken(token),
+    message: (trigger) => live.message(trigger),
+    messageEvent: (id, what) => live.messageEvent(id, what),
+    shouldAskForReview: () => live.shouldAskForReview(),
     flush: () => engine.flush(false),
     stop() {
       engine.flush(true);
       engine.stop();
       for (const u of undo.reverse()) u();
       active = null;
+      live = NOOP_LIVE;
     },
   };
   return active;

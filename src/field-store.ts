@@ -108,11 +108,26 @@ export const INGEST_KEY_RE = /^d2k_[A-Za-z0-9_-]{20,40}$/;
 
 const dayOf = (iso: string) => iso.slice(0, 10);
 
+/** An event as stored: who (hashed), what, props and money, and the batch's Live assignments. */
+function storedEvent(e: Batch["events"][number], deviceId: string, variants: Batch["variants"]): EventLike {
+  return {
+    type: e.type,
+    at: e.at,
+    deviceId,
+    ...(e.user ? { userId: e.user } : {}),
+    ...(e.acquisition ? { acquisition: e.acquisition } : {}),
+    ...(e.props ? { props: e.props } : {}),
+    ...(e.value ? { value: e.value } : {}),
+    ...(variants ? { variants } : {}),
+  };
+}
+
 /** The days each identified user was active in a batch. */
 function userDays(batch: Batch): Map<string, Set<string>> {
   const m = new Map<string, Set<string>>();
   for (const e of batch.events) {
-    if (!e.user) continue;
+    // Events the stores sent about a user (Money: renewals, refunds) aren't the user being active.
+    if (!e.user || e.props?.by === "store") continue;
     const s = m.get(e.user) ?? new Set();
     s.add(dayOf(e.at));
     m.set(e.user, s);
@@ -215,7 +230,7 @@ export function fileFieldStore(root: string): FieldStore {
       writeJson(join(d, "counts.json"), counts);
       const { id: deviceId, ...device } = batch.device;
       for (const f of batch.failures) appendFileSync(join(d, "failures.jsonl"), `${JSON.stringify({ ...f, deviceId, release: batch.release ?? null, device: { id: deviceId, ...device } })}\n`);
-      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify({ type: e.type, at: e.at, deviceId, ...(e.user ? { userId: e.user } : {}), ...(e.acquisition ? { acquisition: e.acquisition } : {}) })}\n`);
+      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify(storedEvent(e, deviceId, batch.variants))}\n`);
       const active = userDays(batch);
       if (active.size) {
         // Visitors' IP and browser (kept only for sending ad conversions) go after 7 days.
@@ -422,7 +437,8 @@ export function dbFieldStore(sql: SQL): FieldStore {
                    VALUES (${appId}, ${f.contract.slice(0, 300)}, ${f.at}, ${batch.device.id}, ${batch.release ?? null}, ${batch.device}::jsonb, ${f}::jsonb)`;
         }
         for (const e of batch.events) {
-          await tx`INSERT INTO field_events (app_id, at, device_id, user_id, type, acquisition) VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.user ?? null}, ${e.type}, ${e.acquisition ?? null}::jsonb)`;
+          await tx`INSERT INTO field_events (app_id, at, device_id, user_id, type, acquisition, props, value, variants)
+                   VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.user ?? null}, ${e.type}, ${e.acquisition ?? null}::jsonb, ${e.props ?? null}::jsonb, ${e.value ?? null}::jsonb, ${batch.variants ?? null}::jsonb)`;
         }
         for (const [user, days] of userDays(batch)) {
           const sorted = [...days].sort();
@@ -458,14 +474,26 @@ export function dbFieldStore(sql: SQL): FieldStore {
       return rows.map(toFailure);
     },
     async events(appId, since) {
-      const rows = (await sql`SELECT at, device_id, user_id, type, acquisition FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
+      const rows = (await sql`SELECT at, device_id, user_id, type, acquisition, props, value, variants FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
         at: Date;
         device_id: string;
         user_id: string | null;
         type: string;
         acquisition: EventLike["acquisition"] | string | null;
+        props: EventLike["props"] | string | null;
+        value: EventLike["value"] | string | null;
+        variants: EventLike["variants"] | string | null;
       }>;
-      return rows.map((r) => ({ type: r.type, at: new Date(r.at).toISOString(), deviceId: r.device_id, ...(r.user_id ? { userId: r.user_id } : {}), ...(r.acquisition ? { acquisition: parse(r.acquisition) } : {}) }));
+      return rows.map((r) => ({
+        type: r.type,
+        at: new Date(r.at).toISOString(),
+        deviceId: r.device_id,
+        ...(r.user_id ? { userId: r.user_id } : {}),
+        ...(r.acquisition ? { acquisition: parse(r.acquisition) } : {}),
+        ...(r.props ? { props: parse(r.props) } : {}),
+        ...(r.value ? { value: parse(r.value) } : {}),
+        ...(r.variants ? { variants: parse(r.variants) } : {}),
+      }));
     },
     async meta(appId) {
       const rows = (await sql`SELECT last_seen_at, last_release, platforms FROM field_meta WHERE app_id = ${appId}`) as Array<{ last_seen_at: Date; last_release: string | null; platforms: string[] }>;

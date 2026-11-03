@@ -59,9 +59,10 @@ export type AppStore = {
   /**
    * Prepares the App Store version (creates it or reuses an editable one),
    * attaches the build, sets "What's New" for every locale, turns on phased
-   * release, and submits it for review.
+   * release, and submits it for review. `prepare` runs right before the
+   * submission (the Store module writes staged listing changes into the version).
    */
-  submitForReview(o: { appId: string; version: string; buildId: string; notes: string; phased: boolean }): Promise<{ versionId: string }>;
+  submitForReview(o: { appId: string; version: string; buildId: string; notes: string; phased: boolean; prepare?: (versionId: string) => Promise<void> }): Promise<{ versionId: string }>;
   versionState(versionId: string): Promise<{ state: IosState; phased: { state: "inactive" | "active" | "paused" | "complete"; day: number | null } | null }>;
   /** An approved version waiting for a manual release goes live (phased release starts). */
   release(versionId: string): Promise<void>;

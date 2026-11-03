@@ -7,7 +7,8 @@
 #   /api/ads/connect/callback/<platform>   ad platforms send you back here after you sign in
 #   /api/assets/<file>                      ad platforms fetch the ad images and videos
 #   /api/l/<app> and /api/l/<app>/handoff.js  the store link, and the script your website loads
-#   /api/ingest/...                         usage and crash reports from your app
+#   /api/ingest/...                         usage and crash reports from your app, its Live settings
+#   /api/store-notify/(apple|google|revenuecat)/<app>  the App Store and Google Play tell day2 about purchases
 #
 # Usage (from the orchestrator folder):
 #   DAY2_TUNNEL_HOST=day2.example.com deploy/tunnel/day2-tunnel.sh
@@ -52,13 +53,17 @@ if ! route_out="$(cloudflared tunnel route dns "$NAME" "$HOST" 2>&1)"; then
   fi
 fi
 
+# The public paths, strictly: no dots, percent signs or backslashes where an
+# id goes, so nothing can climb out of them (ingest/%2e%2e/apps is
+# /api/apps once normalized). day2 checks the same list itself
+# (src/request-path.ts PUBLIC_PATH_SOURCE — keep the two identical).
 cat >"$CONFIG" <<YAML
 # Written by deploy/tunnel/day2-tunnel.sh — only these paths are public.
 tunnel: $ID
 credentials-file: $HOME/.cloudflared/$ID.json
 ingress:
   - hostname: $HOST
-    path: ^/api/(ads/connect/callback/[a-z]+|assets/[A-Za-z0-9_.-]+|l/[A-Za-z0-9_-]+(/handoff\.js)?|ingest/.*)$
+    path: ^/api/(ads/connect/callback/[a-z]+|assets/[A-Za-z0-9_-]+(\.[a-z0-9]+)?|l/[A-Za-z0-9_-]+(/handoff\.js)?|ingest/d2k_[A-Za-z0-9_-]+(/(config|contracts|push))?|store-notify/(apple|google|revenuecat)/[A-Za-z0-9_-]+)$
     service: http://localhost:$PORT
   - service: http_status:404
 YAML
@@ -78,7 +83,7 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 echo "Public paths of day2 at https://$HOST (everything else answers 404):"
-echo "  /api/ads/connect/callback/<platform>, /api/assets/*, /api/l/*, /api/ingest/*"
+echo "  /api/ads/connect/callback/<platform>, /api/assets/<file>, /api/l/<app>[/handoff.js], /api/ingest/<key>[/config|/contracts|/push], /api/store-notify/(apple|google|revenuecat)/<app>"
 echo "Redirect URL to give the ad platforms' developer apps: https://$HOST/api/ads/connect/callback/<platform>"
 echo
 exec cloudflared tunnel --config "$CONFIG" run "$NAME"

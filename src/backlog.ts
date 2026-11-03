@@ -159,7 +159,7 @@ export type AutoStart = { bugs: boolean; tasks: boolean; improvements: boolean; 
 
 /** Tickets the growth autopilot created (growth-autopilot.ts). */
 export function isGrowthTicket(t: Pick<Ticket, "source">): boolean {
-  return t.source.kind === "day2_proposal" && typeof t.source.key === "string" && /^(loop|bet|retention):/.test(t.source.key);
+  return t.source.kind === "day2_proposal" && typeof t.source.key === "string" && /^(loop|bet|retention|live):/.test(t.source.key);
 }
 
 export type BacklogSettings = {

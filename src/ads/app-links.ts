@@ -106,11 +106,11 @@ export async function refreshAppLinks(repoPath: string, now: Date, doFetch: type
 
 export const hasStores = (l: AppLinks) => Boolean(l.android || l.ios?.appStoreId);
 
-/** Pure. Store URLs carrying an ad's tag. */
-export function storeUrl(store: "ios" | "android", l: AppLinks, tag: string): string | null {
+/** Pure. Store URLs carrying an ad's tag; on the App Store, the campaign's custom product page when it has one (`ppid`). */
+export function storeUrl(store: "ios" | "android", l: AppLinks, tag: string, o: { ppid?: string | null } = {}): string | null {
   const t = tag.slice(0, 40);
   if (store === "android" && l.android) return `https://play.google.com/store/apps/details?id=${encodeURIComponent(l.android.packageName)}&referrer=${encodeURIComponent(`d2=${t}&utm_source=day2&utm_medium=paid&utm_campaign=${t}`)}`;
-  if (store === "ios" && l.ios?.appStoreId) return `https://apps.apple.com/app/id${l.ios.appStoreId}?mt=8&ct=${encodeURIComponent(t)}${l.providerToken ? `&pt=${encodeURIComponent(l.providerToken)}` : ""}`;
+  if (store === "ios" && l.ios?.appStoreId) return `https://apps.apple.com/app/id${l.ios.appStoreId}?mt=8&ct=${encodeURIComponent(t)}${l.providerToken ? `&pt=${encodeURIComponent(l.providerToken)}` : ""}${o.ppid ? `&ppid=${encodeURIComponent(o.ppid)}` : ""}`;
   return null;
 }
 
