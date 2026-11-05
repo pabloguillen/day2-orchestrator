@@ -280,6 +280,45 @@ For **each** platform you want:
 - [ ] **Credits:** research (at most about $1.10 a run, every 30 days or after a release), review replies and problems (at most $0.90 every 6 hours, only when there are new reviews) and captions are paid from the workspace's credits.
 - [ ] **Status: built and tested with recorded responses, not verified against a real App Store Connect or Play account.** On Dotty, check: reading the listing, one promotional-text change, a staged subtitle going out with the next version, one review reply, and the 6.9" screenshot type. The list of unverified calls is in [store-listing.md](store-listing.md).
 
+### Store setup: day2 fills out App Store Connect and Google Play
+
+- [ ] **`DAY2_SECRETS_KEY` must be set** (section 4): the App Review demo account is encrypted with it. Without it the console says so and the account can't be saved.
+- [ ] **The App Store Connect key needs the App Manager role** (as for releases): pricing, availability, age rating and App Review details are App Manager calls. The Play service account needs "Manage store presence" and "Edit app information" (Play Console → Users and permissions).
+- [ ] **No migration.** Setup lives in the `store_listing` document. Play graphics and previews are files under `/data/store-setup/`.
+- [ ] **The Play icon and feature graphic are rendered with Chromium** (Playwright, as for screenshots and mockups). The Docker image already has it.
+- [ ] **App previews need a Mac in local mode**: Xcode's iPhone Simulator, Maestro and **ffmpeg** (`brew install ffmpeg`). A deployed day2 shows previews as "not needed" and skips them.
+- [ ] **Credits:** one agent run per app reads the code for the setup answers (at most $0.80, once; retried a day later if it fails).
+- [ ] **Status: built and tested with recorded responses, not verified against real accounts.** On Dotty, check: categories and content rights, the privacy links, support link and copyright on a version being prepared, the age rating (which of the 2025 questions Apple takes through the API), App Review details with a demo account, the free price and availability for a brand-new app, one app preview upload, and on Play the details, the icon and feature graphic. The list is in [store-listing.md](store-listing.md#not-verified-against-real-accounts).
+
+### Numbers: installs, users, money and quality per app
+
+- [ ] **Nothing new to set on the server.** Numbers reads the App Store Connect key and Google Play service account each app connected on Releases. Migration `018_numbers.sql` (applied on start) adds `numbers_cache` and a `platform` column on `field_events` (older events show as "not reported"). See [numbers.md](numbers.md).
+- [ ] **When it runs:** once a day per app, after the growth autopilot on the backlog timer (`DAY2_BACKLOG_TICK_MINUTES`; 0 turns it off), and when the owner presses Refresh (at most every 10 minutes per app). The first pass reads up to 180 days of daily sales (one request per day), so it takes a few minutes per app.
+- [ ] **Network:** the server must reach `api.appstoreconnect.apple.com`, Apple's report download host, `storage.googleapis.com`, `oauth2.googleapis.com` and `playdeveloperreporting.googleapis.com`.
+- [ ] **Per app, the owner** pastes the Apple vendor number and the Play reports bucket on Numbers → Store reports, gives the Play service account "View app information and download bulk reports", and turns on the Play Developer Reporting API in its Google Cloud project. App Analytics needs an Admin key once (to start the reports).
+- [ ] **Credits:** none — Numbers only reads.
+- [ ] **Status: built and tested with recorded files, not verified against a real App Store Connect or Play account** (list in numbers.md).
+
+### Hosting: apps' backends on Supabase
+
+- [ ] **day2's Supabase organization** on the Pro plan or higher (Free projects pause after a week and have no backups or branching). See [hosting.md](hosting.md), "Operator setup".
+  → `SUPABASE_ACCESS_TOKEN` (a personal access token of an Owner of that organization, ideally a robot account), `DAY2_SUPABASE_ORG_ID` (the slug)
+- [ ] **An email sender for apps' sign-in emails** — Supabase's own reaches only the organization's team, 2 an hour.
+  → `DAY2_HOSTING_SMTP_URL=smtp://user:pass@host:587`, `DAY2_HOSTING_SMTP_FROM`
+- [ ] **Connection test:** `docker compose exec api bun run src/hosting/operator.ts` (locally `bun run src/hosting/operator.ts`) prints the organization, plan and branching.
+- [ ] **Outbound HTTPS** to `api.supabase.com`, `*.supabase.co`, `appleid.apple.com` and `oauth2.googleapis.com` (sign-in connection tests), and npm for the CLI fallbacks (`npx supabase@2.122.1`, `npx eas-cli@27.2.0`).
+- [ ] Migration `021_hosting.sql` (applied on start) adds `app_hosting` and `hosting_secrets` (encrypted with `DAY2_SECRETS_KEY`).
+- [ ] Optional: `DAY2_HOSTING_DEFAULT_REGION` (eu-central-1), `DAY2_HOSTING_INSTANCE_SIZE` (micro), `DAY2_FEATURE_HOSTING=off`.
+- [ ] **Credits:** each app's daily Supabase cost is charged as "Hosting" (`infra`); check the rates in `src/hosting/operations.ts` (`RATES`) against Supabase's current prices.
+- [ ] **Status: built and tested with fakes, not verified against a real Supabase organization.** Host one test app end to end first (hosting.md, "What's verified and what isn't").
+### What day2 knows and what works (memory and learning)
+
+- [ ] **Database:** migrations `022_memory.sql` (`memory_items`, `memory_state`) and `023_learning.sql` (`learning_outcomes`, `learning_playbook`, `learning_failures`, `learning_fp_candidates`, `learning_settings`) run by themselves at start. See [memory-and-learning.md](memory-and-learning.md).
+- [ ] **The salt for app hashes** in the shared library comes from `DAY2_SECRETS_KEY` (already required). Set `DAY2_LEARNING_SALT` only if you want a separate one — and never change it afterwards, or every app would count twice.
+- [ ] **When it runs:** the memory keeper on the backlog timer, at most once an hour per app (plus right after a decline with a reason or an answer), as a short text-only run paid from the customer's credits (Scans & answers). `DAY2_MEMORY_MODEL` picks a cheaper model if you have one; default `DAY2_MODEL`.
+- [ ] **Operators** (`DAY2_OPERATOR_LOGINS`) review the build playbook and false-positive candidates on Platform → What works across apps. Nothing reaches a build agent before it's approved there.
+- [ ] **Customers** can turn cross-app learning off on People & workspace; it's on by default. **Your terms and privacy notice must say so first** (go-live checklist).
+
 ---
 
 ## 11. Optional and off-by-default features
@@ -287,9 +326,11 @@ For **each** platform you want:
 - [ ] **Creating apps with Lovable.** Keep it off until Lovable confirms the use (`.env.example`).
   → `DAY2_FEATURE_CREATE_APPS=off`
   - If you ever turn it on: `DAY2_LOVABLE_API_KEY`, `DAY2_LOVABLE_MCP_URL`, `DAY2_LOVABLE_CREDITS_PER_BUILD`, `DAY2_LOVABLE_USD_PER_CREDIT`, `DAY2_GITHUB_OWNER`.
-- [ ] **Creating native apps with Expo** (`src/expo-create/`, [expo-apps.md](expo-apps.md)). On by default; it needs no third party beyond the owner's own Expo, Apple and Google accounts. Builds are kept in the `expo_creates` table (migration 014) and resumed when the server starts.
+- [ ] **Creating native apps with Expo** (`src/expo-create/`, [expo-apps.md](expo-apps.md)). On by default; it needs no third party beyond the owner's own Expo, Apple and Google accounts. Builds are kept in the `expo_creates` table (migration 014; builds from before the screen flow are moved to the new states when read, no new migration) and resumed when the server starts.
   → `DAY2_FEATURE_CREATE_EXPO=off` to hide it; `DAY2_EXPO_TEMPLATE` (e.g. `default@sdk-57`) to pin the Expo SDK.
-  - [ ] **Status: built, not verified end to end.** Create one real app on a Mac (plan → screens → build → repo) before offering it.
+  - [ ] **Status: built, not verified end to end.** Create one real app on a Mac (screen list → every screen drawn → flow map and prototype → a round of changes → approve → four build steps → repo) before offering it.
+  - The server needs Chromium for Playwright (already used for mockups and ads) to draw the screens, the style card and the flow map. The drawings live in `<data>/mockups/<app id>/flow/`; back them up with the data folder.
+  - Apps that need a backend (accounts, shared data, uploads, server functions, live updates) are hosted on day2's Supabase organization when Hosting is set up (`SUPABASE_ACCESS_TOKEN`, `DAY2_SUPABASE_ORG_ID`, [hosting.md](hosting.md) "Operator setup"); without it they keep a backend on the phone and get a "Host with day2" follow-up ([expo-apps.md](expo-apps.md), "Hosting").
   - The server image needs `npx` with network access to npm for `create-expo-app` and `npx expo install` (Node 22 is in the image).
 - [ ] **Weekly growth digest to Slack.** Only used by the `growth-digest` CLI, not by the server.
   → `DAY2_SLACK_WEBHOOK_URL`
@@ -346,6 +387,7 @@ Once day2 is deployed, an app owner never touches tunnels, addresses or keys for
 | Live settings and experiments | **day2.** One "Native foundations" release; after that, settings and experiments change over the air. The owner picks **day2 decides** or **Ask me first** on the Live page, and can describe experiments in plain words. |
 | Push notifications | **day2** builds them into the app (a ticket) and writes, sends and measures the messages. **The owner** uploads the Android FCM V1 key in EAS once, and approves announcements day2 writes. |
 
+| Store setup (App Store Connect and Google Play forms) | **day2** fills in everything Apple's and Google's APIs allow (links, contact, categories, age rating, App Review details, price and countries, Play details and graphics, previews) and keeps it in sync. **The owner** approves each fact once, enters the App Review demo account, and does the forms with no API (Play's content rating, target audience, ads, app access, declarations, category; both stores' privacy answers) with day2's prepared answers and **Do it with me**, then clicks Done. |
 | Store listing, screenshots, tests, reviews | **day2** researches, writes, frames, uploads and replies. The owner approves listing changes, screenshots, tests and replies on the Store page (or picks **day2 decides**), and enters test results from App Store Connect / the Play Console. Google Play experiments: **Do it with me**. |
 
 Still on the owner, not automated yet: the first build of a new app (so EAS has the signing certificates), and the first upload of an Android app in the Play Console. For apps day2 created, the done page lists these with a copy-paste command ([expo-apps.md](expo-apps.md), "Owner steps after Create").

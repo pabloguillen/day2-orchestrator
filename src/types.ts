@@ -25,6 +25,8 @@ export type BugReport = {
   kind?: "bug" | "build";
   /** day2's own notes for the agent about how this app is checked (not part of the untrusted ticket text). */
   agentNotes?: string;
+  /** What day2 knows about the app (memory/runtime.ts `memoryFor`) — the owner's rules and preferences, for every agent on the change. */
+  memory?: string;
 };
 
 export type PipelineResult =
@@ -33,7 +35,7 @@ export type PipelineResult =
   | { status: "reproduction_failed"; reason: string }
   | { status: "verifier_rejected"; reason: string }
   | { status: "ci_failed"; reason: string; checks?: import("./device-checks/types").DeviceVerdict }
-  | { status: "pr_opened"; url: string; branch: string; checks?: import("./device-checks/types").DeviceVerdict };
+  | { status: "pr_opened"; url: string; branch: string; checks?: import("./device-checks/types").DeviceVerdict; /** The agent's own summary (its last words), for the build playbook. */ summary?: string };
 
 /** Governance levels L0-L5, per source doc "Autonomy levels and governance".
  * Autonomy is earned per area, not granted platform-wide — an area only

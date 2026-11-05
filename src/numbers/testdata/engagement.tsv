@@ -1,0 +1,7 @@
+Date	App Name	App Apple Identifier	Event	Page Type	Source Type	Engagement Type	Device	Platform Version	Territory	Counts	Unique Counts
+2026-10-29	Dotty	6740000001	Impression	No page	App Store search		iPhone	iOS 26.0	US	400	350
+2026-10-29	Dotty	6740000001	Impression	No page	App Store search	Get	iPhone	iOS 26.0	US	20	20
+2026-10-29	Dotty	6740000001	Page view	Product page	App Store search		iPhone	iOS 26.0	US	60	55
+2026-10-29	Dotty	6740000001	Page view	Product page	Web referrer	Get	iPhone	iOS 26.0	US	15	15
+2026-10-29	Dotty	6740000001	Page view	In-app event	App Store browse		iPhone	iOS 26.0	US	7	7
+2026-10-29	Dotty	6740000001	Tap	No page	App Store search		iPhone	iOS 26.0	US	70	66

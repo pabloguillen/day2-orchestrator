@@ -31,16 +31,21 @@ const CAPTIONS = "STORE_CAPTIONS_JSON:";
 /**
  * Sizes day2 makes. Apple: the 6.9" iPhone (1320×2868) and 6.5" (1284×2778)
  * portrait; the 13" iPad only for apps that support tablets. Google Play: a
- * 9:16 phone screenshot (1080×1920).
+ * 9:16 phone screenshot (1080×1920), and 7" (1080×1920) and 10" (1440×2560)
+ * tablet screenshots when tablets are on (9:16, at least 1080 px, so Google
+ * can show them on tablets). For Play, displayType is the edits.images type.
  */
 export const SIZES: ScreenshotSize[] = [
   { id: "iphone-6.9", store: "ios", label: 'iPhone 6.9"', width: 1320, height: 2868, displayType: "APP_IPHONE_67" },
   { id: "iphone-6.5", store: "ios", label: 'iPhone 6.5"', width: 1284, height: 2778, displayType: "APP_IPHONE_65" },
   { id: "ipad-13", store: "ios", label: 'iPad 13"', width: 2064, height: 2752, displayType: "APP_IPAD_PRO_3GEN_129" },
   { id: "android-phone", store: "android", label: "Android phone", width: 1080, height: 1920, displayType: null },
+  { id: "android-tablet-7", store: "android", label: 'Android 7" tablet', width: 1080, height: 1920, displayType: "sevenInchScreenshots" },
+  { id: "android-tablet-10", store: "android", label: 'Android 10" tablet', width: 1440, height: 2560, displayType: "tenInchScreenshots" },
 ];
 
-export const sizesFor = (tablet: boolean) => SIZES.filter((s) => tablet || s.id !== "ipad-13");
+const TABLET_SIZES = ["ipad-13", "android-tablet-7", "android-tablet-10"];
+export const sizesFor = (tablet: boolean) => SIZES.filter((s) => tablet || !TABLET_SIZES.includes(s.id));
 export const sizeById = (id: string) => SIZES.find((s) => s.id === id) ?? null;
 
 export const shotsDir = (appId: string, setId: string) => join(dataDir(), "store-screens", appId.replace(/[^\w-]/g, "_"), setId.replace(/[^\w-]/g, "_"));

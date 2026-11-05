@@ -32,6 +32,8 @@ import { messagesStore, pushTokens } from "./messages/runtime";
 import { draftTexts, reviewTexts } from "./messages/texts";
 import { moneyPassDeps } from "./money/run";
 import { storeDeps } from "./store-listing/deps";
+import { numbersDaily } from "./numbers/run";
+import { captureMemory, chargedRunner } from "./memory/runtime";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -195,6 +197,20 @@ export async function autopilotAll(): Promise<void> {
         if (did.length) console.log(`[day2-autopilot] ${app.name}: ${did.join(", ")}`);
       } catch (err) {
         console.error(`[day2-autopilot] ${app.name}: ${(err as Error).message}`);
+      }
+      // Numbers: what the stores reported, once a day (read-only; runs even with the autopilot off).
+      try {
+        const r = await numbersDaily(app);
+        if (r?.notes.length) console.log(`[day2-numbers] ${app.name}: ${r.notes.join(" ")}`);
+      } catch (err) {
+        console.error(`[day2-numbers] ${app.name}: ${(err as Error).message}`);
+      }
+      // The memory keeper: new owner input distilled into what day2 knows, at most hourly.
+      try {
+        const m = await captureMemory(app, chargedRunner(tenant, app));
+        if (m.added) console.log(`[day2-memory] ${app.name}: learned ${m.added} thing${m.added === 1 ? "" : "s"} from the owner's input.`);
+      } catch (err) {
+        console.error(`[day2-memory] ${app.name}: ${(err as Error).message}`);
       }
     });
   }

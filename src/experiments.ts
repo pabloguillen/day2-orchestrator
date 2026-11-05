@@ -202,7 +202,7 @@ function sampleGammaContinuous(shape: number, rng: () => number): number {
   }
   return d;
 }
-function sampleBeta(a: number, b: number, rng: () => number): number {
+export function sampleBeta(a: number, b: number, rng: () => number): number {
   const x = sampleGammaContinuous(a, rng);
   const y = sampleGammaContinuous(b, rng);
   return x + y === 0 ? 0.5 : x / (x + y);

@@ -300,7 +300,16 @@ export type ResearchInput = {
   excerpts: Array<{ file: string; text: string }>;
   /** Senders the app already has (from its dependencies), e.g. "expo-notifications", "resend". */
   senders: string[];
+  /** What day2 knows about the app (memory/runtime.ts). */
+  memory?: string;
+  /** Treatments the owner said no to ("retention.treatment:at_risk:push"). */
+  avoid?: string[];
+  /** What worked in similar apps (learning/priors.ts). */
+  worked?: string[];
 };
+
+/** A treatment's hard-filter target: which state and channel it works on. */
+export const treatmentTarget = (i: Pick<TreatmentIdea, "target" | "channel">) => `${i.target}:${i.channel}`;
 
 const RESULT_MARKER = "RETENTION_RESEARCH_JSON:";
 const CHANNELS = new Set<Channel>(["in_app", "email", "push"]);
@@ -320,7 +329,7 @@ Senders it already has: ${input.senders.length ? input.senders.join(", ") : "non
 
 States (one per user): new (first visit this period); current (active now and shortly before); back (returned after a break); at_risk (active shortly before, not now); lapsing (away a while).
 Treatment targets: ${TARGETS.join(", ")}.
-
+${input.avoid?.length ? `The owner said no to treatments for these (state:channel) — don't propose them again: ${input.avoid.map((a) => a.replace(/^retention\.treatment:/, "")).join("; ")}.\n` : ""}${input.worked?.length ? `What worked in similar apps (anonymous results from other apps, each still measured here against a holdout):\n${input.worked.map((w) => `- ${w}`).join("\n")}\n` : ""}${input.memory ? `\n${input.memory}\n` : ""}
 Principles per product type (guidance, adapt to this app):
 ${playbook}
 

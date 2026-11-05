@@ -92,12 +92,11 @@ ${report.context ? `Context (stack trace / breadcrumbs / replay):\n${report.cont
  * verifies. This mirrors exactly the manual process validated in Stage 0
  * de-risk test #1 — same discipline, just automated.
  */
-export async function runFixAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
-  if (report.kind === "build") return runBuildAgent(cwd, report);
-  const prompt = `You are the healing agent for a small production app. A bug was reported.
+export function fixPrompt(report: BugReport): string {
+  return `You are the healing agent for a small production app. A bug was reported.
 
 ${untrustedReportBlock(report)}
-
+${memoryBlock(report)}
 Follow this process exactly, in order:
 1. Explore the repo to understand where the relevant code lives.
 2. Write a NEW test that reproduces this bug. Run it and confirm it actually
@@ -127,8 +126,11 @@ exactly like this (for a PR description):
 
 ## Evidence
 <what you verified: test added, confirmed failing then passing, build/lint status>`;
+}
 
-  return runAgent(prompt, cwd);
+export async function runFixAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
+  if (report.kind === "build") return runBuildAgent(cwd, report);
+  return runAgent(fixPrompt(report), cwd);
 }
 
 /**
@@ -136,15 +138,14 @@ exactly like this (for a PR description):
  * that wrote the fix — and is explicitly asked to try to find reasons the fix
  * is wrong, per the "never let the same agent both write and approve" rule.
  */
-export async function runVerifierAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
-  if (report.kind === "build") return runBuildVerifier(cwd, report);
-  const prompt = `You are an independent verifier reviewing a bug fix you did not write.
+export function verifierPrompt(report: BugReport): string {
+  return `You are an independent verifier reviewing a bug fix you did not write.
 You have not seen the process that produced it — judge only the evidence in front of you.
 
 The bug that was supposedly fixed:
 
 ${untrustedReportBlock(report)}
-
+${memoryBlock(report)}
 Do this:
 1. Run \`git diff\` against the previous commit to see exactly what changed.
 2. Check whether a new test was added that genuinely reproduces the described
@@ -155,8 +156,16 @@ Do this:
 
 End your final message with exactly one line: either
 "VERDICT: APPROVE" or "VERDICT: REJECT — <reason>".`;
+}
 
-  return runAgent(prompt, cwd);
+export async function runVerifierAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
+  if (report.kind === "build") return runBuildVerifier(cwd, report);
+  return runAgent(verifierPrompt(report), cwd);
+}
+
+/** What day2 knows about the app, for every agent on a change (empty when nothing). */
+function memoryBlock(report: BugReport): string {
+  return report.memory ? `\n${report.memory}\n` : "";
 }
 
 /** The ticket block for backlog work: data, never instructions. */
@@ -173,11 +182,11 @@ ${report.description}
  * Backlog work that isn't a bug — a feature, task or improvement: build it,
  * with tests where the code has them. (Bugs keep the reproduce-first agent.)
  */
-export async function runBuildAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
-  const prompt = `You are day2's engineer for a small production app. Build the change described in this ticket in the repo in the current directory.
+export function buildPrompt(report: BugReport): string {
+  return `You are day2's engineer for a small production app. Build the change described in this ticket in the repo in the current directory.
 
 ${untrustedTicketBlock(report)}
-
+${memoryBlock(report)}
 Follow this process:
 1. Explore the repo first: how the app is built, where this change belongs (the app itself, its website, scripts that generate pages, config), and how it is tested.
 2. Make the change the ticket describes, fitting the existing code and style. Keep it as small as it can be while meeting every "Done when" point. Don't refactor or touch unrelated code.
@@ -196,25 +205,29 @@ When done, end your final message with a plain-language summary formatted exactl
 
 ## Evidence
 <tests added or run, build/lint status, and any "Done when" point you couldn't check>`;
+}
 
-  return runAgent(prompt, cwd, BUILD_MAX_TURNS);
+export async function runBuildAgent(cwd: string, report: BugReport): Promise<AgentRunResult> {
+  return runAgent(buildPrompt(report), cwd, BUILD_MAX_TURNS);
 }
 
 /** Independent check of backlog work (not a bug fix): does it do what the ticket asks, without breaking anything? */
-export async function runBuildVerifier(cwd: string, report: BugReport): Promise<AgentRunResult> {
-  const prompt = `You are an independent reviewer checking a change you did not write, for this ticket:
+export function buildVerifierPrompt(report: BugReport): string {
+  return `You are an independent reviewer checking a change you did not write, for this ticket:
 
 ${untrustedTicketBlock(report)}
-
+${memoryBlock(report)}
 Do this:
 1. Run \`git diff HEAD~1\` to see exactly what changed.
 2. Check each "Done when" point (if any) against the change. Check it does what the ticket asks and nothing unrelated.
-3. Look for problems: broken behaviour, missing tests for new code, security issues, invented claims or content that isn't true about the app.
+3. Look for problems: broken behaviour, missing tests for new code, security issues, invented claims or content that isn't true about the app, and anything that goes against what day2 knows about the app (above).
 4. Run the test suite, type check, lint and build yourself.
 
 End your final message with exactly one line: either
 "VERDICT: APPROVE" or "VERDICT: REJECT — <reason>".`;
+}
 
-  return runAgent(prompt, cwd);
+export async function runBuildVerifier(cwd: string, report: BugReport): Promise<AgentRunResult> {
+  return runAgent(buildVerifierPrompt(report), cwd);
 }
 

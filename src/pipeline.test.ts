@@ -159,6 +159,7 @@ describe("runPipeline", () => {
         status: "pr_opened",
         url: "https://github.com/acme/app/pull/42",
         branch: "day2-fix-test-branch",
+        summary: expect.any(String),
       });
       expect(calls).toEqual([
         "cloneIsolatedWorkspace",

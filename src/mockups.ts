@@ -93,3 +93,62 @@ export function mockupPath(appId: string, name: string): string | null {
   const p = join(mockupDir(appId), name);
   return existsSync(p) ? p : null;
 }
+
+// ---------------------------------------------------------------------------
+// Create's screen flow (src/expo-create/design.ts): one screen at a time,
+// with the tappable areas the drawing marked (data-goto), and whole pages
+// (the style card, the flow map).
+// ---------------------------------------------------------------------------
+
+export type RenderedHotspot = { to: string; label: string; x: number; y: number; w: number; h: number };
+
+/**
+ * Renders one screen's drawing to a PNG at the phone's size (2x) and reads
+ * where its tappable elements are: every [data-goto] element, as fractions
+ * of the screen. Web requests are blocked, as for ticket mockups.
+ */
+export async function renderScreen(html: string, file: string, size: { width: number; height: number }): Promise<RenderedHotspot[]> {
+  return withBrowser(async (b) => {
+    const page = await b.newPage({ viewport: size, deviceScaleFactor: 2 });
+    await page.route("**/*", (r) => (r.request().url().startsWith("data:") ? r.continue() : r.abort()));
+    await page.setContent(html, { waitUntil: "load", timeout: 30_000 });
+    const boxes = await page.$$eval("[data-goto]", (els) =>
+      els.map((e) => {
+        const r = e.getBoundingClientRect();
+        const el = e as HTMLElement;
+        return { to: el.dataset.goto ?? "", label: (el.dataset.label ?? el.textContent ?? "").trim().slice(0, 60), x: r.x, y: r.y, w: r.width, h: r.height };
+      }),
+    );
+    await page.screenshot({ path: file });
+    await page.close();
+    return boxes
+      .filter((h) => h.to && h.w > 2 && h.h > 2)
+      .map((h) => {
+        const x = Math.max(0, h.x);
+        const y = Math.max(0, h.y);
+        const w = Math.min(size.width, h.x + h.w) - x;
+        const hh = Math.min(size.height, h.y + h.h) - y;
+        const f = (n: number) => Math.round(n * 1000) / 1000;
+        return { to: h.to, label: h.label, x: f(x / size.width), y: f(y / size.height), w: f(w / size.width), h: f(hh / size.height) };
+      })
+      .filter((h) => h.w > 0 && h.h > 0);
+  });
+}
+
+/** Renders a whole page (style card, flow map) to a PNG, full height. */
+export async function renderPage(html: string, file: string, width: number): Promise<void> {
+  await withBrowser(async (b) => {
+    const page = await b.newPage({ viewport: { width, height: 800 }, deviceScaleFactor: 1 });
+    await page.route("**/*", (r) => (r.request().url().startsWith("data:") ? r.continue() : r.abort()));
+    await page.setContent(html, { waitUntil: "load", timeout: 30_000 });
+    await page.screenshot({ path: file, fullPage: true });
+    await page.close();
+  });
+}
+
+/** A Create screen-flow file (PNG or HTML), only from the app's flow folder. */
+export function flowFilePath(appId: string, name: string): string | null {
+  if (!/^[\w.-]+\.(png|html)$/.test(name)) return null;
+  const p = join(mockupDir(appId), "flow", name);
+  return existsSync(p) ? p : null;
+}

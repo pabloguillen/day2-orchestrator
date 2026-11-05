@@ -197,3 +197,13 @@ describe("recordCalibrationAudit", () => {
     }
   });
 });
+
+import { parseNewPatternCandidate } from "./calibration";
+import { describe as d2, expect as e2, test as t2 } from "bun:test";
+d2("new false-positive candidates (for review only)", () => {
+  t2("a NEW_FALSE_POSITIVE line gives the candidate; it never clears", () => {
+    const text = "checked\nCALIBRATION_VERDICT: NEW_FALSE_POSITIVE — Lazy-loaded images look missing in the first screenshot; wait for network idle and re-check.";
+    e2(parseNewPatternCandidate(text)).toContain("Lazy-loaded images");
+    e2(parseNewPatternCandidate("CALIBRATION_VERDICT: CONFIRMED_REAL — it is broken")).toBeNull();
+  });
+});

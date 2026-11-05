@@ -1,3 +1,5 @@
+import { recordTreatment, workedLines } from "./learning/runtime";
+import { filterProposals, proposalContext } from "./memory/runtime";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AppEntry } from "./apps-registry";
@@ -11,7 +13,7 @@ import type { AppProfile } from "./onboarding";
 import { ADS_FILENAME, loadAds } from "./ads/autopilot";
 import { parseTag, retentionFrom } from "./ads/results";
 import { BETS_FILENAME, loadBets } from "./growth-bets";
-import {
+import { treatmentTarget,
   adPromiseIdea,
   adPromiseTicket,
   addTreatment,
@@ -150,7 +152,10 @@ export async function retentionPass(
   const backlog = await backlogNow();
   const upd = updateTreatments(file, backlog.tickets, activity.users, now, sourceOf);
   file = upd.file;
-  for (const d of upd.decided) log(`Measured "${d.name}" (${d.ticketId}) against its holdout: ${d.result.note}`);
+  for (const d of upd.decided) {
+    log(`Measured "${d.name}" (${d.ticketId}) against its holdout: ${d.result.note}`);
+    await recordTreatment(app, d, d.result);
+  }
   for (const u of upd.undo) {
     const t = await add(u.ticket);
     file = { ...file, treatments: file.treatments.map((x) => (x.id === u.treatment.id ? { ...x, undoTicketId: t.id } : x)) };
@@ -159,9 +164,14 @@ export async function retentionPass(
   }
 
   // 4. How leading apps of this kind keep their users (every 60 days).
-  if (researchDue(file, now)) {
+  const known = researchDue(file, now) ? await proposalContext(app, "growth", ["retention.treatment"], { now }) : null;
+  if (known?.blocked.blocked) report.skipped.push(`retention research: ${known.blocked.why}`);
+  else if (known) {
     try {
       const r = await deps.research({
+        memory: known.memory,
+        avoid: known.avoid,
+        worked: await workedLines(app, "retention"),
         appName: app.name,
         purpose: profile.purpose,
         targetUsers: profile.targetUsers,
@@ -170,6 +180,7 @@ export async function retentionPass(
         excerpts: excerpts(app.repoPath),
         senders: senders(app.repoPath),
       });
+      if (r.result) r.result = { ...r.result, ideas: (await filterProposals(app, "retention.treatment", r.result.ideas, treatmentTarget, now)).kept };
       if (r.result) {
         file = { ...file, research: [{ id: `rr-${randomUUID().slice(0, 8)}`, at: now.toISOString(), credits: r.credits, ...r.result }, ...file.research] };
         report.researched = true;

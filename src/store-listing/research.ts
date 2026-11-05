@@ -28,7 +28,16 @@ export type WriteInput = {
   competitors: Competitor[];
   /** What the store tests and reviews taught so far, in a sentence or two. */
   learned?: string;
+  /** What day2 knows about the app (memory/runtime.ts). */
+  memory?: string;
+  /** Listing changes the owner said no to ("store.text:subtitle:en-us"). */
+  avoid?: string[];
+  /** What worked in similar apps (learning/priors.ts). */
+  worked?: string[];
 };
+
+/** A listing change's hard-filter targets: the field in that language, and the field anywhere. */
+export const textTargets = (x: { field: string; locale: string }): string[] => [`${x.field}:${x.locale}`, x.field];
 
 export function buildTermsPrompt(i: { appName: string; profile: AppProfile; locales: string[]; current: string[] }): string {
   return `You help an app be found in the App Store. List the search terms its future users would type, per language.
@@ -95,7 +104,7 @@ ${kw || "(no search numbers this time)"}
 
 Apps that come up for these searches:
 ${comp || "(none found)"}
-${i.learned ? `\nWhat earlier tests and reviews showed: ${i.learned}\n` : ""}
+${i.learned ? `\nWhat earlier tests and reviews showed: ${i.learned}\n` : ""}${i.worked?.length ? `\nWhat worked in similar apps (anonymous results from other apps; still a test here):\n${i.worked.map((w) => `- ${w}`).join("\n")}\n` : ""}${i.avoid?.length ? `\nThe owner said no to these changes before — don't suggest them again: ${i.avoid.map((a) => a.replace(/^store\.text:/, "")).join("; ")}\n` : ""}${i.memory ? `\n${i.memory}\n` : ""}
 Rules:
 - Only suggest a field when the change is clearly better; keep what already works. Fewer, better changes.
 - ${i.stores.map(fields).join("\n- ")}

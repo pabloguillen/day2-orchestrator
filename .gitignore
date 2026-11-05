@@ -60,3 +60,7 @@ packages/sensors/dist/
 .day2-secrets-key
 .day2-fx.json
 deploy/inbox/wrangler.toml
+
+# Cross-app learning (local mode)
+day2-learning.json
+.day2-learning-salt

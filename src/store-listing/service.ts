@@ -48,6 +48,10 @@ export type StoreDeps = {
   /** Framed screenshots of a set at a size, as files. */
   screenshotFiles(set: ScreenshotSet, sizeId: string): string[];
   log(text: string, credits?: number): void;
+  /** What day2 knows about the app and what the owner said no to (memory/runtime.ts `proposalContext`). */
+  knowledge?: () => Promise<{ memory: string; avoid: string[]; blocked: { blocked: boolean; why?: string }; worked?: string[] }>;
+  /** The hard filter: drops suggestions the owner already declined. */
+  dropDeclined?: (s: Suggestion[]) => Promise<Suggestion[]>;
 };
 
 const line = (f: StoreFile, now: Date, text: string, credits?: number) => f.log.push({ at: now.toISOString(), text, ...(credits ? { credits } : {}) });
@@ -193,7 +197,7 @@ export async function prepareVersion(d: Pick<StoreDeps, "store" | "appId" | "now
   });
 }
 
-/** Approved screenshot sets: Google Play's go up at once (one edit per language); Apple's wait for the next version. */
+/** Approved screenshot sets: Google Play's go up at once (one edit per language and type: phone, and tablets when on); Apple's wait for the next version. */
 export async function uploadApprovedScreens(d: StoreDeps): Promise<string[]> {
   if (!d.play || !d.ids.packageName) return [];
   const f = await d.store.load(d.appId);
@@ -202,6 +206,8 @@ export async function uploadApprovedScreens(d: StoreDeps): Promise<string[]> {
   for (const s of sets) {
     try {
       await d.play.replacePhoneScreenshots(d.ids.packageName, s.locale, d.screenshotFiles(s, "android-phone"));
+      for (const t of s.sizes.map((x) => sizeById(x)).filter((z) => z?.store === "android" && z.displayType))
+        await d.play.replacePhoneScreenshots(d.ids.packageName, s.locale, d.screenshotFiles(s, t!.id), t!.displayType as "sevenInchScreenshots" | "tenInchScreenshots");
       done.push({ id: s.id, error: null });
     } catch (err) {
       done.push({ id: s.id, error: errText(err) });
@@ -233,6 +239,9 @@ export async function runResearch(d: StoreDeps, why: "schedule" | "release" | "o
   const file = await readListings(d);
   const stores: StoreId[] = [...(file.listings.ios || d.ids.bundleId ? (["ios"] as const) : []), ...(file.listings.android || d.ids.packageName ? (["android"] as const) : [])];
   if (!stores.length) return { run: null, skipped: "the app has no store ids in its config" };
+  // Before spending credits: has the owner ruled listing changes out?
+  const known = d.knowledge ? await d.knowledge() : null;
+  if (known?.blocked.blocked) return { run: null, skipped: `day2 won't propose listing changes: ${known.blocked.why}` };
   const locales = file.settings.locales;
   const firstApple = file.listings.ios?.[locales[0] ?? ""] ?? Object.values(file.listings.ios ?? {})[0];
   const current = (firstApple?.keywords ?? "").split(",").map((k) => k.trim()).filter(Boolean);
@@ -250,8 +259,9 @@ export async function runResearch(d: StoreDeps, why: "schedule" | "release" | "o
     for (const c of r.competitors) if (!competitors.some((x) => x.id === c.id)) competitors.push(c);
   }
   const learned = learnedFrom(file);
-  const written = await d.paid("content_generation", "Store listing texts", 0.8, () => d.agents.write({ appName: d.appName, profile: d.profile!, listings: file.listings, locales, stores, keywords, competitors, ...(learned ? { learned } : {}) }));
+  const written = await d.paid("content_generation", "Store listing texts", 0.8, () => d.agents.write({ appName: d.appName, profile: d.profile!, listings: file.listings, locales, stores, keywords, competitors, ...(learned ? { learned } : {}), ...(known ? { memory: known.memory, avoid: known.avoid, ...(known.worked?.length ? { worked: known.worked } : {}) } : {}) }));
   credits += written.credits;
+  if (written.result && d.dropDeclined) written.result = { ...written.result, suggestions: await d.dropDeclined(written.result.suggestions) };
   const id = `SR-${randomUUID().slice(0, 8)}`;
   return d.store.update(d.appId, (f) => {
     const auto = f.settings.autonomy.listing === "auto";

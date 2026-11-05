@@ -1,3 +1,4 @@
+import { recordBet } from "../learning/runtime";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -558,6 +559,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
       continue;
     }
     const verdict = measureBet(b, events);
+    await recordBet(app, b, verdict);
     if (verdict.state === "worse") {
       await stopAll(b.id, "it brought people who reach the goal less often than everyone else");
       bets = { ...bets, bets: bets.bets.map((x) => (x.id === b.id ? { ...x, status: "stopped", stoppedAt: at, stopReason: "Stopped by day2: it brought people who reach the goal less often than everyone else." } : x)) };

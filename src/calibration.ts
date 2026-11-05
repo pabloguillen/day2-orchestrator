@@ -1,3 +1,4 @@
+import { noteFalsePositiveCandidate } from "./learning/runtime";
 import { meteredQuery } from "./metered-query";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,7 +64,16 @@ export type CalibrationVerdict = {
   summary: string;
   isError: boolean;
   costUsd: number;
+  /** A false-positive pitfall the catalog doesn't have yet, as the skeptic described it — never clears anything, only goes to review. */
+  candidate?: string | null;
 };
+
+/** Pure. "CALIBRATION_VERDICT: NEW_FALSE_POSITIVE — <pitfall and how to re-verify>" → the text (null otherwise). */
+export function parseNewPatternCandidate(finalText: string): string | null {
+  const line = finalText.split("\n").find((l) => l.trim().startsWith("CALIBRATION_VERDICT:"))?.trim() ?? "";
+  const m = line.match(/^CALIBRATION_VERDICT:\s*NEW_FALSE_POSITIVE\s*—\s*(.{20,})$/);
+  return m ? m[1]!.trim().slice(0, 600) : null;
+}
 
 /** Pure, unit-tested — the fail-closed core of the whole mechanism.
  * Cleared only when ALL of: the final line is exactly well-formed, the run
@@ -133,7 +143,11 @@ this format:
 finding holds up), or
 "CALIBRATION_VERDICT: INCONCLUSIVE — <why>" (you couldn't tell either way —
 this is a legitimate answer, not a failure, and will keep the release
-blocked exactly like CONFIRMED_REAL does).
+blocked exactly like CONFIRMED_REAL does), or
+"CALIBRATION_VERDICT: NEW_FALSE_POSITIVE — <the testing pitfall and how to re-verify it>"
+(you reproduced that the finding is a false positive, but it matches none of
+the patterns above — this keeps the release blocked too; a person reviews
+your description before it can ever become a pattern).
 
 If you're running low on turns, stop investigating further and give your
 best current verdict right away, based on what you've already found — a
@@ -205,11 +219,15 @@ export async function runSkepticCheck(
     rmSync(cwd, { recursive: true, force: true });
   }
 
+  const candidate = isError ? null : parseNewPatternCandidate(finalText);
+  // Suggested to the operator for review (the catalog itself only changes by hand).
+  if (candidate) await noteFalsePositiveCandidate(base, candidate);
   return {
     persona: failedResult.persona,
     ...parseCalibrationVerdict(finalText, isError, validPatternIds),
     isError,
     costUsd,
+    ...(candidate ? { candidate } : {}),
   };
 }
 

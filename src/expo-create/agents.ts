@@ -1,16 +1,16 @@
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { runBuildAgent } from "../agent";
 import { sandboxConfig } from "../agent-sandbox";
 import { dataDir } from "../day2-paths";
 import { meteredQuery } from "../metered-query";
-import { parseMockupReply, renderMockup } from "../mockups";
 import { BUDGET_USD } from "./request";
-import type { CreateAgents } from "./flow";
+import { renderPage, renderScreen } from "../mockups";
+import type { CreateAgents, CreateRender } from "./flow";
 
 /**
- * The real agents behind Create (tests inject fakes). Plan and mockups are
- * pure writing — no tools, nothing to read yet; the build steps use the
+ * The real agents behind Create (tests inject fakes). The screen list, the
+ * design system and the drawings are pure writing — no tools, nothing to
+ * read yet; the build steps use the
  * build agent (agent.ts) in the new app's checkout. All metered as app_build.
  */
 
@@ -46,14 +46,14 @@ async function write(prompt: string, maxBudgetUsd: number, label: string): Promi
 }
 
 export const createAgents: CreateAgents = {
-  plan: (prompt) => write(prompt, BUDGET_USD.plan, "Product plan"),
-  async mockup(prompt, out) {
-    const r = await write(prompt, BUDGET_USD.mockup, "Mockup");
-    const parsed = r.isError ? null : parseMockupReply(r.text);
-    if (!parsed || parsed === "none") return null;
-    mkdirSync(dirname(out), { recursive: true });
-    await renderMockup(parsed.html, out);
-    return { note: parsed.note };
-  },
+  plan: (prompt) => write(prompt, BUDGET_USD.plan, "Screen list"),
+  style: (prompt) => write(prompt, BUDGET_USD.style, "Design system"),
+  screen: (prompt) => write(prompt, BUDGET_USD.screen, "Screen drawing"),
   build: (cwd, report) => runBuildAgent(cwd, report),
+};
+
+/** Playwright, with every web request blocked (mockups.ts). */
+export const createRender: CreateRender = {
+  screen: (html, png, size) => renderScreen(html, png, size),
+  page: (html, png, width) => renderPage(html, png, width),
 };

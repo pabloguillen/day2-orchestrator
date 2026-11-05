@@ -1,3 +1,4 @@
+import { recordStoreTest } from "../learning/runtime";
 import type { AppEntry } from "../apps-registry";
 import type { CreditService } from "../credits";
 import { appKind } from "../field-work";
@@ -8,6 +9,10 @@ import { addCustomPage, addTest, playExperimentWalkthrough, recordResult } from 
 import { parseReviewPrompt, ratingTrend } from "./reviews";
 import { FLOW_KEY, FLOW_PATH, hasFlow, sizeById, storeShotPath } from "./screenshots";
 import { applyApproved, readListings, reviewsPass, runResearch, sendPending, uploadApprovedScreens, type Paid } from "./service";
+import { setupWaiting } from "./setup";
+import { registerSetupRoutes } from "./setup-routes";
+import { captureSoon, noteDecline, noteOwnerInput } from "../memory/runtime";
+import type { ProposalKind } from "../memory/types";
 import { LIMITS, type StoreFile, type StoreId, type StoreReview, type StoreSettings } from "./types";
 
 /**
@@ -44,6 +49,7 @@ export async function storeView(app: AppEntry, t: Tenant) {
     screenshots: f.screenshots.filter((s) => s.status === "draft").length,
     tests: f.tests.filter((x) => x.status === "waiting_approval").length + f.customPages.filter((p) => p.status === "waiting_approval").length,
     replies: reviews.filter((r) => r.reply?.state === "draft").length,
+    setup: applies ? setupWaiting(f) : 0,
   };
   return {
     applies,
@@ -71,7 +77,7 @@ export async function storeView(app: AppEntry, t: Tenant) {
     trend: ratingTrend(reviews),
     ratings: f.ratings.slice(-60),
     log: f.log.slice(-30).reverse(),
-    pending: { ...pending, total: pending.proposals + pending.screenshots + pending.tests + pending.replies },
+    pending: { ...pending, total: pending.proposals + pending.screenshots + pending.tests + pending.replies + pending.setup },
   };
 }
 
@@ -79,6 +85,7 @@ const body = async (req: Request) => (await req.json().catch(() => ({}))) as Rec
 
 export function registerStoreRoutes(k: RouteKit): void {
   const { route, json, requireApp, requireManager, httpError } = k;
+  registerSetupRoutes(k);
   const storeApp = async (t: Tenant, id: string) => {
     const app = await requireApp(t, id);
     if (appKind(app.repoPath) !== "react-native") throw httpError(409, "Only apps in the App Store and Google Play have a store listing.");
@@ -86,6 +93,13 @@ export function registerStoreRoutes(k: RouteKit): void {
   };
   const who = async (t: Tenant) => (await k.actorName(t)) ?? null;
   const fail = (err: unknown) => httpError(400, (err as Error).message);
+  const ref = (app: AppEntry, id: string, label: string) => ({ type: "proposal" as const, id, url: `/apps/${app.id}/store`, label: `Store: ${label}` });
+  /** A decline: blocked for 90 days; with a "why", day2 learns from it right away. */
+  const declined = async (t: Tenant, app: AppEntry, kind: ProposalKind, target: string, reason: unknown, about: string, id: string) => {
+    const why = typeof reason === "string" ? reason.trim().slice(0, 500) : "";
+    await noteDecline(app, { kind, target, reason: why, who: await who(t), about, ref: ref(app, id, about) });
+    if (why) captureSoon(app, (service, description, max, fn) => k.runWithCredits(t, app, service, description, max, fn));
+  };
 
   route("GET", "/api/apps/:id/store", async (_req, p, t) => json(await storeView(await requireApp(t, p.id!), t)));
 
@@ -139,6 +153,7 @@ export function registerStoreRoutes(k: RouteKit): void {
     if (typeof b.approve !== "boolean") throw httpError(400, "Say approve: true or false.");
     const d = await storeDeps(t, app);
     const by = await who(t);
+    const prop = (await d.store.load(app.id)).proposals.find((x) => x.id === p.pid);
     await d.store.update(app.id, (f) => {
       try {
         return { file: decideProposal(f, p.pid!, { approve: b.approve as boolean, ...(typeof b.text === "string" ? { text: b.text } : {}), by, now: new Date(), appName: d.appName }), result: null };
@@ -146,6 +161,12 @@ export function registerStoreRoutes(k: RouteKit): void {
         throw fail(err);
       }
     });
+    if (prop) {
+      const label = `${FIELD_LABEL[prop.field]} (${prop.locale})`;
+      if (!b.approve) await declined(t, app, "store.text", `${prop.field}:${prop.locale}`, b.reason, label, prop.id);
+      // The owner rewrote day2's text before approving it: day2 learns the preference behind the edit.
+      else if (typeof b.text === "string" && b.text.trim() !== prop.after.trim()) await noteOwnerInput(app, { kind: "edit", text: `edited the ${label}`, before: prop.after, after: b.text.trim(), about: label, ref: ref(app, prop.id, label), who: by });
+    }
     if (b.approve) await applyApproved(d).catch(() => null);
     return json(await storeView(app, t));
   });
@@ -175,15 +196,22 @@ export function registerStoreRoutes(k: RouteKit): void {
       const s = f.screenshots.find((x) => x.id === p.sid);
       if (!s) throw httpError(404, "No such screenshot set.");
       if (s.status !== "draft") throw httpError(409, `These screenshots are already ${s.status}.`);
+      const edits: Array<{ before: string; after: string }> = [];
       if (b.approve === true) s.status = "approved";
       else if (b.approve === false) f.screenshots = f.screenshots.filter((x) => x.id !== s.id);
       else if (b.captions && typeof b.captions === "object") {
         for (const shot of s.shots) {
           const c = (b.captions as Record<string, unknown>)[shot.name];
-          if (typeof c === "string") shot.caption = c.trim().slice(0, 40);
+          if (typeof c === "string" && c.trim().slice(0, 40) !== shot.caption) {
+            edits.push({ before: shot.caption, after: c.trim().slice(0, 40) });
+            shot.caption = c.trim().slice(0, 40);
+          }
         }
       }
-      return { file: f, result: null };
+      return { file: f, result: edits };
+    }).then(async (edits) => {
+      if (b.approve === false) await declined(t, app, "store.screenshots", p.sid!, b.reason, "new screenshots", p.sid!);
+      if (edits.length) await noteOwnerInput(app, { kind: "edit", text: "edited screenshot captions", before: edits.map((e) => e.before).join(" | "), after: edits.map((e) => e.after).join(" | "), about: "screenshot captions", ref: ref(app, p.sid!, "screenshot captions"), who: await who(t) });
     });
     if (b.approve === true) await uploadApprovedScreens(d).catch(() => null);
     return json(await storeView(app, t));
@@ -233,13 +261,19 @@ export function registerStoreRoutes(k: RouteKit): void {
       if (b.result && typeof b.result === "object") {
         const r = b.result as Record<string, unknown>;
         try {
-          return { file: recordResult(f, x.id, { winner: String(r.winner ?? ""), note: String(r.note ?? ""), by, now: new Date() }), result: null };
+          const next = recordResult(f, x.id, { winner: String(r.winner ?? ""), note: String(r.note ?? ""), by, now: new Date() });
+          const done = next.tests.find((y) => y.id === x.id);
+          if (done?.result) void recordStoreTest(app, { id: done.id, kind: done.kind, treatments: done.treatments, result: done.result });
+          return { file: next, result: null };
         } catch (err) {
           throw fail(err);
         }
       }
       if (b.approve === true && x.status === "waiting_approval") x.status = "draft";
-      else if (b.approve === false && x.status === "waiting_approval") f.tests = f.tests.filter((y) => y.id !== x.id);
+      else if (b.approve === false && x.status === "waiting_approval") {
+        f.tests = f.tests.filter((y) => y.id !== x.id);
+        void declined(t, app, "store.test", `${x.kind}:${x.name}`, b.reason, `the product page test “${x.name}”`, x.id);
+      }
       else if (b.stop === true) {
         stopAsc = x.ascId;
         x.status = "stopped";
@@ -282,7 +316,10 @@ export function registerStoreRoutes(k: RouteKit): void {
       if (!x) throw httpError(404, "No such page.");
       if (x.status !== "waiting_approval") throw httpError(409, `This page is already ${x.status}.`);
       if (b.approve === true) x.status = "draft";
-      else f.customPages = f.customPages.filter((y) => y.id !== x.id);
+      else {
+        f.customPages = f.customPages.filter((y) => y.id !== x.id);
+        void declined(t, app, "store.page", x.name, b.reason, `the custom product page “${x.name}”`, x.id);
+      }
       return { file: f, result: null };
     });
     return json(await storeView(app, t));

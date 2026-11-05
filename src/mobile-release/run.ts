@@ -12,6 +12,9 @@ import { loadReleases, releasePass, RELEASES_FILENAME, saveReleases, type Releas
 import { readiness, SETUP_KEY, setupTicket } from "./setup";
 import { createPlay } from "./play";
 import { prepareForRelease } from "../store-listing/release-hook";
+import { beforeRelease } from "../hosting/index";
+import { hostingPrivacy } from "../hosting/privacy";
+import { hostingStore } from "../hosting/runtime";
 
 /**
  * Releases for one app, on the backlog timer: makes sure the app is set up
@@ -61,10 +64,16 @@ export async function runReleases(app: AppEntry, log: (text: string) => void = (
       privacyDue: async (platform) => {
         const sp = loadStorePrivacy(privacyPath);
         const tickets = (await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }))).tickets;
-        return storeStatus(sp, practicesFrom(tickets, sp.settings, existingIntegration(app.repoPath))).find((s) => s.store === platform)?.steps ?? [];
+        const hosting = await hostingPrivacy(app.id, hostingStore()).catch(() => null);
+        return storeStatus(sp, practicesFrom(tickets, sp.settings, existingIntegration(app.repoPath), hosting?.practice ?? null)).find((s) => s.store === platform)?.steps ?? [];
       },
       ticket,
       log,
+      // Hosting: the release's database migrations reach production just before it ships.
+      beforeShip: async (o) => {
+        const r = await beforeRelease(app, o.dir);
+        return r.ok ? { ok: true as const } : r;
+      },
       ...(asc ? { beforeIosSubmit: (o: { appId: string; versionId: string; version: string }) => prepareForRelease(app, asc.value, o, log) } : {}),
     });
     saveReleases(path, next);

@@ -1,3 +1,6 @@
+import { recordCampaign, workedLines } from "../learning/runtime";
+import { normalizeTarget } from "../memory/core";
+import { proposalContext } from "../memory/runtime";
 import { randomUUID } from "node:crypto";
 import type { AppEntry } from "../apps-registry";
 import { createTicket, rankBacklog, withBacklog, type Backlog } from "../backlog";
@@ -378,16 +381,23 @@ async function planCampaigns(
   // Before anyone has push on (the setup ticket isn't live yet), there's nobody to write for.
   if (!reach.size) return state;
   const locales = localesFor(reach);
+  // What day2 knows (owner's voice, things not to send), and the campaigns the owner turned down.
+  const known = await proposalContext(app, "messages", ["messages.campaign"], { now });
+  if (known.blocked.blocked) return state;
+  const avoid = new Set(known.avoid);
+  const worked = await workedLines(app, "messages");
   type Need = { kind: "lifecycle"; audience: Audience } | { kind: "trigger"; event: string };
   const needs: Need[] = [
     ...missingAudiences(state.campaigns, snapshot).map((a) => ({ kind: "lifecycle" as const, audience: a })),
     ...missingTriggers(state.campaigns, (await deps.field.events(app.id, new Date(now.getTime() - 30 * DAY))) as Array<{ type: string; props?: Record<string, unknown> }>).map((e) => ({ kind: "trigger" as const, event: e })),
-  ].slice(0, NEW_DRAFTS_PER_PLAN);
+  ]
+    .filter((n) => !avoid.has(`messages.campaign:${normalizeTarget(campaignTarget(n.kind === "lifecycle" ? { kind: "lifecycle", audience: n.audience } : { kind: "trigger", trigger: { event: n.event } }))}`))
+    .slice(0, NEW_DRAFTS_PER_PLAN);
   for (const need of needs) {
     const goal = need.kind === "lifecycle" ? AUDIENCE_GOAL[need.audience] : `Tell the user right away: ${TRIGGER_EVENTS[need.event]!.toLowerCase()}. Plain and specific; the tap opens where they can see it.`;
     let w: WriteResult;
     try {
-      w = await deps.write(draftInput(app, profile, locales, goal));
+      w = await deps.write({ ...draftInput(app, profile, locales, goal), ...(known.memory ? { memory: known.memory } : {}), ...(worked.length ? { worked } : {}) });
     } catch (err) {
       const why = err instanceof CreditsError ? err.message : (err as Error).message;
       report.notes.push(`message texts: ${why}`);
@@ -431,6 +441,13 @@ export function localesFor(reach: Map<string, PushToken[]>): Locale[] {
 
 export function grounding(profile: AppProfile): string {
   return [profile.purpose, profile.targetUsers, ...profile.featureMap, profile.businessModel ?? ""].join(" ");
+}
+
+/** A campaign's hard-filter target: what it's for ("lifecycle:at_risk", "trigger:friend_joined"). */
+export function campaignTarget(c: { kind: string; audience?: string; trigger?: { event: string }; id?: string }): string {
+  if (c.kind === "lifecycle" && c.audience) return `lifecycle:${c.audience}`;
+  if (c.kind === "trigger" && c.trigger) return `trigger:${c.trigger.event}`;
+  return `${c.kind}:${c.id ?? ""}`;
 }
 
 export function draftInput(app: AppEntry, profile: AppProfile, locales: Locale[], goal: string, ownerNote?: string | null): DraftInput {
@@ -522,6 +539,8 @@ async function measureAll(
     // Push taps are reported as message_tapped with the campaign id (setup ticket); push_opened carries no id.
     const opened = mine.filter((e) => e.type === "push_opened" || (c.channel === "push" && e.type === "message_tapped")).length;
     const decided = c.result.state !== result.state && (result.state === "better" || result.state === "worse" || result.state === "no_difference");
+    // Measured against its holdout: into the shared library of anonymous outcomes.
+    if (decided && "treatedRate" in result) await recordCampaign(app, c, result);
     let patch: Partial<Campaign> = { result, guardrail, inAppStats, opened };
     if (c.status === "active" && guardrail.tripped) {
       patch = { ...patch, status: "stopped", stoppedReason: `More people switched push off: ${guardrail.note}` };

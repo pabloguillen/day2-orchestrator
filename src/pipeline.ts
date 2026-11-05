@@ -201,7 +201,7 @@ export async function runPipeline(
     console.log(`[day2] Opened PR: ${url}`);
 
     markProcessed(stateFile, report);
-    return { status: "pr_opened", url, branch, ...(checks ? { checks } : {}) };
+    return { status: "pr_opened", url, branch, summary: fix.finalText.slice(-3000), ...(checks ? { checks } : {}) };
   } finally {
     d.removeWorkspace(cwd);
   }

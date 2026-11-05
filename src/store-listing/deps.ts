@@ -1,3 +1,6 @@
+import { workedLines } from "../learning/runtime";
+import { filterProposals, proposalContext } from "../memory/runtime";
+import { textTargets } from "./research";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,8 +15,17 @@ import { withCreditContext, type CreditContext } from "../metered-query";
 import { gitWorkdirs } from "../mobile-release/git-workdir";
 import { loadReleases, RELEASES_FILENAME } from "../mobile-release/pass";
 import { APP_PROFILE_FILENAME, loadAppProfile } from "../onboarding";
+import { existingIntegration } from "../field-work";
+import { decryptSecret } from "../secrets";
+import { loadStorePrivacy, practicesFrom, STORE_PRIVACY_FILENAME, storeStatus } from "../store-privacy";
 import { releaseCredentials, type Tenant } from "../tenant";
 import { createAscListing } from "./asc";
+import type { SetupDeps } from "./setup";
+import { deriveAnswers } from "./setup-answers";
+import { createAscSetup } from "./setup-asc";
+import { appIconPath, makePlayGraphics, recordPreview, setupDir, setupFilePath } from "./setup-assets";
+import { createPlaySetup } from "./setup-play";
+import type { Graphic } from "./setup-types";
 import { createItunes } from "./itunes";
 import type { StorePassDeps } from "./pass";
 import { createPlayListing } from "./play-listing";
@@ -84,6 +96,8 @@ export async function storeDeps(tenant: Tenant, app: AppEntry, log: (text: strin
     ids: { ...ids, appStoreId: links.ios?.appStoreId ?? null },
     profile: loadAppProfile(resolve(app.repoPath, APP_PROFILE_FILENAME)),
     agents: { terms: suggestTerms, write: writeListing, replies: draftReplies, triage },
+    knowledge: async () => ({ ...(await proposalContext(app, "store", ["store.text"])), worked: await workedLines(app, "store") }),
+    dropDeclined: async (s) => (await filterProposals(app, "store.text", s, textTargets)).kept,
     paid: paidFor(tenant, app),
     ticket: (t) => ticketOnce(app, t),
     async ingest(items) {
@@ -99,7 +113,90 @@ export async function storeDeps(tenant: Tenant, app: AppEntry, log: (text: strin
     shippedVersion: async () => loadReleases(resolve(app.repoPath, RELEASES_FILENAME)).shipped?.version ?? null,
   };
   if (deviceMode() === "local") deps.startScreenshots = () => void makeScreenshots(app, deps).catch((err: Error) => log(`Screenshots: ${err.message}`));
+  const tickets = async () => (await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }))).tickets;
+  const practices = async () => {
+    const sp = loadStorePrivacy(resolve(app.repoPath, STORE_PRIVACY_FILENAME));
+    return { file: sp, practices: practicesFrom(await tickets(), sp.settings, existingIntegration(app.repoPath)) };
+  };
+  const setup: SetupDeps = {
+    now: deps.now,
+    appId: app.id,
+    appName: deps.appName,
+    repoPath: app.repoPath,
+    store,
+    ids: deps.ids,
+    asc: asc && deps.asc ? { listing: deps.asc, setup: createAscSetup(asc.value) } : null,
+    play: play ? createPlaySetup(play.value) : null,
+    profile: deps.profile,
+    paid: deps.paid,
+    answers: (i) => deriveAnswers(app.repoPath, i),
+    practices: async () => {
+      const p = (await practices()).practices;
+      return { ads: Boolean(p.ads), purchases: Boolean(p.purchases) };
+    },
+    privacy: async () => {
+      const p = await practices();
+      return storeStatus(p.file, p.practices);
+    },
+    ticket: (t) => ticketOnce(app, t),
+    makeGraphics: async (kinds) => {
+      const f = await store.load(app.id);
+      const locale = f.settings.locales[0] ?? "en-US";
+      const tagline = f.listings.android?.[locale]?.shortDescription || f.listings.ios?.[locale]?.subtitle || (deps.profile?.purpose ?? "").split(/(?<=\.)\s/)[0]!.slice(0, 80);
+      return makePlayGraphics({ appId: app.id, name: deps.appName, tagline, style: frameStyle(deps.profile?.brand), iconPath: appIconPath(app.repoPath) }, kinds);
+    },
+    graphicPath: (g: Graphic) => setupFilePath(app.id, g.file),
+    demo: (secret) => JSON.parse(decryptSecret(secret, demoContext(app.id))) as { username: string; password: string },
+    log,
+  };
+  if (deviceMode() === "local" && ids.bundleId) setup.startPreviews = () => void makePreviews(app, setup).catch((err: Error) => log(`App preview: ${err.message}`));
+  deps.setup = setup;
   return deps;
+}
+
+/** What the demo account's ciphertext is bound to (secrets.ts associated data). */
+export const demoContext = (appId: string) => `store-demo-account:${appId}`;
+
+const previewing = new Set<string>();
+export const makingPreviews = (appId: string) => previewing.has(appId);
+
+/**
+ * App previews: a checkout of main, the app built for the iPhone Simulator,
+ * the screen recorded while the flow runs (once per language), trimmed and
+ * encoded with ffmpeg. Saved as drafts (or approved, when day2 decides);
+ * approved ones go into the next App Store version.
+ */
+export async function makePreviews(app: AppEntry, d: SetupDeps): Promise<Graphic[]> {
+  if (previewing.has(app.id) || !d.ids.bundleId) return [];
+  previewing.add(app.id);
+  const git = gitWorkdirs(app.id, app.repoPath);
+  let done: (() => Promise<void>) | null = null;
+  try {
+    const f = await d.store.load(app.id);
+    const wd = await git.checkout((await git.head()).sha);
+    done = wd.done;
+    const out: Graphic[] = [];
+    const notes: string[] = [];
+    const style = frameStyle(d.profile?.brand);
+    for (const locale of f.settings.locales) {
+      const r = await recordPreview({ cwd: wd.dir, bundleId: d.ids.bundleId, locale, outDir: setupDir(app.id), pad: style.background }, { target: () => iosTarget(d.ids.bundleId!, d.appName), log: d.log });
+      if ("error" in r) {
+        notes.push(`${locale}: ${r.error}`);
+        continue;
+      }
+      out.push({ id: `SG-${Date.now().toString(36)}-preview-${locale.replace(/[^\w]/g, "")}`, kind: "preview", file: r.file.split("/").pop()!, locale, previewType: "IPHONE_67", status: f.settings.autonomy.listing === "auto" ? "approved" : "draft", at: new Date().toISOString(), uploadedAt: null, error: null });
+    }
+    await d.store.update(app.id, (file) => {
+      file.setup.graphics.push(...out);
+      file.log.push({ at: new Date().toISOString(), text: out.length ? `Recorded ${out.length} App Store preview${out.length === 1 ? "" : "s"} (${out.map((g) => g.locale).join(", ")})${notes.length ? ` — ${notes.join("; ")}` : ""}.` : `App previews didn't work: ${notes.join("; ")}` });
+      if (!out.length) file.setup.graphics.push({ id: `SG-${Date.now().toString(36)}-preview`, kind: "preview", file: "", locale: null, previewType: null, status: "failed", at: new Date().toISOString(), uploadedAt: null, error: notes.join("; ") || "no preview came out" });
+      return { file, result: null };
+    });
+    return out;
+  } finally {
+    previewing.delete(app.id);
+    await done?.().catch(() => {});
+  }
 }
 
 const making = new Set<string>();

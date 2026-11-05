@@ -4,6 +4,7 @@ import { appKind } from "../field-work";
 import { asksThroughDay2, reviewPromptReady, reviewPromptTicket } from "./live";
 import { appLocales } from "./listing";
 import { flowTicket, hasFlow } from "./screenshots";
+import { setupPass, type SetupDeps } from "./setup";
 import { advanceTests, applyApproved, readListings, reviewsDue, reviewsPass, runResearch, uploadApprovedScreens, type StoreDeps } from "./service";
 import type { StoreFile } from "./types";
 
@@ -17,6 +18,7 @@ import type { StoreFile } from "./types";
  *  - approved changes go out (promotional text now, other App Store texts
  *    with the next version, Google Play in one edit);
  *  - Apple tests and custom product pages move along;
+ *  - store setup: facts proposed once, approved ones kept in the stores;
  *  - one-time tickets: the screenshot flow, the rating prompt.
  */
 
@@ -25,9 +27,11 @@ export type StorePassDeps = StoreDeps & {
   shippedVersion(): Promise<string | null>;
   /** Starts making screenshots in the background (builds the app; slow). Absent = not on this server. */
   startScreenshots?: () => void;
+  /** Store setup (setup.ts); absent = skipped. */
+  setup?: SetupDeps;
 };
 
-export type StorePassReport = { listingsRead: boolean; researched: boolean; reviews: { added: number; drafted: number; sent: number; tickets: number } | null; applied: string[]; staged: string[]; tests: string[]; tickets: string[]; skipped: string[] };
+export type StorePassReport = { listingsRead: boolean; researched: boolean; reviews: { added: number; drafted: number; sent: number; tickets: number } | null; applied: string[]; staged: string[]; tests: string[]; tickets: string[]; skipped: string[]; setup?: { proposed: string[]; wrote: string[] } };
 
 const LISTINGS_EVERY_MS = 24 * 3_600_000;
 
@@ -93,6 +97,13 @@ export async function storePass(app: AppEntry, d: StorePassDeps): Promise<StoreP
   await step("tests", async () => {
     report.tests.push(...(await advanceTests(d)));
   });
+
+  if (d.setup)
+    await step("setup", async () => {
+      const r = await setupPass(d.setup!);
+      report.setup = { proposed: r.proposed, wrote: r.wrote };
+      report.skipped.push(...r.problems.map((p) => `setup: ${p}`));
+    });
 
   await step("tickets", async () => {
     if (d.profile && !hasFlow(app.repoPath)) {

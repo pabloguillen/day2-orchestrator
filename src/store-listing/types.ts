@@ -5,6 +5,8 @@
  * reviews. docs/store-listing.md has the whole picture.
  */
 
+import { emptySetup, type SetupState } from "./setup-types";
+
 export type StoreId = "ios" | "android";
 
 export type AppleField = "name" | "subtitle" | "keywords" | "promotionalText" | "description" | "whatsNew";
@@ -223,6 +225,8 @@ export type StoreFile = {
   reviewsFetchedAt: string | null;
   /** The store version the last research ran for (a new one triggers research). */
   researchedVersion: string | null;
+  /** Store setup: facts, graphics, guided steps (setup-types.ts). */
+  setup: SetupState;
   log: StoreLogLine[];
 };
 
@@ -250,6 +254,7 @@ export function emptyStoreFile(): StoreFile {
     ratings: [],
     reviewsFetchedAt: null,
     researchedVersion: null,
+    setup: emptySetup(),
     log: [],
   };
 }

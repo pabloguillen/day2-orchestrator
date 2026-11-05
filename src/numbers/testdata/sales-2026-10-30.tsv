@@ -1,0 +1,8 @@
+Provider	Provider Country	SKU	Developer	Title	Version	Product Type Identifier	Units	Developer Proceeds	Begin Date	End Date	Customer Currency	Country Code	Currency of Proceeds	Apple Identifier	Customer Price	Promo Code	Parent Identifier	Subscription	Period	Category	CMB	Device	Supported Platforms	Proceeds Reason	Preserved Pricing	Client	Order Type
+APPLE	US	dotty01	Dotty GmbH	Dotty	1.0.0	1F	12	0	10/30/2026	10/30/2026	USD	US	USD	6740000001	0					Graphics & Design		iPhone	iOS				
+APPLE	US	dotty01	Dotty GmbH	Dotty	1.0.0	1F	3	0	10/30/2026	10/30/2026	USD	US	USD	6740000001	0					Graphics & Design		iPad	iOS				
+APPLE	US	dotty01	Dotty GmbH	Dotty	1.0.0	1	-1	0	10/30/2026	10/30/2026	USD	US	USD	6740000001	0					Graphics & Design		iPhone	iOS				
+APPLE	US	dotty01	Dotty GmbH	Dotty	1.0.0	3F	4	0	10/30/2026	10/30/2026	USD	US	USD	6740000001	0					Graphics & Design		iPhone	iOS				
+APPLE	US	dotty01	Dotty GmbH	Dotty	1.0.0	7F	40	0	10/30/2026	10/30/2026	USD	US	USD	6740000001	0					Graphics & Design		iPhone	iOS				
+APPLE	US	dotty01	Dotty GmbH	Dotty Pro	1.0.0	IAY	5	0	10/30/2026	10/30/2026	USD	US	USD	6740000999	0		dotty01			Graphics & Design		iPhone	iOS				
+APPLE	US	dotty01	Dotty GmbH	Other App	1.0.0	1F	99	0	10/30/2026	10/30/2026	USD	US	USD	6740000002	0					Graphics & Design		iPhone	iOS				

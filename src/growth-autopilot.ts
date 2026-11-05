@@ -1,3 +1,4 @@
+import { recordBet } from "./learning/runtime";
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { betTicketOpts } from "./ads/destination";
@@ -550,6 +551,7 @@ async function runAds(app: AppEntry, profile: AppProfile, deps: AutopilotDeps, l
     const billed = await billAdSpend(deps.credits, { appId: app.id, campaignId: c.campaignId, label: `${b.id} ${b.title}`, reportedSpendUsd: stats.spendUsd, billedSpendUsd: c.billedSpendUsd });
     let next: typeof c = { ...c, spendUsd: stats.spendUsd, billedSpendUsd: billed, clicks: stats.clicks, impressions: stats.impressions, lastSyncAt: at };
     const verdict = measureBet(b, events);
+    await recordBet(app, b, verdict);
     let stopReason: string | null = null;
     if (verdict.state === "worse") stopReason = "it brought people who reach first value less often than everyone else";
     else if (monthlyAds > 0 && stats.spendUsd >= monthlyAds) stopReason = "it used this month's ad budget without a clear win";

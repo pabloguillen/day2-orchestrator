@@ -14,7 +14,10 @@ import { liveConfigPart } from "./config";
 import { checkAdMobIds, checkIap, connectionViews } from "./connections";
 import { parseMoneyCredential, type IapCredential, type MoneyCredentialKind } from "./credentials";
 import { googleClient, SCOPE_PUBSUB, setupPubSub } from "./google-play";
-import { copyTest, addTest, decideTest } from "./offer-tests";
+import { copyTest, addTest, decideTest, testTarget } from "./offer-tests";
+import { dropDeclined, moneyKnowledge } from "./memory";
+import { captureSoon, noteDecline, noteOwnerInput } from "../memory/runtime";
+import type { ProposalKind } from "../memory/types";
 import { adoptStrategy, ensureTickets, moneyPass } from "./pass";
 import { decideProduct } from "./products";
 import { receiveRevenueCat } from "./revenuecat";
@@ -135,6 +138,12 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
     saveAppMoney(app, next);
     return next;
   };
+  /** A decline: blocked for 90 days; with a "why", day2 learns from it right away. */
+  const declined = async (t: Tenant, app: AppEntry, kind: ProposalKind, target: string, reason: unknown, about: string, id: string) => {
+    const why = typeof reason === "string" ? reason.trim().slice(0, 500) : "";
+    await noteDecline(app, { kind, target, reason: why, who: (await actorName(t)) ?? null, about, ref: { type: "proposal", id, url: `/apps/${app.id}/money`, label: `Money: ${about}` } });
+    if (why) captureSoon(app, (service, description, max, fn) => ctx.runWithCredits(t, app, service, description, max, fn));
+  };
   const kick = (t: Tenant, app: AppEntry) => {
     // Products and tickets right away instead of at the next autopilot tick.
     const profile = loadAppProfile(resolve(app.repoPath, APP_PROFILE_FILENAME));
@@ -171,6 +180,9 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
     const profile = loadAppProfile(resolve(app.repoPath, APP_PROFILE_FILENAME));
     if (!profile) throw httpError(409, "Scan the app first (App profile) — the plan is built on what the app does and for whom.");
     if (planning.get(app.id)) return json(await moneyView(app), { status: 202 });
+    // The owner asked for it here, so a decline of an earlier plan doesn't stop it; a "never" rule does.
+    const known = await moneyKnowledge(app);
+    if (known.blocked.blocked && known.blocked.until === null) throw httpError(409, `day2 won't plan prices: ${known.blocked.why} Change it on “What day2 knows” if that's no longer true.`);
     const check = await authorize(t.credits, { appId: app.id, appName: app.name, service: "scan_answer", maxCostUsd: STRATEGY_MAX_USD });
     if (!check.ok) throw new CreditsError(check);
     planning.set(app.id, new Date().toISOString());
@@ -197,9 +209,13 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
             existing: [],
             minorsHint: minors,
             excerpts: [],
+            memory: known.memory,
+            avoid: known.avoid,
+            worked: known.worked,
           }),
         );
-        update(app, (f) => (result ? propose(f, result, { users: users.length, rhythm: snap?.rhythm ?? null, credits, now }).file : addLog(f, "Couldn't verify how leading apps of this kind earn — day2 proposes nothing rather than guess.", now)));
+        const kept = result ? await dropDeclined(app, result) : null;
+        update(app, (f) => (kept ? propose(f, kept, { users: users.length, rhythm: snap?.rhythm ?? null, credits, now }).file : addLog(f, "Couldn't verify how leading apps of this kind earn — day2 proposes nothing rather than guess.", now)));
       } catch (err) {
         update(app, (f) => addLog(f, `Couldn't plan: ${(err as Error).message}`, new Date()));
       } finally {
@@ -213,13 +229,14 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
     const app = await requireApp(t, p.id!);
     mobile(app);
     requireManager(t);
-    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown };
+    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown; reason?: unknown };
     if (typeof b.approve !== "boolean") throw httpError(400, "Say approve: true or false.");
     const now = new Date();
     const by = (await actorName(t)) ?? null;
     const f = loadAppMoney(app);
     const d = decideStrategy(f, p.sid!, b.approve, by, now);
     if (!d.strategy) throw httpError(404, "No such plan waiting for a decision.");
+    if (!b.approve) await declined(t, app, "money.strategy", d.strategy.models.slice().sort().join(",") || "not_yet", b.reason, `the plan for how the app earns (${d.strategy.models.join(" + ") || "not yet"})`, d.strategy.id);
     const ids = storeIdsFromRepo(app.repoPath);
     let next = d.file;
     if (b.approve) {
@@ -234,10 +251,12 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
   route("POST", "/api/apps/:id/money/products/:pid/decide", async (req, p, t) => {
     const app = await requireApp(t, p.id!);
     requireManager(t);
-    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown };
+    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown; reason?: unknown };
     if (typeof b.approve !== "boolean") throw httpError(400, "Say approve: true or false.");
     const by = (await actorName(t)) ?? null;
+    const product = loadAppMoney(app).products.find((x) => x.productId === decodeURIComponent(p.pid!));
     update(app, (f) => decideProduct(f, decodeURIComponent(p.pid!), b.approve as boolean, by, new Date()));
+    if (!b.approve && product) await declined(t, app, "money.product", product.key, b.reason, `the product “${product.name}” at ${product.base.amount} ${product.base.currency}`, product.productId);
     if (b.approve) kick(t, app);
     return json(await moneyView(app));
   });
@@ -245,10 +264,12 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
   route("POST", "/api/apps/:id/money/tests/:tid/decide", async (req, p, t) => {
     const app = await requireApp(t, p.id!);
     requireManager(t);
-    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown };
+    const b = ((await req.json().catch(() => ({}))) ?? {}) as { approve?: unknown; reason?: unknown };
     if (typeof b.approve !== "boolean") throw httpError(400, "Say approve: true or false.");
     const by = (await actorName(t)) ?? null;
+    const test = loadAppMoney(app).tests.find((x) => x.id === p.tid);
     update(app, (f) => decideTest(f, p.tid!, b.approve as boolean, by, new Date()));
+    if (!b.approve && test) await declined(t, app, "money.test", testTarget(test), b.reason, `the test “${test.title}”`, test.id);
     if (b.approve) kick(t, app);
     return json(await moneyView(app));
   });
@@ -266,6 +287,10 @@ export function registerMoneyRoutes(ctx: MoneyRouteContext): void {
     if (!test) throw httpError(409, "The paywall isn't live yet (its products have to be in the stores first), or the title is empty.");
     if (f.tests.some((x) => x.state === "running" || x.state === "proposed" || x.state === "waiting_approval")) throw httpError(409, "Another test is running — one at a time, so each result is clear.");
     saveAppMoney(app, addTest(f, test, new Date()));
+    // The owner rewrote day2's paywall copy: day2 learns the preference behind it.
+    const was = [w.title, w.subtitle, w.cta].filter(Boolean).join(" · ");
+    const now = [s(b.title, 80), s(b.subtitle, 160), s(b.cta, 40)].filter(Boolean).join(" · ");
+    await noteOwnerInput(app, { kind: "edit", text: "rewrote the paywall wording", before: was, after: now, about: `paywall “${w.placement}”`, ref: { type: "proposal", id: `paywall.${w.placement}`, url: `/apps/${app.id}/money`, label: `Money: paywall ${w.placement}` }, who: await actorName(t) });
     return json(await moneyView(app), { status: 201 });
   });
 

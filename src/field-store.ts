@@ -109,11 +109,12 @@ export const INGEST_KEY_RE = /^d2k_[A-Za-z0-9_-]{20,40}$/;
 const dayOf = (iso: string) => iso.slice(0, 10);
 
 /** An event as stored: who (hashed), what, props and money, and the batch's Live assignments. */
-function storedEvent(e: Batch["events"][number], deviceId: string, variants: Batch["variants"]): EventLike {
+function storedEvent(e: Batch["events"][number], deviceId: string, variants: Batch["variants"], platform?: string): EventLike {
   return {
     type: e.type,
     at: e.at,
     deviceId,
+    ...(platform ? { platform } : {}),
     ...(e.user ? { userId: e.user } : {}),
     ...(e.acquisition ? { acquisition: e.acquisition } : {}),
     ...(e.props ? { props: e.props } : {}),
@@ -230,7 +231,7 @@ export function fileFieldStore(root: string): FieldStore {
       writeJson(join(d, "counts.json"), counts);
       const { id: deviceId, ...device } = batch.device;
       for (const f of batch.failures) appendFileSync(join(d, "failures.jsonl"), `${JSON.stringify({ ...f, deviceId, release: batch.release ?? null, device: { id: deviceId, ...device } })}\n`);
-      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify(storedEvent(e, deviceId, batch.variants))}\n`);
+      for (const e of batch.events) appendFileSync(join(d, "events.jsonl"), `${JSON.stringify(storedEvent(e, deviceId, batch.variants, batch.device.platform))}\n`);
       const active = userDays(batch);
       if (active.size) {
         // Visitors' IP and browser (kept only for sending ad conversions) go after 7 days.
@@ -437,8 +438,8 @@ export function dbFieldStore(sql: SQL): FieldStore {
                    VALUES (${appId}, ${f.contract.slice(0, 300)}, ${f.at}, ${batch.device.id}, ${batch.release ?? null}, ${batch.device}::jsonb, ${f}::jsonb)`;
         }
         for (const e of batch.events) {
-          await tx`INSERT INTO field_events (app_id, at, device_id, user_id, type, acquisition, props, value, variants)
-                   VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.user ?? null}, ${e.type}, ${e.acquisition ?? null}::jsonb, ${e.props ?? null}::jsonb, ${e.value ?? null}::jsonb, ${batch.variants ?? null}::jsonb)`;
+          await tx`INSERT INTO field_events (app_id, at, device_id, user_id, type, acquisition, props, value, variants, platform)
+                   VALUES (${appId}, ${e.at}, ${batch.device.id}, ${e.user ?? null}, ${e.type}, ${e.acquisition ?? null}::jsonb, ${e.props ?? null}::jsonb, ${e.value ?? null}::jsonb, ${batch.variants ?? null}::jsonb, ${batch.device.platform ?? null})`;
         }
         for (const [user, days] of userDays(batch)) {
           const sorted = [...days].sort();
@@ -474,8 +475,9 @@ export function dbFieldStore(sql: SQL): FieldStore {
       return rows.map(toFailure);
     },
     async events(appId, since) {
-      const rows = (await sql`SELECT at, device_id, user_id, type, acquisition, props, value, variants FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
+      const rows = (await sql`SELECT at, device_id, user_id, type, acquisition, props, value, variants, platform FROM field_events WHERE app_id = ${appId} AND at >= ${since.toISOString()} ORDER BY at`) as Array<{
         at: Date;
+        platform: string | null;
         device_id: string;
         user_id: string | null;
         type: string;
@@ -488,6 +490,7 @@ export function dbFieldStore(sql: SQL): FieldStore {
         type: r.type,
         at: new Date(r.at).toISOString(),
         deviceId: r.device_id,
+        ...(r.platform ? { platform: r.platform } : {}),
         ...(r.user_id ? { userId: r.user_id } : {}),
         ...(r.acquisition ? { acquisition: parse(r.acquisition) } : {}),
         ...(r.props ? { props: parse(r.props) } : {}),

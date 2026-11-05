@@ -11,7 +11,9 @@ import type { EventLike } from "../metrics/types";
 import type { AppProfile } from "../onboarding";
 import type { RetentionSnapshot } from "../retention";
 import { addExperiment, buildTicket, keysInCode, measure, promote, putExperiment, stop, type Crash, type ExperimentInput } from "./experiments";
-import { addIdeas, codeSummary, IDEAS_EVERY_DAYS, leakFrom, numbersFrom, type IdeaDraft, type IdeaInput } from "./ideas";
+import { addIdeas, codeSummary, ideaTargets, IDEAS_EVERY_DAYS, leakFrom, numbersFrom, type IdeaDraft, type IdeaInput } from "./ideas";
+import { filterProposals, proposalContext } from "../memory/runtime";
+import { liveExperimentPrior, recordLiveVerdict, workedLines } from "../learning/runtime";
 import { missingNative, nativeTicket, openNativeTicket } from "./native-foundations";
 import type { LiveStore } from "./store";
 import { ACTIVE_STATES, addLog, type Experiment, type LiveState } from "./types";
@@ -38,7 +40,19 @@ export type LivePassDeps = {
   releases?: () => ReleasesFile;
   log: (text: string, credits?: number) => void;
   now: Date;
+  /** false: measure without what worked in other apps (tests). */
+  priors?: false;
 };
+
+/** The control's rough rate for the prior's cap (share of exposed units that converted), or null. */
+function baseRateOf(e: Experiment, events: EventLike[]): number | null {
+  if (e.metric.kind !== "event") return null;
+  const exposed = new Set(events.filter((x) => x.type === "exposure" && x.props?.exp === e.id && x.props?.variant === "control").map((x) => x.userId ?? x.deviceId));
+  if (exposed.size < 20) return null;
+  const type = e.metric.event;
+  const hit = new Set(events.filter((x) => x.type === type).map((x) => x.userId ?? x.deviceId));
+  return [...exposed].filter((u) => hit.has(u)).length / exposed.size;
+}
 
 export type LivePassReport = { ticketsCreated: string[]; started: string[]; decided: string[]; promoted: string[]; stopped: string[]; ideas: number; skipped: string[] };
 
@@ -175,7 +189,10 @@ export async function livePass(app: AppEntry, profile: AppProfile | null, deps: 
       continue;
     }
     if (e.state !== "running") continue;
-    const result = measure(e, { events: await loadEvents(), crashes: await loadCrashes(), now });
+    const events = await loadEvents();
+    // What worked in similar apps goes in as an informative prior (capped; this app's data still decides).
+    const prior = deps.priors === false ? null : await liveExperimentPrior(app, e, baseRateOf(e, events));
+    const result = measure(e, { events, crashes: await loadCrashes(), now, prior });
     e = { ...e, result };
     state = putExperiment(state, e, now);
     if (result.guardrail) {
@@ -186,7 +203,9 @@ export async function livePass(app: AppEntry, profile: AppProfile | null, deps: 
       continue;
     }
     if (result.verdict === "collecting") continue;
-    e = { ...e, state: "decided", decision: { verdict: result.verdict, winner: result.winner, at: now.toISOString(), by: "day2", note: result.note } };
+    e = { ...e, state: "decided", decision: { verdict: result.verdict, winner: result.winner, at: now.toISOString(), by: "day2", note: prior ? `${result.note} (Started from what worked in similar apps: ${prior.text}.)` : result.note } };
+    // Into the shared library of anonymous outcomes (when the account shares).
+    await recordLiveVerdict(app, e, result);
     state = addLog(putExperiment(state, e, now), now, `${e.id} decided: ${result.note}`, e.id);
     report.decided.push(e.id);
     if (state.settings.autonomy === "day2_decides" && e.configOnly) {
@@ -228,7 +247,11 @@ export async function livePass(app: AppEntry, profile: AppProfile | null, deps: 
   if (!fresh.length && ideasDue && deps.ideas) {
     try {
       const evs = await loadEvents();
+      const known = await proposalContext(app, "growth", ["live.idea"], { now });
       const r = await deps.ideas({
+        memory: known.memory,
+        avoid: known.avoid,
+        worked: await workedLines(app, "live"),
         appName: app.name,
         profile,
         code: codeSummary(app.repoPath, codeKeys),
@@ -237,8 +260,9 @@ export async function livePass(app: AppEntry, profile: AppProfile | null, deps: 
         leak: leakFrom(await deps.retention()),
         tried: state.experiments.map((x) => x.title),
       });
+      const kept = (await filterProposals(app, "live.idea", r.ideas, (d) => ideaTargets(d.keys), now)).kept;
       const added = await deps.store.update(app.id, (cur) => {
-        const a = addIdeas({ ...cur, ideasAt: now.toISOString() }, r.ideas, now);
+        const a = addIdeas({ ...cur, ideasAt: now.toISOString() }, kept, now);
         return { state: a.ideas.length ? addLog(a.state, now, `Thought of ${a.ideas.length} experiment idea${a.ideas.length === 1 ? "" : "s"} from the app's code and numbers.`) : a.state, result: a.ideas };
       });
       deps.log(added.length ? `Live: ${added.length} new experiment idea${added.length === 1 ? "" : "s"}.` : "Live: no experiment idea good enough this time.", r.credits);

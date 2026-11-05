@@ -65,7 +65,7 @@ import { registerStoreRoutes } from "./store-listing/routes";
 import { readiness } from "./mobile-release/setup";
 import { runReleases, SETUP_KEY } from "./mobile-release/run";
 import type { Release } from "./mobile-release/types";
-import { findNotice, noticeKey, noticeSection, noticeTicket, noticeVersion } from "./privacy-notice";
+import { findNotice, noticeKey, noticeSection, noticeTicket, noticeVersion, type NoticeFacts } from "./privacy-notice";
 import { ATT_KEY, attTicket, disclosure, loadStorePrivacy, practicesFrom, saveStorePrivacy, STORE_PRIVACY_FILENAME, storeStatus } from "./store-privacy";
 import { AUTOPILOT_FILENAME, AUTOPILOT_LOG_FILENAME, loadAutopilot, loadAutopilotLog, monthlyAdBudgetUsd, saveAutopilot } from "./growth-autopilot";
 import { auditLoops, indexRepo, LOOPS, loopSourceKey, loopTicket, type LoopId } from "./distribution-loops";
@@ -92,6 +92,11 @@ import { allApps } from "./apps-store";
 import { handleIngest } from "./field-ingest";
 import { liveConfigFor } from "./live/runtime";
 import { registerLiveRoutes } from "./live/routes";
+import { registerNumbersRoutes } from "./numbers/routes";
+import { registerMemoryRoutes } from "./memory/routes";
+import { registerLearningRoutes } from "./learning/routes";
+import { forgetApp } from "./learning/runtime";
+import { captureSoon, memoryFor, mirrorBacklogRules, noteDecline, noteOwnerInput, type CreditRunner } from "./memory/runtime";
 import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
 import { ALL_PLATFORMS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
@@ -225,9 +230,12 @@ import { gatherSignalsForApp } from "./health-scout-cli";
 import { tickAll } from "./backlog-cli";
 import { autopilotAll } from "./growth-autopilot-run";
 import { messagesRoutes } from "./messages/routes";
+import { hostingRoutes } from "./hosting/routes";
+import { hostingAll, hostingStore } from "./hosting/runtime";
+import { hostingPrivacy } from "./hosting/privacy";
 import { ingestPushTokens } from "./messages/runtime";
 import { simulateAll } from "./simulation-run";
-import { addTreatment, computeSnapshot, loadRetention, RETENTION_FILENAME, retentionView, saveRetention, treatmentKey, treatmentTicket } from "./retention";
+import { addTreatment, computeSnapshot, loadRetention, RETENTION_FILENAME, retentionView, saveRetention, treatmentKey, treatmentTarget, treatmentTicket } from "./retention";
 import { features } from "./features";
 import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/routes";
 import { registerMoneyRoutes } from "./money/routes";
@@ -423,6 +431,16 @@ function route(method: string, pathname: string, handler: Handler, opts: { publi
 registerMoneyRoutes({ route, json, httpError: (status, message) => new HttpError(status, message), requireApp, requireManager, actorName, runWithCredits });
 // ---- Live: settings and experiments over the air (src/live/routes.ts) ----
 registerLiveRoutes(route, { json, requireApp, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
+registerNumbersRoutes({ route, json, requireApp, requireManager, httpError: (status, message) => new HttpError(status, message) });
+// ---- What day2 knows: app memory (src/memory/routes.ts) ----
+registerMemoryRoutes(route, { json, requireApp, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });
+// ---- What works: learning across apps (src/learning/routes.ts) ----
+registerLearningRoutes(route, { json, requireApp, requireManager, requireOperator, httpError: (status, message) => new HttpError(status, message) });
+
+/** The memory keeper's runs for this request's account (memory/runtime.ts). */
+function memoryRunner(t: Tenant, app: AppEntry): CreditRunner {
+  return (service, description, max, fn) => runWithCredits(t, app, service, description, max, fn);
+}
 
 // ---- Apps (plan §4/§5) ----
 
@@ -577,6 +595,8 @@ route("DELETE", "/api/apps/:id", async (_req, params, t) => {
   requireManager(t);
   const app = await t.apps.find(params.id!);
   await t.apps.remove(params.id!);
+  // Its results leave the shared library of what works.
+  await forgetApp(params.id!);
   // A checkout day2 made for this account goes with it.
   if (app && t.mode === "accounts" && app.repoPath === managedRepoDir(t, app.id)) rmSync(app.repoPath, { recursive: true, force: true });
   return json({ ok: true });
@@ -773,24 +793,33 @@ route("GET", "/api/apps/:id/approvals", async (_req, params, t) => {
   return json({ available: true, cards: cards.map((c) => ({ ...c, questions: asked.filter((q) => q.pr === c.number).map(({ pr: _p, ...q }) => q), checks: deviceReportView(app, loadDeviceReport(app.id, c.branch)) })) });
 });
 
-route("POST", "/api/apps/:id/approvals/:pr/apply", async (_req, params, t) => {
+route("POST", "/api/apps/:id/approvals/:pr/apply", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireGitRemote(app);
   const pr = Number(params.pr);
+  const note = String(((await req.json().catch(() => ({}))) as { note?: unknown }).note ?? "").trim();
   await applyChange(app.repoPath, pr);
   // Its ticket is done now, not on the next backlog pass.
   const name = (await actorName(t)) ?? null;
+  if (note) await noteOwnerInput(app, { kind: "approval_note", text: note.slice(0, 2000), about: `pull request #${pr}`, ref: { type: "pr", id: `#${pr}`, url: `/apps/${app.id}/approvals`, label: `pull request #${pr}` }, who: name });
   await withBacklog(backlogFile(app), (b) => ({ backlog: settleByPr(b, pr, "merged", new Date(), name).backlog, result: null }));
   return json({ ok: true });
 });
 
-route("POST", "/api/apps/:id/approvals/:pr/undo", async (_req, params, t) => {
+route("POST", "/api/apps/:id/approvals/:pr/undo", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   requireGitRemote(app);
   const pr = Number(params.pr);
+  const reason = String(((await req.json().catch(() => ({}))) as { reason?: unknown }).reason ?? "").trim().slice(0, 500);
   await undoChange(app.repoPath, pr);
   const name = (await actorName(t)) ?? null;
-  await withBacklog(backlogFile(app), (b) => ({ backlog: settleByPr(b, pr, "closed", new Date(), name).backlog, result: null }));
+  const settled = await withBacklog(backlogFile(app), (b) => {
+    const r = settleByPr(b, pr, "closed", new Date(), name);
+    return { backlog: r.backlog, result: r.ticketId ? findTicket(r.backlog, r.ticketId) ?? null : null };
+  });
+  // Declined: never proposed again for 90 days, and the "why" teaches day2.
+  await noteDecline(app, { kind: "backlog.ticket", target: settled?.source.key ?? settled?.id ?? `pr-${pr}`, reason, who: name, about: settled ? `ticket ${settled.id} “${settled.title}”` : `pull request #${pr}`, ref: { type: "pr", id: `#${pr}`, url: settled ? `/apps/${app.id}/backlog/${settled.id}` : `/apps/${app.id}/approvals`, label: settled ? `ticket ${settled.id}` : `pull request #${pr}` } });
+  if (reason) captureSoon(app, memoryRunner(t, app));
   return json({ ok: true });
 });
 
@@ -802,9 +831,10 @@ route("POST", "/api/apps/:id/approvals/:pr/ask", async (req, params, t) => {
   if (!valid.ok) throw new HttpError(400, valid.reason);
   const pr = Number(params.pr);
   if (!Number.isInteger(pr) || pr <= 0) throw new HttpError(400, "Not a pull request number.");
+  await noteOwnerInput(app, { kind: "question", text: valid.question, about: `pull request #${pr}`, ref: { type: "pr", id: `#${pr}`, url: `/apps/${app.id}/approvals`, label: `pull request #${pr}` }, who: await actorName(t) });
   // day2 answers it (from the change, its ticket and the code), and both go on the pull request.
   const tk = (await loadBacklogFor(app)).tickets.find((x) => x.approval?.kind === "pr" && x.approval.number === pr);
-  const ctx: ChangeContext = { pr: await prContext(app.repoPath, pr), ticket: tk ? ticketContext(tk) : null };
+  const ctx: ChangeContext = { pr: await prContext(app.repoPath, pr), ticket: tk ? ticketContext(tk) : null, memory: await memoryFor(app, "answer", { hint: valid.question }) };
   const { result, credits } = await runWithCredits(t, app, "scan_answer", `Question about PR #${pr}`, CHANGE_ANSWER_MAX_USD, () => answerAboutChange(app.repoPath, valid.question, ctx));
   if (!result.ok) return json(result);
   const by = (await actorName(t)) ?? null;
@@ -975,9 +1005,10 @@ route("POST", "/api/apps/:id/ask", async (req, params, t) => {
     growth: loadGrowthActions(appFile(app, "day2-growth-actions.jsonl")),
     proposals: listProposals(appFile(app, "day2-proposals.jsonl")),
   });
+  const memory = await memoryFor(app, "answer", { hint: valid.question });
 
   const { result, credits } = await runWithCredits(t, app, "scan_answer", "Answer", ASK_MAX_BUDGET_USD, () =>
-    askDay2(app.repoPath, valid.question, context),
+    askDay2(app.repoPath, valid.question, memory ? `${context}\n\n${memory}` : context),
   );
   if (!result.ok) return json(result);
   recordAsk(appFile(app, ASK_LOG_FILENAME), { askedAt: result.askedAt, question: valid.question, answer: result.answer, credits });
@@ -1230,12 +1261,13 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/comments", async (req, params,
     const next = addActivity(b, params.tid!, { actor: "user", name, kind: "comment", text }, new Date());
     return { backlog: next, result: findTicket(next, params.tid!)! };
   });
+  await noteOwnerInput(app, { kind: isQuestion(text) ? "question" : "comment", text, about: `ticket ${ticket.id} “${ticket.title}”`, ref: { type: "ticket", id: ticket.id, url: `/apps/${app.id}/backlog/${ticket.id}`, label: `ticket ${ticket.id}` }, who: name });
   if (!isQuestion(text)) return json({ ticket }, { status: 201 });
   // A question: day2 answers it on the ticket (from the ticket, its pull request if any, and the code).
   let reply: string;
   try {
     const pr = ticket.approval?.kind === "pr" && hasGitRemote(app.repoPath) ? await prContext(app.repoPath, ticket.approval.number).catch(() => null) : null;
-    const { result } = await runWithCredits(t, app, "scan_answer", `Question about ${ticket.id}`, CHANGE_ANSWER_MAX_USD, () => answerAboutChange(app.repoPath, text, { ticket: ticketContext(ticket), pr }));
+    const { result } = await runWithCredits(t, app, "scan_answer", `Question about ${ticket.id}`, CHANGE_ANSWER_MAX_USD, async () => answerAboutChange(app.repoPath, text, { ticket: ticketContext(ticket), pr, memory: await memoryFor(app, "answer", { hint: `${ticket.title} ${text}` }) }));
     reply = result.ok ? result.answer : result.reason;
   } catch (err) {
     reply = err instanceof CreditsError ? `I can't answer right now: ${err.message}` : `I couldn't answer right now: ${(err as Error).message}`;
@@ -1280,12 +1312,14 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/work", async (_req, params, t)
 });
 
 /** OK on a plan (starts the build) or on a fix PR (merges it). */
-route("POST", "/api/apps/:id/backlog/tickets/:tid/approve", async (_req, params, t) => {
+route("POST", "/api/apps/:id/backlog/tickets/:tid/approve", async (req, params, t) => {
   const app = await requireApp(t, params.id!);
   const b = await loadBacklogFor(app);
   const tk = findTicket(b, params.tid!);
   if (!tk) throw new HttpError(404, `No ticket ${params.tid}.`);
   if (tk.state !== "to_approve" || !tk.approval) throw new HttpError(409, "Nothing on this ticket is waiting for approval.");
+  const note = String(((await req.json().catch(() => ({}))) as { note?: unknown }).note ?? "").trim();
+  if (note) await noteOwnerInput(app, { kind: "approval_note", text: note.slice(0, 2000), about: `ticket ${tk.id} “${tk.title}”`, ref: { type: "ticket", id: tk.id, url: `/apps/${app.id}/backlog/${tk.id}`, label: `ticket ${tk.id}` }, who: await actorName(t) });
   if (tk.approval.kind === "pr") {
     requireGitRemote(app);
     await applyChange(app.repoPath, tk.approval.number);
@@ -1329,6 +1363,14 @@ route("POST", "/api/apps/:id/backlog/tickets/:tid/reject", async (req, params, t
     const next = closedWithoutMerge(bb, tk.id, new Date(), { kind: "user" }, `${what}${reason === "." ? "" : reason}`);
     return { backlog: next, result: findTicket(next, tk.id)! };
   });
+  const why = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
+  await noteDecline(app, { kind: "backlog.ticket", target: tk.source.key ?? tk.id, reason: why, who: await actorName(t), about: `ticket ${tk.id} “${tk.title}”`, ref: { type: "ticket", id: tk.id, url: `/apps/${app.id}/backlog/${tk.id}`, label: `ticket ${tk.id}` } });
+  // A retention treatment turned down: its state and channel are blocked too.
+  if (tk.source.key?.startsWith("retention:")) {
+    const idea = loadRetention(appFile(app, RETENTION_FILENAME)).research.flatMap((r) => r.ideas).find((i) => treatmentKey(i.id) === tk.source.key);
+    if (idea) await noteDecline(app, { kind: "retention.treatment", target: treatmentTarget(idea), reason: null, who: await actorName(t), about: `retention treatment “${idea.name}”`, ref: { type: "ticket", id: tk.id, url: `/apps/${app.id}/backlog/${tk.id}` } });
+  }
+  if (why) captureSoon(app, memoryRunner(t, app));
   return json({ ticket });
 });
 
@@ -1345,6 +1387,8 @@ route("PUT", "/api/apps/:id/backlog/settings", async (req, params, t) => {
     const ranked = rankBacklog({ ...b, settings: next }, new Date());
     return { backlog: ranked.backlog, result: next };
   });
+  // Custom rules are mirrored into what day2 knows (as rules, active at once).
+  await mirrorBacklogRules(app, settings.rules, await actorName(t));
   return json({ settings });
 });
 
@@ -1402,11 +1446,12 @@ route("POST", "/api/apps/:id/backlog/tell", async (req, params, t) => {
     .filter(Boolean)
     .join("\n\n");
   const backlog = await loadBacklogFor(app);
+  const memory = await memoryFor(app, "plan", { hint: valid.instruction });
   const prompt = buildTellPrompt({
     instruction: valid.instruction,
     backlog,
     appName: app.name,
-    appContext,
+    appContext: memory ? `${appContext}\n\n${memory}` : appContext,
     ...(earlier?.question ? { earlierQuestion: { text: earlier.question.text, instruction: earlier.instruction } } : {}),
   });
   const { result, credits } = await runWithCredits(t, app, "scan_answer", "Backlog plan", TELL_MAX_BUDGET_USD, () => runTellAgent(app.repoPath, prompt));
@@ -1420,6 +1465,8 @@ route("POST", "/api/apps/:id/backlog/tell", async (req, params, t) => {
     earlier && r.id === earlier.id && r.question ? { ...r, question: { ...r.question, answer: valid.instruction, answeredAt: record.at } } : r,
   );
   saveTellLog(tellLogPath(app), [record, ...nextLog]);
+  await noteOwnerInput(app, { kind: earlier ? "answer" : "tell", text: earlier?.question ? `day2 asked: ${earlier.question.text}\nThe owner answered: ${valid.instruction}` : valid.instruction, about: "the backlog (Tell day2)", ref: { type: "page", id: "tell", url: `/apps/${app.id}/backlog`, label: "Tell day2" }, who: await actorName(t) });
+  if (earlier) captureSoon(app, memoryRunner(t, app));
   return json({ ok: true, record, ...(await backlogResponse(t, app, await loadBacklogFor(app))) });
 });
 
@@ -1645,6 +1692,9 @@ route("POST", "/api/apps/:id/growth/retention/:ideaId/build", async (_req, param
 
 for (const r of messagesRoutes({ requireApp, runWithCredits, actorName, fail: (status, message) => new HttpError(status, message) })) route(r.method, r.path, r.handler);
 
+// ---- Hosting (src/hosting/): the app's backend on Supabase ----
+for (const r of hostingRoutes({ requireApp, requireManager, actorName, fail: (status, message) => new HttpError(status, message) })) route(r.method, r.path, r.handler);
+
 // ---- Mobile releases (src/mobile-release/): updates and store releases by day2 ----
 
 async function mobileReleasesResponse(app: AppEntry) {
@@ -1792,7 +1842,8 @@ async function storePrivacyResponse(app: AppEntry) {
   const applies = kind === "react-native";
   const file = loadStorePrivacy(appFile(app, STORE_PRIVACY_FILENAME));
   const tickets = applies || kind === "web" ? (await loadBacklogFor(app)).tickets : [];
-  const practices = practicesFrom(tickets, applies ? file.settings : { adConversions: "off", deviceId: false }, existingIntegration(app.repoPath));
+  const hosting = applies ? await hostingPrivacy(app.id, hostingStore()).catch(() => null) : null;
+  const practices = practicesFrom(tickets, applies ? file.settings : { adConversions: "off", deviceId: false }, existingIntegration(app.repoPath), hosting?.practice ?? null);
   const att = tickets.find((x) => x.source.key === ATT_KEY);
   return {
     applies,
@@ -1803,16 +1854,16 @@ async function storePrivacyResponse(app: AppEntry) {
       ? storeStatus(file, practices).map((st) => ({ ...st, walkthrough: walkthrough(st.store, st.steps, { appName: loadAppLinks(appFile(app, APP_LINKS_FILENAME)).ios?.name || app.name, appStoreId: loadAppLinks(appFile(app, APP_LINKS_FILENAME)).ios?.appStoreId ?? null }) }))
       : [],
     answers: applies ? disclosure(practices) : null,
-    notice: kind === "web" || applies ? noticeView(app, file, tickets, practices, applies) : null,
+    notice: kind === "web" || applies ? noticeView(app, file, tickets, practices, applies, hosting?.notice ?? null) : null,
   };
 }
 
 /** The privacy notice section for what day2 does, and whether the app's notice has it. */
-function noticeView(app: AppEntry, file: ReturnType<typeof loadStorePrivacy>, tickets: Ticket[], practices: ReturnType<typeof practicesFrom>, mobile: boolean) {
+function noticeView(app: AppEntry, file: ReturnType<typeof loadStorePrivacy>, tickets: Ticket[], practices: ReturnType<typeof practicesFrom>, mobile: boolean, hosting: NoticeFacts["hosting"] = null) {
   const ads = loadAds(appFile(app, ADS_FILENAME));
   // Web: sign-ups go back to every platform with a conversion setup. Mobile: only with consent (ATT).
   const adPlatforms = mobile && !practices.adConversions ? [] : (Object.keys(ads.conversions) as PlatformId[]).map((id) => platformInfo(id).name);
-  const facts = { mobile, ...practices, adPlatforms, adConsent: mobile && practices.adConversions };
+  const facts: NoticeFacts = { mobile, ...practices, adPlatforms, adConsent: mobile && practices.adConversions, hosting };
   const found = findNotice(app.repoPath);
   const sections = { en: noticeSection(facts, app.name, "en"), de: noticeSection(facts, app.name, "de") };
   const lang = found?.lang ?? "en";
@@ -3244,12 +3295,14 @@ function startBacklogTimer(): void {
             await autopilotAll();
             await tickAll({ startWork: true });
             await simulateAll();
+            await hostingAll();
           }
         });
       } else {
         await autopilotAll();
         await tickAll({ startWork: true });
         await simulateAll();
+        await hostingAll();
       }
     } catch (err) {
       console.error("[day2-backlog] tick failed:", (err as Error).message);

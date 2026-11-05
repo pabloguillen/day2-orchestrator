@@ -71,6 +71,12 @@ export type ReleaseDeps = {
   /** What still has to change in the store privacy answers (store-privacy.ts), empty when up to date. */
   privacyDue: (platform: Platform) => Promise<string[]>;
   writeNotes?: (changes: Change[]) => Promise<string>;
+  /**
+   * Runs before an update is published or store builds start, in the
+   * release's checkout: Hosting applies the production database migrations
+   * the release needs (hosting/environments.ts). Not ok → the release waits.
+   */
+  beforeShip?: (o: { dir: string; kind: "update" | "store"; sha: string }) => Promise<{ ok: true } | { ok: false; why: string }>;
   /** Runs before an App Store version is submitted: the Store module's staged listing changes go into it. */
   beforeIosSubmit?: (o: { appId: string; versionId: string; version: string }) => Promise<void>;
   ticket: (t: NewTicketInput) => Promise<{ id: string }>;
@@ -147,6 +153,13 @@ async function start(f: ReleasesFile, sha: string, deps: ReleaseDeps, report: Re
   const changes = await deps.git.changes(shipped.sha || null, sha);
   const kind = config.hasUpdates && config.runtimePolicy ? decide(runtimeNow, runtimeStore, platforms) : "store";
   const id = `${kind === "update" ? "U" : "S"}-${sha.slice(0, 7)}`;
+  if (deps.beforeShip && !(kind === "update" ? f.settings.updates === "off" : f.settings.builds === "off")) {
+    const gate = await deps.beforeShip({ dir: wd.dir, kind, sha });
+    if (!gate.ok) {
+      report.waiting = gate.why;
+      return;
+    }
+  }
 
   if (kind === "update") {
     if (f.settings.updates === "off") {

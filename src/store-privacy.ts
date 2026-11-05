@@ -35,6 +35,10 @@ const MONEY_ADS_ATT_KEY = "money:ads+att";
  *    tracking under Apple's rules: Advertising Data, "Used to track you",
  *    and the App Tracking Transparency prompt before the click id is sent.
  *    Off by default for mobile apps.
+ *  - hosting (day2 runs the app's backend on Supabase) → Contact Info →
+ *    Email Address for sign-in and User Content for files, linked to the
+ *    user, App Functionality only; Supabase is a processor, so nothing is
+ *    "shared" or "tracking".
  * The visitor's IP address and browser are never sent with conversions from
  * mobile apps (field-ingest keeps them for web visits only), so no location
  * data is involved.
@@ -63,7 +67,12 @@ export type Practices = {
   ads?: boolean;
   /** Money: the ads may be personalized after the App Tracking Transparency prompt (not for apps where many users may be minors). */
   adTracking?: boolean;
+  /** Hosting (src/hosting/): the app's backend runs on Supabase in one region, as day2's subprocessor. Absent when day2 doesn't host it. */
+  hosting?: HostingPractice;
 };
+
+/** What day2's hosting adds: accounts (sign-in) and files, kept by Supabase in the chosen region. */
+export type HostingPractice = { processor: "Supabase"; region: string; place: string; eu: boolean; accounts: boolean; files: boolean };
 
 export type Settings = {
   /** "off" (default): mobile apps send no click ids, so nothing counts as tracking. "with_consent": after the ATT prompt. */
@@ -99,7 +108,7 @@ export function saveStorePrivacy(path: string, f: StorePrivacyFile): void {
 const done = (tickets: Ticket[], pred: (key: string) => boolean) => tickets.some((t) => t.source.key && pred(t.source.key) && t.state === "done");
 
 /** What's in the app now: merged day2 work plus the owner's settings. */
-export function practicesFrom(tickets: Ticket[], settings: Settings, wiredByHand: { identify: boolean } | null = null): Practices {
+export function practicesFrom(tickets: Ticket[], settings: Settings, wiredByHand: { identify: boolean } | null = null, hosting: HostingPractice | null = null): Practices {
   // In the app through day2's install ticket, or wired in by hand (field-work existingIntegration).
   const fieldChecks = done(tickets, (k) => k === INSTALL_KEY) || Boolean(wiredByHand);
   return {
@@ -114,6 +123,7 @@ export function practicesFrom(tickets: Ticket[], settings: Settings, wiredByHand
     ...(done(tickets, (k) => k === MONEY_PURCHASES_KEY) ? { purchases: true } : {}),
     ...(done(tickets, (k) => k === MONEY_ADS_KEY || k === MONEY_ADS_ATT_KEY) ? { ads: true } : {}),
     ...(done(tickets, (k) => k === MONEY_ADS_ATT_KEY) ? { adTracking: true } : {}),
+    ...(hosting ? { hosting } : {}),
   };
 }
 
@@ -193,6 +203,18 @@ export function disclosure(p: Practices): Disclosure {
     merge(play, { category: "Device or other IDs", type: "Device or other IDs", collected: true, shared: true, purposes: gP, covers: "the advertising id, used by Google AdMob" });
     merge(play, { category: "App activity", type: "App interactions", collected: true, shared: true, purposes: gP, covers: "ad views and taps, used by Google AdMob" });
     merge(play, { category: "App info and performance", type: "Diagnostics", collected: true, shared: true, purposes: ["Analytics"], covers: "ad loading and errors, used by Google AdMob" });
+  }
+  if (p.hosting) {
+    // The backend day2 hosts: Supabase is a processor (Apple: not "third-party"; Google: service providers aren't "sharing").
+    const where = `kept by ${p.hosting.processor} in ${p.hosting.place} for the app`;
+    if (p.hosting.accounts) {
+      merge(apple, { category: "Contact Info", type: "Email Address", purposes: ["App Functionality"], linked: true, tracking: false, covers: `the email address for signing in, ${where}` });
+      merge(play, { category: "Personal info", type: "Email address", collected: true, shared: false, purposes: ["App functionality", "Account management"], covers: `the email address for signing in, ${where}` });
+    }
+    if (p.hosting.files) {
+      merge(apple, { category: "User Content", type: "Other User Content", purposes: ["App Functionality"], linked: true, tracking: false, covers: `files people add in the app, ${where}` });
+      merge(play, { category: "Files and docs", type: "Files and docs", collected: true, shared: false, purposes: ["App functionality"], covers: `files people add in the app, ${where}` });
+    }
   }
   return { ios: { rows: apple, trackingPrompt: p.adConversions || Boolean(p.ads && p.adTracking) }, android: { rows: play, encryptedInTransit: true } };
 }

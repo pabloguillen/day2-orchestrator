@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import { db } from "../db";
 import { serverMode } from "../tenant";
+import { emptySetup } from "./setup-types";
 import { DEFAULT_SETTINGS, emptyStoreFile, type StoreFile, type StoreReview } from "./types";
 
 /**
@@ -47,11 +48,12 @@ export function normalize(raw: unknown): StoreFile {
     customPages: Array.isArray(p.customPages) ? p.customPages : [],
     ratings: Array.isArray(p.ratings) ? p.ratings : [],
     log: Array.isArray(p.log) ? p.log : [],
+    setup: { ...emptySetup(), ...(p.setup && typeof p.setup === "object" ? p.setup : {}) },
     nextProposal: typeof p.nextProposal === "number" ? p.nextProposal : 1,
   };
 }
 
-const trim = (f: StoreFile): StoreFile => ({ ...f, log: f.log.slice(-200), research: f.research.slice(0, 6), screenshots: f.screenshots.slice(-12) });
+const trim = (f: StoreFile): StoreFile => ({ ...f, log: f.log.slice(-200), research: f.research.slice(0, 6), screenshots: f.screenshots.slice(-12), setup: { ...f.setup, graphics: f.setup.graphics.slice(-20) } });
 
 const chains = new Map<string, Promise<unknown>>();
 function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {

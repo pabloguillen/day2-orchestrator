@@ -28,7 +28,14 @@ export type PlayListingClient = ReturnType<typeof createPlayListing>;
 
 type Listing = { language?: string; title?: string; shortDescription?: string; fullDescription?: string; video?: string };
 
-export function createPlayListing(cred: PlayCredential, deps: { fetch?: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void>; readFile?: (path: string) => Promise<Uint8Array> } = {}) {
+type PlayDeps = { fetch?: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void>; readFile?: (path: string) => Promise<Uint8Array> };
+
+/**
+ * The Google Play HTTP core the Store clients share: the service account's
+ * token, Google's error message surfaced, and `inEdit` (a fresh edit,
+ * validated and committed when asked, deleted otherwise or on failure).
+ */
+export function playHttp(cred: PlayCredential, deps: PlayDeps = {}) {
   const now = deps.now ?? (() => new Date());
   const httpDeps = { fetch: deps.fetch, now, sleep: deps.sleep };
   const readFile = deps.readFile ?? (async (p: string) => new Uint8Array(await Bun.file(p).arrayBuffer()));
@@ -83,6 +90,23 @@ export function createPlayListing(cred: PlayCredential, deps: { fetch?: typeof f
     }
   }
 
+  /** Uploads one image into an edit (edits.images.upload). */
+  async function uploadImage(pkg: string, editId: string, language: string, imageType: string, file: string): Promise<void> {
+    const bytes = await readFile(file);
+    await api(`${UPLOAD}${app(pkg)}/edits/${encodeURIComponent(editId)}/listings/${encodeURIComponent(language)}/${imageType}`, {
+      method: "POST",
+      query: { uploadType: "media" },
+      headers: { "content-type": /\.jpe?g$/i.test(file) ? "image/jpeg" : "image/png" },
+      raw: bytes,
+    });
+  }
+
+  return { api, app, inEdit, uploadImage };
+}
+
+export function createPlayListing(cred: PlayCredential, deps: PlayDeps = {}) {
+  const { api, app, inEdit, uploadImage } = playHttp(cred, deps);
+
   return {
     async readListings(pkg: string): Promise<Record<string, PlayListing>> {
       return inEdit(pkg, false, async ({ path }) => {
@@ -109,19 +133,13 @@ export function createPlayListing(cred: PlayCredential, deps: { fetch?: typeof f
       });
     },
 
-    /** Replaces a language's phone screenshots (2–8 PNG/JPEG, 16:9 or 9:16). */
-    async replacePhoneScreenshots(pkg: string, language: string, files: string[]): Promise<number> {
+    /** Replaces a language's screenshots of one type (2–8 PNG/JPEG, 16:9 or 9:16): phone, 7" or 10" tablet. */
+    async replacePhoneScreenshots(pkg: string, language: string, files: string[], type: "phoneScreenshots" | "sevenInchScreenshots" | "tenInchScreenshots" = "phoneScreenshots"): Promise<number> {
       return inEdit(pkg, true, async ({ path, id }) => {
-        await api(`${path}/listings/${encodeURIComponent(language)}/phoneScreenshots`, { method: "DELETE" });
+        await api(`${path}/listings/${encodeURIComponent(language)}/${type}`, { method: "DELETE" });
         let n = 0;
         for (const f of files.slice(0, 8)) {
-          const bytes = await readFile(f);
-          await api(`${UPLOAD}${app(pkg)}/edits/${encodeURIComponent(id)}/listings/${encodeURIComponent(language)}/phoneScreenshots`, {
-            method: "POST",
-            query: { uploadType: "media" },
-            headers: { "content-type": f.endsWith(".jpg") ? "image/jpeg" : "image/png" },
-            raw: bytes,
-          });
+          await uploadImage(pkg, id, language, type, f);
           n++;
         }
         return n;

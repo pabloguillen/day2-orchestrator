@@ -54,7 +54,15 @@ const pick = (o: Record<string, unknown> | undefined, keys: AppleField[]): Apple
 /** Pure. MD5 of a file's bytes, as Apple's sourceFileChecksum wants it (hex). */
 export const md5 = (bytes: Uint8Array) => createHash("md5").update(bytes).digest("hex");
 
-export function createAscListing(cred: AscCredential, deps: { fetch?: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void>; readFile?: (path: string) => Promise<Uint8Array> } = {}) {
+type AscDeps = { fetch?: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void>; readFile?: (path: string) => Promise<Uint8Array> };
+
+/**
+ * The App Store Connect HTTP core the Store clients share: signed requests
+ * with Apple's errors as one plain sentence, every page of a list, and the
+ * asset upload Apple uses for screenshots and previews (reserve → upload
+ * the parts it asks for → commit with the file's MD5).
+ */
+export function ascHttp(cred: AscCredential, deps: AscDeps = {}) {
   const now = deps.now ?? (() => new Date());
   const httpDeps = { fetch: deps.fetch, now, sleep: deps.sleep };
   const readFile = deps.readFile ?? (async (p: string) => new Uint8Array(await Bun.file(p).arrayBuffer()));
@@ -101,6 +109,39 @@ export function createAscListing(cred: AscCredential, deps: { fetch?: typeof fet
     }
     return out;
   }
+
+  type Op = { method?: string; url?: string; length?: number; offset?: number; requestHeaders?: Array<{ name: string; value: string }> };
+  /** Reserves an asset (appScreenshots, appPreviews), uploads its parts, commits it with the MD5. Returns its id. */
+  async function uploadAsset(o: { type: "appScreenshots" | "appPreviews"; file: string; parent: { rel: string; type: string; id: string }; attributes?: Record<string, unknown> }): Promise<string> {
+    const bytes = await readFile(o.file);
+    const fileName = o.file.split("/").pop()!;
+    const reserved = await api<Doc<Resource<{ uploadOperations?: Op[] }>>>(`/v1/${o.type}`, {
+      method: "POST",
+      json: { data: { type: o.type, attributes: { fileName, fileSize: bytes.length, ...(o.attributes ?? {}) }, relationships: { [o.parent.rel]: rel(o.parent.type, o.parent.id) } } },
+    });
+    const id = reserved.data.id;
+    for (const op of reserved.data.attributes?.uploadOperations ?? []) {
+      const part = bytes.subarray(op.offset ?? 0, (op.offset ?? 0) + (op.length ?? bytes.length));
+      const headers = Object.fromEntries((op.requestHeaders ?? []).map((h) => [h.name, h.value]));
+      const res = await request<Response>(PLATFORM, httpDeps, op.url!, { method: (op.method ?? "PUT") as "PUT", headers, raw: part, rawResponse: true });
+      if (!res.ok) throw new AppStoreError(`uploading ${fileName} failed (${res.status}).`, res.status);
+    }
+    await api(`/v1/${o.type}/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      json: { data: { type: o.type, id, attributes: { uploaded: true, sourceFileChecksum: md5(bytes) } } },
+    });
+    return id;
+  }
+
+  return { api, all, uploadAsset, now };
+}
+
+export type AscHttp = ReturnType<typeof ascHttp>;
+export type { Resource as AscResource, Doc as AscDoc };
+export { qs as ascQs, rel as ascRel };
+
+export function createAscListing(cred: AscCredential, deps: AscDeps = {}) {
+  const { api, all, uploadAsset } = ascHttp(cred, deps);
 
   const ids = new Map<string, string>();
   async function appIdFor(bundleId: string): Promise<string> {
@@ -231,27 +272,7 @@ export function createAscListing(cred: AscCredential, deps: { fetch?: typeof fet
         setId = created.data.id;
       }
       const out: string[] = [];
-      for (const file of files.slice(0, 10)) {
-        const bytes = await readFile(file);
-        const fileName = file.split("/").pop()!;
-        type Op = { method?: string; url?: string; length?: number; offset?: number; requestHeaders?: Array<{ name: string; value: string }> };
-        const reserved = await api<Doc<Resource<{ uploadOperations?: Op[] }>>>(`/v1/appScreenshots`, {
-          method: "POST",
-          json: { data: { type: "appScreenshots", attributes: { fileName, fileSize: bytes.length }, relationships: { appScreenshotSet: rel("appScreenshotSets", setId) } } },
-        });
-        const id = reserved.data.id;
-        for (const op of reserved.data.attributes?.uploadOperations ?? []) {
-          const part = bytes.subarray(op.offset ?? 0, (op.offset ?? 0) + (op.length ?? bytes.length));
-          const headers = Object.fromEntries((op.requestHeaders ?? []).map((h) => [h.name, h.value]));
-          const res = await request<Response>(PLATFORM, httpDeps, op.url!, { method: (op.method ?? "PUT") as "PUT", headers, raw: part, rawResponse: true });
-          if (!res.ok) throw new AppStoreError(`uploading ${fileName} failed (${res.status}).`, res.status);
-        }
-        await api(`/v1/appScreenshots/${encodeURIComponent(id)}`, {
-          method: "PATCH",
-          json: { data: { type: "appScreenshots", id, attributes: { uploaded: true, sourceFileChecksum: md5(bytes) } } },
-        });
-        out.push(id);
-      }
+      for (const file of files.slice(0, 10)) out.push(await uploadAsset({ type: "appScreenshots", file, parent: { rel: "appScreenshotSet", type: "appScreenshotSets", id: setId } }));
       return { setId, ids: out };
     },
 

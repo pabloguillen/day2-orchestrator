@@ -138,11 +138,12 @@ function suite(name: string, make: () => Promise<{ store: FieldStore; deps: Inge
       expect((await handleIngest(post(ctx.key, b), ctx.deps)).status).toBe(204);
       const events = (await ctx.store.events(ctx.appId, new Date("2026-10-01T00:00:00Z"))).filter((e) => e.deviceId === "dev-live0001");
       expect(events).toEqual([
-        { type: "exposure", at: "2026-10-15T11:58:00.000Z", deviceId: "dev-live0001", userId: `u_${"a".repeat(32)}`, props: { exp: "X-1", variant: "short" }, variants: { "X-1": "short" } },
+        { type: "exposure", at: "2026-10-15T11:58:00.000Z", deviceId: "dev-live0001", platform: "ios", userId: `u_${"a".repeat(32)}`, props: { exp: "X-1", variant: "short" }, variants: { "X-1": "short" } },
         {
           type: "revenue",
           at: "2026-10-15T11:58:30.000Z",
           deviceId: "dev-live0001",
+          platform: "ios",
           userId: `u_${"a".repeat(32)}`,
           props: { kind: "subscription", product: "pro_monthly" },
           value: { amount: 4.99, currency: "EUR" },

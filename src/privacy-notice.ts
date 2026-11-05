@@ -29,6 +29,8 @@ export type NoticeFacts = {
   adPlatforms: string[];
   /** Mobile apps: click ids only after the user agreed (ATT). */
   adConsent: boolean;
+  /** day2 hosts the app's backend on Supabase (src/hosting/privacy.ts). */
+  hosting?: { processor: string; place: { en: string; de: string }; eu: boolean; accounts: boolean; files: boolean; direct?: boolean } | null;
 };
 
 export type Lang = "en" | "de";
@@ -37,7 +39,10 @@ const days = (n: number, lang: Lang) => (n % 365 === 0 ? (lang === "de" ? `${n /
 
 /** Pure. The section as Markdown, or null when there's nothing to say yet. */
 export function noticeSection(f: NoticeFacts, appName: string, lang: Lang): string | null {
-  if (!f.fieldChecks) return null;
+  if (!f.fieldChecks) {
+    if (!f.hosting) return null;
+    return [lang === "de" ? `## Wo ${appName} Daten speichert (Supabase)` : `## Where ${appName} stores data (Supabase)`, "", hostingText(f.hosting, appName, lang)].join("\n");
+  }
   const de = lang === "de";
   const lines: string[] = [];
   const ads = f.adPlatforms.length > 0;
@@ -90,7 +95,19 @@ export function noticeSection(f: NoticeFacts, appName: string, lang: Lang): stri
     lines.push("");
     lines.push(`**How long:** error reports ${days(FAILURE_DAYS, lang)}, usage data ${days(EVENT_DAYS, lang)}${f.identify ? `, the pseudonymous user ID up to ${days(USER_DAYS, lang)} after last use` : ""}.`);
   }
+  if (f.hosting) lines.push("", hostingText(f.hosting, appName, lang));
   return lines.join("\n");
+}
+
+/** Pure. Who keeps the app's own data (accounts, content, files) and where: Supabase, as day2's subprocessor, in one region. */
+export function hostingText(h: NonNullable<NoticeFacts["hosting"]>, appName: string, lang: Lang): string {
+  const what = lang === "de"
+    ? [h.accounts && "Ihr Konto (E-Mail-Adresse bzw. die Anmeldung mit Apple oder Google)", "die Inhalte, die Sie in der App anlegen", h.files && "Dateien, die Sie hochladen"].filter(Boolean).join(", ")
+    : [h.accounts && "your account (email address, or your sign-in with Apple or Google)", "what you create in the app", h.files && "files you upload"].filter(Boolean).join(", ");
+  if (lang === "de") {
+    return `**Wo Ihre Daten gespeichert werden:** ${what} werden bei ${h.processor} (Supabase Inc., supabase.com) gespeichert, im Rechenzentrum in ${h.place.de}. Die Daten bleiben in dieser Region. ${h.processor} betreibt das Backend von ${appName} ${h.direct ? "als unser Auftragsverarbeiter" : "über day2 als Unterauftragsverarbeiter"}, auf Grundlage eines Auftragsverarbeitungsvertrags (Art. 28 DSGVO)${h.eu ? "" : "; für Übermittlungen außerhalb der EU gelten die EU-Standardvertragsklauseln"}. Rechtsgrundlage: die Erfüllung des Nutzungsvertrags (Art. 6 Abs. 1 lit. b DSGVO). Wir löschen Ihre Daten, wenn Sie Ihr Konto löschen.`;
+  }
+  return `**Where your data is stored:** ${what} are stored with ${h.processor} (Supabase Inc., supabase.com), in its data centre in ${h.place.en}. The data stays in that region. ${h.processor} runs ${appName}'s backend ${h.direct ? "as our processor" : "through day2 as a subprocessor"}, under a data processing agreement (Art. 28 GDPR)${h.eu ? "" : "; transfers outside the EU rely on the EU Standard Contractual Clauses"}. Legal basis: providing the app you signed up for (Art. 6(1)(b) GDPR). We delete your data when you delete your account.`;
 }
 
 export const noticeVersion = (section: string) => createHash("sha256").update(section).digest("hex").slice(0, 12);

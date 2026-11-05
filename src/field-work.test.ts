@@ -165,7 +165,7 @@ describe("field contracts in day2's loops", () => {
   test("growth reads events from the field; pages with broken checks aren't fit for ads", async () => {
     await store.record(app.id, { ...batch("dev-dddddddd", []), events: [{ type: "visit", at: "2026-10-15T10:00:00Z", acquisition: { campaignId: "B-1", channel: "paid" } }] }, NOW);
     const ev = await appEvents(app, "2026-10-14T00:00:00Z", store);
-    expect(ev).toEqual([{ type: "visit", at: "2026-10-15T10:00:00Z", deviceId: "dev-dddddddd", acquisition: { campaignId: "B-1", channel: "paid" } }]);
+    expect(ev).toEqual([{ type: "visit", at: "2026-10-15T10:00:00Z", deviceId: "dev-dddddddd", platform: "web", acquisition: { campaignId: "B-1", channel: "paid" } }]);
 
     await store.record(app.id, batch("dev-eeeeeeee", [failure({ contract: "builtin:screen.fits /go/split", route: "/go/split", expected: "fits the screen", actual: { overflowPx: 30, wider: ["img"], clipped: [], viewport: { w: 360, h: 740 } } })]), NOW);
     await store.record(app.id, batch("dev-ffffffff", [failure({ contract: "builtin:screen.fits /go/split", route: "/go/split", expected: "fits the screen", actual: { overflowPx: 30, wider: ["img"], clipped: [], viewport: { w: 360, h: 740 } } })]), NOW);

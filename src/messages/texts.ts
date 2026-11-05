@@ -31,6 +31,10 @@ export type DraftInput = {
   routes?: string[];
   /** The owner's own words for an announcement. */
   ownerNote?: string | null;
+  /** What day2 knows about the app (memory/runtime.ts). */
+  memory?: string;
+  /** What worked in similar apps (learning/priors.ts). */
+  worked?: string[];
 };
 
 export type Draft = { texts: Partial<Record<Locale, Text>>; route: string | null; claims: string[] };
@@ -49,7 +53,7 @@ Real features (the only things you may mention): ${i.features.join(", ") || "(no
 Tone of voice: ${i.toneOfVoice ?? "not established — match the app's own copy"}
 ${brief ? `\n${brief}\n` : ""}
 This message: ${i.goal}
-${i.practice ? `What leading apps do here (adapt, don't copy): ${i.practice}\n` : ""}${i.ownerNote ? `The owner's words (keep their meaning): ${i.ownerNote}\n` : ""}${i.routes?.length ? `Screens a tap can open: ${i.routes.join(", ")}\n` : ""}
+${i.practice ? `What leading apps do here (adapt, don't copy): ${i.practice}\n` : ""}${i.worked?.length ? `What worked in similar apps (anonymous results): ${i.worked.join("; ")}\n` : ""}${i.memory ? `\n${i.memory}\n\n` : ""}${i.ownerNote ? `The owner's words (keep their meaning): ${i.ownerNote}\n` : ""}${i.routes?.length ? `Screens a tap can open: ${i.routes.join(", ")}\n` : ""}
 Write it in these languages: ${i.locales.join(", ")}. Each language is written natively, not translated word for word, in the register the app itself uses (for German: "du" if the app says "du").
 
 Rules:

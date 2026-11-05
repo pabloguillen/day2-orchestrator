@@ -14,7 +14,8 @@ import type { AppleCatalog } from "./catalog-apple";
 import type { GoogleCatalog } from "./catalog-google";
 import { adRevenueRecords, computeKpis } from "./kpis";
 import type { MoneyLedger } from "./ledger";
-import { addTest, nextTest, syncTests, type LiveExperimentsPort } from "./offer-tests";
+import { addTest, nextTest, syncTests, testTarget, type LiveExperimentsPort } from "./offer-tests";
+import { dropDeclined, moneyKnowledge } from "./memory";
 import { applyProducts, productsForStrategy } from "./products";
 import { minorsHint, notYet, NOT_YET_USERS, propose, strategyDue, type ParsedStrategy, type StrategyInput } from "./strategy";
 import { PAYWALL_KEY, registerMoneyNativeNeeds, repoHas, ticketsFor, usesRevenueCat } from "./tickets";
@@ -152,9 +153,14 @@ export async function moneyPass(app: AppEntry, profile: AppProfile, deps: MoneyP
         report.strategy = "not_yet";
       }
     } else {
-      try {
+      const known = await moneyKnowledge(app, now);
+      if (known.blocked.blocked) report.skipped.push(`money strategy: ${known.blocked.why}`);
+      else try {
         const snap = await deps.store.retention(app.id).catch(() => null);
         const r = await deps.research({
+          memory: known.memory,
+          avoid: known.avoid,
+          worked: known.worked,
           appName: app.name,
           purpose: profile.purpose,
           targetUsers: profile.targetUsers,
@@ -171,7 +177,7 @@ export async function moneyPass(app: AppEntry, profile: AppProfile, deps: MoneyP
           excerpts: excerpts(app.repoPath),
         });
         if (r.result) {
-          file = propose(file, r.result, { users, rhythm: snap?.rhythm ?? null, credits: r.credits, now }).file;
+          file = propose(file, await dropDeclined(app, r.result, now), { users, rhythm: snap?.rhythm ?? null, credits: r.credits, now }).file;
           report.strategy = "proposed";
           log(`Proposed how ${app.name} earns (${r.result.models.join(" + ") || "not yet"}), from how ${r.result.leaders.map((l) => l.app).slice(0, 3).join(", ")} do it. It waits for your approval on the Money page.`, r.credits);
         } else log("Couldn't verify how leading apps of this kind earn this time — day2 proposes nothing rather than guess.", r.credits);
@@ -203,7 +209,8 @@ export async function moneyPass(app: AppEntry, profile: AppProfile, deps: MoneyP
     const backlog = await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b }));
     const paywallLive = backlog.tickets.some((x) => x.source.key === PAYWALL_KEY && x.state === "done");
     if (paywallLive) {
-      const next = nextTest(file, { idBase, stores, now });
+      const avoid = new Set((await moneyKnowledge(app, now)).avoid);
+      const next = nextTest(file, { idBase, stores, now, skip: (kind, key) => avoid.has(`money.test:${testTarget({ kind, keys: [key] })}`) });
       if (next) {
         file = addTest(next.file, next.test, now);
         log(`Planned a test: ${next.test.title} (revenue per user, with D7 retention as a guardrail).`);

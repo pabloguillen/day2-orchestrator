@@ -1,3 +1,4 @@
+import { captureSoon, memoryFor, noteDecline, noteOwnerInput } from "../memory/runtime";
 import type { AppEntry } from "../apps-registry";
 import { loadBacklog } from "../backlog";
 import { backlogFile } from "../backlog-work";
@@ -8,7 +9,7 @@ import { fieldStore, type Tenant } from "../tenant";
 import { messagesStore, pushTokens } from "./runtime";
 import { resolve } from "node:path";
 import { audienceName } from "./campaigns";
-import { draftInput, grounding, localesFor, newCampaign } from "./pass";
+import { campaignTarget, draftInput, grounding, localesFor, newCampaign } from "./pass";
 import { hasNotifications, registerMessagesNativeNeed } from "./setup";
 import type { MessagesStore } from "./store";
 import { checkTexts, draftTexts, reviewTexts, type Draft } from "./texts";
@@ -237,7 +238,8 @@ export function messagesRoutes(h: RouteHelpers): MessagesRoute[] {
           if (!profile) throw h.fail(409, "day2 needs the app scan first to write in the app's voice.");
           const goal = "A one-off announcement to everyone with push on: what's new and why it's worth opening the app for.";
           const { result, credits } = await h.runWithCredits(t, app, "content_generation", "Announcement texts", DRAFT_MAX_USD, async () => {
-            const input = draftInput(app, profile, locales, goal, about);
+            const memory = await memoryFor(app, "messages", { hint: about });
+            const input = { ...draftInput(app, profile, locales, goal, about), ...(memory ? { memory } : {}) };
             const d = await draftTexts(input);
             const review = d ? await reviewTexts(d.texts, d.claims, input) : null;
             return { d, review };
@@ -271,6 +273,11 @@ export function messagesRoutes(h: RouteHelpers): MessagesRoute[] {
         if (!check.ok) throw h.fail(400, check.issues.join(" "));
         const route = b.route === null ? undefined : typeof b.route === "string" && ROUTE_RE.test(b.route) ? b.route : c.route;
         const by = (await h.actorName(t)) ?? "you";
+        // day2's texts rewritten by the owner: day2 learns the preference behind the edit.
+        if (c.by === "day2") {
+          const flat = (x: typeof texts) => Object.entries(x).map(([l, v]) => `${l}: ${v?.title ?? ""} — ${v?.body ?? ""}`).join(" | ");
+          await noteOwnerInput(app, { kind: "edit", text: `edited the texts of “${c.name}”`, before: flat(c.texts), after: flat(texts), about: `push/in-app message “${c.name}”`, ref: { type: "proposal", id: c.id, url: `/apps/${app.id}/messages`, label: `Messages: ${c.name}` }, who: by });
+        }
         await update(app, (s) => ({
           ...s,
           campaigns: s.campaigns.map((x) => (x.id === c.id ? { ...x, texts, route, by: "owner", checks: { ok: true, issues: [] }, status: x.status === "draft" ? "waiting" : x.status, updatedAt: new Date().toISOString() } : x)),
@@ -282,7 +289,7 @@ export function messagesRoutes(h: RouteHelpers): MessagesRoute[] {
     {
       method: "POST",
       path: "/api/apps/:id/messages/campaigns/:cid/:action",
-      handler: async (_req, p, t) => {
+      handler: async (req, p, t) => {
         const app = await h.requireApp(t, p.id!);
         const { store } = stores();
         const state = await store.state(app.id);
@@ -291,6 +298,12 @@ export function messagesRoutes(h: RouteHelpers): MessagesRoute[] {
         const by = (await h.actorName(t)) ?? null;
         const now = new Date();
         const patch = campaignAction(p.action!, c, by, now);
+        // Stopping one of day2's messages before it ever went out is a decline.
+        if (p.action === "stop" && c.by === "day2" && (c.status === "waiting" || c.status === "draft")) {
+          const reason = String((await body(req)).reason ?? "").trim().slice(0, 500);
+          await noteDecline(app, { kind: "messages.campaign", target: campaignTarget(c), reason, who: by, about: `the message “${c.name}”`, ref: { type: "proposal", id: c.id, url: `/apps/${app.id}/messages`, label: `Messages: ${c.name}` } });
+          if (reason) captureSoon(app, (service, description, max, fn) => h.runWithCredits(t, app, service, description, max, fn));
+        }
         const verb: Record<string, string> = { approve: "approved", pause: "paused", resume: "resumed", stop: "stopped" };
         await update(app, (s) => ({
           ...s,

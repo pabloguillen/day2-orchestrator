@@ -120,6 +120,18 @@ describe("pure parts", () => {
 });
 
 describe("JavaScript-only changes: an over-the-air update in stages", () => {
+  test("Hosting's database migrations go first; when they can't, the release waits", async () => {
+    const f = fakes();
+    const seen: string[] = [];
+    const held = await releasePass(base(), { ...f.deps(T0), beforeShip: async (o) => (seen.push(`${o.kind} ${o.dir}`), { ok: false, why: "a database change failed on production" }) });
+    expect(held.report.waiting).toBe("a database change failed on production");
+    expect(held.file.current).toBeNull();
+    expect(f.calls).toEqual([]);
+    const go = await releasePass(base(), { ...f.deps(T0), beforeShip: async () => ({ ok: true }) });
+    expect(go.report.started).toBe("U-new");
+    expect(seen).toEqual(["update /tmp/new"]);
+  });
+
   test("10% → 50% → 100%, each after enough healthy launches; then it's what's shipped", async () => {
     const f = fakes();
     let file = base();

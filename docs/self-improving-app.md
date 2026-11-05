@@ -9,6 +9,7 @@ gora8 (day2) builds, maintains and grows React Native / Expo apps. This document
 | **Store** | App Store optimization: listing text, keywords, screenshots, Apple product page tests and custom product pages, ratings prompts and review replies | `src/store-listing/` | `docs/store-listing.md` |
 | **Messages** | Push notifications and in-app messages for the lifecycle | `src/messages/` | `docs/messages.md` |
 | **Create** | A new native Expo app from a description, with all of the above prewired | `src/expo-create/` | `docs/expo-apps.md` |
+| **Hosting** | The app's backend (database, sign-in, files, realtime, edge functions) on Supabase in day2's organization, paid in credits, movable to the owner's own organization | `src/hosting/` | `docs/hosting.md` |
 | **Assistant actions** | The app's main actions in Siri/Shortcuts and Android app shortcuts | `src/assistant-actions.ts` | in `docs/expo-apps.md` |
 
 ## Principles (every module)
@@ -102,6 +103,13 @@ type Audience = { platforms?: ("ios" | "android")[]; locales?: string[]; newWith
 
 - Routes under `/api/apps/:id/live/*`, `/api/apps/:id/money/*`, `/api/apps/:id/store/*`, `/api/apps/:id/messages/*`, registered from each module's `routes.ts` with one line in `src/api-server.ts`.
 - Console pages: **Live** (`apps.$appId.live.tsx`), **Money** (`apps.$appId.money.tsx`), **Store** (`apps.$appId.store.tsx`), **Messages** (`apps.$appId.messages.tsx`), linked from the app shell's navigation; queries in `src/lib/queries.ts`; e2e mocks in `e2e/mock-api.mjs`.
+
+## Memory and learning (every module)
+
+Two shared layers sit under all modules (details: [memory-and-learning.md](memory-and-learning.md)):
+
+- **What day2 knows** (`src/memory/`): per app, short notes distilled from what the owner says and decides — comments, answers, Tell, declines with their optional "why", edits to day2's texts, approval notes, custom backlog rules. Every module's prompt builder adds `memoryFor(app, purpose)`; every proposal generator calls `proposalContext` before spending credits and `filterProposals` after, so a declined kind and target isn't proposed again for 90 days. Every decline button asks one short, skippable "Why not?".
+- **What works** (`src/learning/`): each decided result (Live, Money tests, Messages and retention against holdouts, Store tests, bets) is recorded anonymously in a platform-wide library (when the account shares; on by default). Modules get "what worked in similar apps" lines (`workedLines`), Live's Bayesian test gets a capped informative prior, Create starts from the best-known defaults (still tested), and build failures turn into an operator-reviewed playbook for the build agent.
 
 ## Owner steps per module (and what day2 does instead)
 

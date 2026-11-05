@@ -5,9 +5,11 @@ import { resolve } from "node:path";
 import { fieldStore, type Tenant } from "../tenant";
 import type { Json } from "../../packages/sensors/src/types";
 import { addExperiment, KEY_RE, metricLabel, promote, putExperiment, stop, type ExperimentInput } from "./experiments";
-import { addIdeas, codeSummary, IDEAS_MAX_USD, leakFrom, numbersFrom, proposeIdeas, type IdeaInput } from "./ideas";
+import { addIdeas, codeSummary, ideaTargets, IDEAS_MAX_USD, leakFrom, numbersFrom, proposeIdeas, type IdeaInput } from "./ideas";
 import { addTicket, codeKeysOf, startExperiment } from "./pass";
 import { liveStore } from "./runtime";
+import { captureSoon, filterProposals, noteDecline, proposalContext, type CreditRunner } from "../memory/runtime";
+import { workedLines } from "../learning/runtime";
 import { addLog, type LiveSettings, type LiveState, type Metric, type Variant } from "./types";
 
 /**
@@ -67,7 +69,10 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
       .events(app.id, new Date(now - 30 * DAY))
       .catch(() => []);
     const profile = loadAppProfile(resolve(app.repoPath, APP_PROFILE_FILENAME));
+    const known = await proposalContext(app, "growth", ["live.idea"], { hint: ownerWords });
     return {
+      memory: known.memory,
+      ...(ownerWords ? {} : { avoid: known.avoid, worked: await workedLines(app, "live") }),
       appName: app.name,
       profile,
       code: codeSummary(app.repoPath, codeKeys),
@@ -80,6 +85,12 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
   }
 
   const respond = async (app: AppEntry) => json(view(await store().get(app.id), codeKeysOf(app.repoPath)));
+  const runner = (t: Tenant, app: AppEntry): CreditRunner => (service, description, max, fn) => h.runWithCredits(t, app, service, description, max, fn);
+  /** "Not now" on an idea or a waiting experiment: blocked for 90 days, and the why teaches day2. */
+  async function declined(t: Tenant, app: AppEntry, keys: string[], title: string, reason: string, id: string) {
+    await noteDecline(app, { kind: "live.idea", target: ideaTargets(keys)[0]!, reason, about: `Live experiment idea “${title}”`, ref: { type: "proposal", id, url: `/apps/${app.id}/live`, label: `Live: ${title}` } });
+    if (reason) captureSoon(app, runner(t, app));
+  }
 
   route("GET", "/api/apps/:id/live", async (_req, p, t) => respond(await requireApp(t, p.id!)));
 
@@ -184,7 +195,9 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
     const codeKeys = codeKeysOf(app.repoPath);
     const s0 = await store().get(app.id);
     const input = await ideaInput(app, s0, codeKeys);
-    const { result: drafts, credits } = await h.runWithCredits(t, app, "agent_work", "Live: experiment ideas", IDEAS_MAX_USD, () => proposeIdeas(input));
+    const { result: all, credits } = await h.runWithCredits(t, app, "agent_work", "Live: experiment ideas", IDEAS_MAX_USD, () => proposeIdeas(input));
+    // The hard filter: what the owner already said no to never comes back as an idea.
+    const drafts = (await filterProposals(app, "live.idea", all, (d) => ideaTargets(d.keys))).kept;
     const now = new Date();
     await store().update(app.id, (s) => {
       const a = addIdeas({ ...s, ideasAt: now.toISOString() }, drafts, now);
@@ -193,9 +206,11 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
     return json({ ...view(await store().get(app.id), codeKeys), credits });
   });
 
-  route("POST", "/api/apps/:id/live/ideas/:idea/:action", async (_req, p, t) => {
+  route("POST", "/api/apps/:id/live/ideas/:idea/:action", async (req, p, t) => {
     const app = await requireApp(t, p.id!);
     const action = p.action;
+    const reason = String((await body(req)).reason ?? "").trim().slice(0, 500);
+    const before = (await store().get(app.id)).ideas.find((i) => i.id === p.idea);
     if (action !== "use" && action !== "dismiss") throw httpError(404, "Unknown action.");
     const now = new Date();
     const codeKeys = codeKeysOf(app.repoPath);
@@ -213,6 +228,7 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
       throw fail(err);
     }
     if (created) await startExperiment(app, store(), created, { by: "owner", now, codeKeys });
+    if (action === "dismiss" && before) await declined(t, app, before.keys, before.title, reason, before.id);
     return respond(app);
   });
 
@@ -258,11 +274,13 @@ export function registerLiveRoutes(route: (method: string, pathname: string, han
           });
         }
       } else if (p.action === "delete") {
-        await store().update(app.id, (s) => {
+        const gone = await store().update(app.id, (s) => {
           const e = s.experiments.find((x) => x.id === id);
           if (!e || (e.state !== "draft" && e.state !== "to_approve")) throw new Error("Only experiments that haven't started can be deleted.");
-          return { state: addLog({ ...s, experiments: s.experiments.filter((x) => x.id !== id) }, now, `${id} deleted.`), result: null };
+          return { state: addLog({ ...s, experiments: s.experiments.filter((x) => x.id !== id) }, now, `${id} deleted.`), result: e };
         });
+        // day2's own experiment waiting for an OK, turned down.
+        if (gone.state === "to_approve" && gone.createdBy === "day2") await declined(t, app, gone.keys, gone.title, String((await body(req)).reason ?? "").trim().slice(0, 500), gone.id);
       } else throw httpError(404, "Unknown action.");
     } catch (err) {
       if ((err as { status?: number }).status) throw err;

@@ -32,7 +32,16 @@ export type IdeaInput = {
   tried: string[];
   /** The owner's own words, for "describe an experiment" (one idea back). */
   ownerWords?: string;
+  /** What day2 knows about the app (memory/runtime.ts). */
+  memory?: string;
+  /** Proposals the owner said no to ("live.idea:<keys>"). */
+  avoid?: string[];
+  /** What worked in similar apps (learning/priors.ts), one line each. */
+  worked?: string[];
 };
+
+/** An idea's hard-filter targets: its keys together, and each key on its own. */
+export const ideaTargets = (keys: string[]): string[] => [[...keys].sort().join(","), ...keys];
 
 const CODE_FILE = /\.(t|j)sx?$/;
 const SCREENS = /(app|screens?|pages?|routes?|components)\//i;
@@ -97,6 +106,9 @@ export function ideaPrompt(input: IdeaInput): string {
     input.numbers.revenuePerUser !== null ? `Revenue per user: ${input.numbers.revenuePerUser} ${input.numbers.currency}.` : "No revenue events yet.",
     input.leak ? `Biggest retention leak: users in state "${input.leak.state}" (${input.leak.lost} lost last period${input.leak.rate !== null ? `, ${Math.round(input.leak.rate * 100)}% come back` : ""}).` : "Retention: not enough data yet.",
     input.tried.length ? `Already tried (don't repeat): ${input.tried.join("; ")}` : "",
+    input.avoid?.length ? `The owner said no to experiments on these settings — don't propose them again: ${input.avoid.map((a) => a.replace(/^live\.idea:/, "")).join("; ")}` : "",
+    input.worked?.length ? `\n## What worked in similar apps (anonymous results from other apps; a starting point, still tested here with a control)\n${input.worked.map((w) => `- ${w}`).join("\n")}` : "",
+    input.memory ? `\n${input.memory}` : "",
     "",
     "## Rules",
     "- Each experiment changes 1–3 settings. Prefer settings the code already reads. A new setting name is fine when the change is small for the build agent (a text, a number, a switch, an order), named like `onboarding.title` or `paywall.trial_days`.",

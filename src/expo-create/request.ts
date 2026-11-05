@@ -1,4 +1,5 @@
 import { creditsForCost } from "../credits";
+import { MAX_SCREENS as MAX_SCREENS_ } from "./plan";
 import { LOOKS, MONEY, type CreateRequest, type Identifiers, type Money, type Platform } from "./types";
 
 /** Pure. Checks what the owner typed; plain-language reasons. */
@@ -86,20 +87,39 @@ export function identifiersFor(r: Pick<CreateRequest, "name" | "displayName" | "
 
 /** What each part may cost at most (USD, day2's real cost before the app_build markup). */
 export const BUDGET_USD = {
+  /** The plan with its screen inventory (each version). */
   plan: 1,
-  mockup: 0.6,
+  /** The design system (each version). */
+  style: 0.6,
+  /** Each screen's drawing. */
+  screen: 0.6,
   /** runBuildAgent's own cap per run (agent.ts FIX_MAX_BUDGET_USD). */
   step: 3,
 } as const;
-export const MAX_MOCKUPS = 3;
-export const BUILD_STEPS = 3;
+/** A typical first version has about this many screens (state screens included). */
+export const TYPICAL_SCREENS = 10;
+export { MAX_SCREENS } from "./plan";
+/** theme, screens, backend, polish. */
+export const BUILD_STEPS = 4;
 /** One fix attempt per step when its checks fail. */
 export const MAX_ATTEMPTS = 2;
 
-/** Pure. Typical and worst-case cost in credits (what the console shows before starting). */
+/**
+ * Pure. Typical and worst-case cost in credits (what the console shows before starting):
+ * the first version of the screen flow, one round of changes, and the four build steps.
+ */
 export function estimateCreate(): { usd: number; maxUsd: number; credits: number; maxCredits: number } {
-  // Typical: plan and mockups use about half their cap; each step one run at about 2/3 of its cap.
-  const usd = BUDGET_USD.plan * 0.5 + MAX_MOCKUPS * BUDGET_USD.mockup * 0.5 + BUILD_STEPS * BUDGET_USD.step * 0.66;
-  const maxUsd = BUDGET_USD.plan * 2 + MAX_MOCKUPS * BUDGET_USD.mockup * 2 + BUILD_STEPS * BUDGET_USD.step * MAX_ATTEMPTS;
+  // Typical: writing uses about half its cap; one round of changes redraws ~3 screens; each step one run at ~2/3 of its cap.
+  const firstVersion = BUDGET_USD.plan * 0.5 + BUDGET_USD.style * 0.5 + TYPICAL_SCREENS * BUDGET_USD.screen * 0.5;
+  const oneRound = BUDGET_USD.plan * 0.5 + 3 * BUDGET_USD.screen * 0.5;
+  const usd = firstVersion + oneRound + BUILD_STEPS * BUDGET_USD.step * 0.66;
+  // Worst case: the most screens, retries on the writing, every step twice plus its one fix of mismatches with the drawings.
+  const maxUsd = BUDGET_USD.plan * 2 + BUDGET_USD.style * 2 + MAX_SCREENS_ * BUDGET_USD.screen + BUILD_STEPS * BUDGET_USD.step * (MAX_ATTEMPTS + 1);
   return { usd, maxUsd, credits: creditsForCost(usd, "app_build"), maxCredits: creditsForCost(maxUsd, "app_build") };
+}
+
+/** Pure. The most one round of changes can cost (checked against the balance before it starts). */
+export function estimateRound(screens: number, styleChanged: boolean): { usd: number; credits: number } {
+  const usd = BUDGET_USD.plan + (styleChanged ? BUDGET_USD.style : 0) + Math.max(1, screens) * BUDGET_USD.screen;
+  return { usd, credits: creditsForCost(usd, "app_build") };
 }

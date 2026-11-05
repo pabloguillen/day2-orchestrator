@@ -1,12 +1,15 @@
 import type { SQL } from "bun";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { migrateBuild } from "./migrate";
 import type { ExpoBuild } from "./types";
 
 /**
  * Where Create keeps its builds: a file in day2's data folder (local mode)
  * or the expo_creates table (accounts mode, migration 014). Builds survive
  * a restart; the flow picks unfinished ones up again (flow.ts resumeAll).
+ * Builds stored before the screen flow are moved to the nearest new state
+ * when they are read (migrate.ts).
  */
 export interface CreateStore {
   get(id: string, accountId?: string): Promise<ExpoBuild | undefined>;
@@ -19,7 +22,7 @@ export const EXPO_CREATE_FILE = ".day2-expo-creates.json";
 
 export function fileCreateStore(dir: string): CreateStore {
   const path = join(dir, EXPO_CREATE_FILE);
-  const load = (): ExpoBuild[] => (existsSync(path) ? (JSON.parse(readFileSync(path, "utf-8")) as ExpoBuild[]) : []);
+  const load = (): ExpoBuild[] => (existsSync(path) ? (JSON.parse(readFileSync(path, "utf-8")) as ExpoBuild[]).map(migrateBuild) : []);
   return {
     async get(id, accountId) {
       return load().find((b) => b.id === id && (accountId === undefined || b.accountId === accountId));
@@ -40,7 +43,7 @@ export function fileCreateStore(dir: string): CreateStore {
 }
 
 export function dbCreateStore(sql: SQL): CreateStore {
-  const row = (r: { data: unknown }) => (typeof r.data === "string" ? JSON.parse(r.data) : r.data) as ExpoBuild;
+  const row = (r: { data: unknown }) => migrateBuild((typeof r.data === "string" ? JSON.parse(r.data) : r.data) as ExpoBuild);
   return {
     async get(id, accountId) {
       const rows = (accountId === undefined

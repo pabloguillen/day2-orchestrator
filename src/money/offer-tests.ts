@@ -156,10 +156,14 @@ export function adTest(file: MoneyFile, a: AdPlacement, kind: "ad_on_off" | "ad_
 }
 
 /** Pure. The next test worth running when nothing runs: layout → trial → price → ad frequency → ad on/off. Null when all were tried. */
-export function nextTest(file: MoneyFile, o: { idBase: string; stores: { ios: boolean; android: boolean }; now: Date }): { file: MoneyFile; test: MoneyTest } | null {
+/** The hard-filter target of a money test: its kind and what it tests ("trial_length:paywall.main"). */
+export const testTarget = (t: Pick<MoneyTest, "kind" | "keys">) => `${t.kind}:${t.keys[0] ?? ""}`;
+
+export function nextTest(file: MoneyFile, o: { idBase: string; stores: { ios: boolean; android: boolean }; now: Date; skip?: (kind: MoneyTest["kind"], key: string) => boolean }): { file: MoneyFile; test: MoneyTest } | null {
   const open = file.tests.filter((t) => t.state === "running" || t.state === "proposed" || t.state === "waiting_approval");
   if (open.length >= MAX_RUNNING_TESTS) return null;
-  const tried = (kind: MoneyTest["kind"], key: string) => file.tests.some((t) => t.kind === kind && t.keys.includes(key));
+  // `skip`: the owner already declined this kind of test here (the memory hard filter).
+  const tried = (kind: MoneyTest["kind"], key: string) => file.tests.some((t) => t.kind === kind && t.keys.includes(key)) || Boolean(o.skip?.(kind, key));
   for (const w of file.paywalls.filter((x) => x.enabled)) {
     const k = `paywall.${w.placement}`;
     if (!tried("paywall_layout", k)) {

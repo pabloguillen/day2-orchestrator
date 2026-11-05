@@ -1,4 +1,5 @@
 import { evaluateProportionExperiment } from "../experiments";
+import { probBetterWithPrior } from "../learning/bayes";
 import { seeded } from "../growth-bets";
 import type { NewTicketInput } from "../backlog";
 import { mainCurrency, REVENUE_EVENT_SIGN, unitOf } from "../metrics/monetization-kpis";
@@ -228,7 +229,21 @@ export function probabilityMeanGreater(a: number[], b: number[], rng: () => numb
 
 const share = (xs: boolean[]) => (xs.length ? xs.filter(Boolean).length / xs.length : null);
 
-export type MeasureInput = { events: EventLike[]; crashes: Crash[]; now: Date };
+export type MeasureInput = {
+  events: EventLike[];
+  crashes: Crash[];
+  now: Date;
+  /**
+   * What worked in similar apps (learning/runtime.ts `liveExperimentPrior`):
+   * an informative prior on the log lift, already capped so this app's own
+   * data can override it; `strong` lets the test decide with fewer users
+   * (never below 60% of the minimum). Guardrails never use it.
+   */
+  prior?: { prior: { mean: number; sd: number }; strong: boolean } | null;
+};
+
+/** With a strong prior, an arm needs this share of the usual minimum. */
+export const STRONG_PRIOR_SHARE = 0.6;
 
 /** The experiment's numbers and verdict right now (it doesn't change the experiment). */
 export function measure(e: Experiment, input: MeasureInput): ExperimentResult {
@@ -279,6 +294,7 @@ export function measure(e: Experiment, input: MeasureInput): ExperimentResult {
 
   const probBetter = (r: Raw): number => {
     if (e.metric.kind === "revenue_per_user") return probabilityMeanGreater(control.outcome as number[], r.outcome as number[], rng);
+    if (input.prior) return probBetterWithPrior(control.outcome as boolean[], r.outcome as boolean[], input.prior.prior, rng);
     const c = evaluateProportionExperiment(control.outcome as boolean[], r.outcome as boolean[], rng, { minNPerArm: 1, monteCarloDraws: 4000 });
     return c.sufficientPower ? c.posteriorProbabilityTreatmentBetter : 0.5;
   };
@@ -312,7 +328,8 @@ export function measure(e: Experiment, input: MeasureInput): ExperimentResult {
   }
 
   const sampleN = (r: Raw) => r.outcome.length;
-  const enough = raws.every((r) => sampleN(r) >= e.minPerArm);
+  const minN = input.prior?.strong && e.metric.kind !== "revenue_per_user" ? Math.ceil(e.minPerArm * STRONG_PRIOR_SHARE) : e.minPerArm;
+  const enough = raws.every((r) => sampleN(r) >= minN);
   const days = e.startedAt ? (now - Date.parse(e.startedAt)) / DAY : 0;
   const others = armResults.filter((a) => a.name !== "control");
   const best = others.reduce<ArmResult | null>((b, a) => (b === null || (a.probBetter ?? 0) > (b.probBetter ?? 0) ? a : b), null);
