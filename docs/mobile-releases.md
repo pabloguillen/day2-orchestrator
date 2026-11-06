@@ -31,7 +31,7 @@ With its own field data (`field-store` `releaseHealth`): every launch reports a 
 ## Setting an app up (once)
 
 - **day2 does the code** (one ticket, `mobile-release/setup.ts`): expo-updates and expo-application, the fingerprint runtime policy and EAS Update URL, eas.json (remote versions, auto-increment, production channel, internal track), and the release tag in `startDay2`. That's a native change, so it reaches users with the next store release.
-- **The owner connects, on Releases** (stored encrypted, `release_credentials`): an Expo access token (a robot user's), an App Store Connect API key (Team key, App Manager), a Google Play service account (invited in Play Console with "Release to production"). And once, on their computer: `eas build` for each platform, so EAS stores the signing credentials.
+- **The owner connects, on Connect your stores** ([connect.md](connect.md); stored encrypted, `release_credentials`): an Expo robot token (pasted once; day2 finds the EAS project), an App Store Connect API key (Team key, App Manager; the `.p8` dropped in, Key ID read from its name), and Google Play by **Sign in with Google** — day2 creates the service account and key in the app's Google Cloud project and invites it in Play Console with release permissions (or the owner does that one invite, with the exact email and a Check button). Releases links there; its API (`PUT /api/apps/:id/mobile-releases/accounts/:kind`) still works. And once, on their computer: `eas build` for each platform, so EAS stores the signing credentials.
 - **Turning it on** is the owner's choice (Releases → "Turn on releases by day2"); settings choose how far day2 goes by itself (updates, store builds, store release).
 
 ## What isn't verified yet

@@ -147,10 +147,10 @@ export function launchChecklist(i: LaunchInput): LaunchItem[] {
           ? `Review and merge ${r.setupTicket.id}.`
           : `day2 sets the app up for it${r.setupTicket ? ` (${r.setupTicket.id})` : ""}.`
         : missing.length
-          ? `Connect ${missing.join(", ")} on the Releases page.`
+          ? `Connect ${missing.join(", ")} on Connect your stores.`
           : "Ready.",
       ticket: r.setupTicket,
-      to: app("/releases"),
+      to: app(!r.codeGaps && missing.length ? "/connect" : "/releases"),
     });
   }
 

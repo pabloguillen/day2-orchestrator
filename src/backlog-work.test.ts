@@ -8,6 +8,19 @@ import { createTicket, emptyBacklog, findTicket, loadBacklog, nextToStart, saveB
 import { backlogFile, settleByPr, parsePlan, proposalItems, reconcileApprovals, reportForTicket, runTicket, signalItems, startTicket, tick } from "./backlog-work";
 import type { PipelineDeps } from "./pipeline";
 
+// Learning (src/learning/) notes build results in day2's data folder: keep it out of the repo.
+const savedDataDir = process.env.DAY2_DATA_DIR;
+const learningDir = mkdtempSync(join(tmpdir(), "day2-learning-test-"));
+beforeAll(() => {
+  process.env.DAY2_DATA_DIR = learningDir;
+});
+afterAll(() => {
+  if (savedDataDir === undefined) delete process.env.DAY2_DATA_DIR;
+  else process.env.DAY2_DATA_DIR = savedDataDir;
+  rmSync(learningDir, { recursive: true, force: true });
+});
+
+
 const ROOT = mkdtempSync(join(tmpdir(), "day2-backlog-work-"));
 const REPO = join(ROOT, "app");
 const app: AppEntry = { id: "a1", name: "buddy", repoPath: REPO, connectionMethod: "local_path", addedAt: "2026-10-01T00:00:00Z" };

@@ -111,7 +111,7 @@ export function registerNumbersRoutes(ctx: NumbersRouteContext): void {
     const ids = storeIdsFromRepo(app.repoPath);
     if (p.store === "apple") {
       const cred = await releaseCredentials().get(app.id, "asc");
-      if (!cred) return json({ ok: false, message: "App Store Connect isn't connected — connect it on Releases first." });
+      if (!cred) return json({ ok: false, message: "App Store Connect isn't connected — connect it on Connect your stores first." });
       if (!doc.settings.appleVendorNumber) return json({ ok: false, message: "Add the vendor number first." });
       const a = createAppleReports(cred.value);
       const day = new Date(Date.now() - 4 * 86_400_000).toISOString().slice(0, 10);
@@ -125,7 +125,7 @@ export function registerNumbersRoutes(ctx: NumbersRouteContext): void {
     }
     if (p.store === "google") {
       const cred = await releaseCredentials().get(app.id, "play");
-      if (!cred) return json({ ok: false, message: "Google Play isn't connected — connect it on Releases first." });
+      if (!cred) return json({ ok: false, message: "Google Play isn't connected — connect it on Connect your stores first." });
       if (!doc.settings.playBucket) return json({ ok: false, message: "Add the Cloud Storage URI first." });
       if (!ids.packageName) return json({ ok: false, message: "day2 can't find the Android package name in app.json." });
       try {

@@ -1,6 +1,8 @@
 # Going live: checklist
 
-What's left before day2 runs in production. Nothing here is urgent.
+What's left before day2 runs in production. Nothing here is urgent — except
+one thing that takes weeks: **Google's verification of the consent screen for
+"Connect your stores"** (section 3). Start that first.
 day2 keeps working locally on your own machine in the meantime. The details
 for each step are in [deploy-hetzner.md](deploy-hetzner.md).
 
@@ -27,6 +29,19 @@ Each one gives you values for the settings file ([guide §3](deploy-hetzner.md#3
 - [ ] **Google sign-in** (optional): create an OAuth client in Google Cloud.
       It takes about 10 minutes.
       → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- [ ] **Google for Connect your stores — start early, it can take weeks.**
+      Use the sign-in client or a second Web client. Add the redirect URI
+      `https://<address>/api/ads/connect/callback/googlecloud` and the scopes
+      `cloud-platform` and `androidpublisher` to the OAuth consent screen, then
+      **submit it for verification** (privacy policy, homepage, a short video
+      of the flow, why each sensitive scope is needed). Until Google verifies
+      it, only the test users you list can sign in, with an "unverified app"
+      warning. Platform → Connect your stores shows what's missing
+      ([connect.md](connect.md)).
+      → `DAY2_GOOGLE_OAUTH_CLIENT_ID`, `DAY2_GOOGLE_OAUTH_CLIENT_SECRET`
+- [ ] **Meta:** reconnect day2's Meta account on Platform → Ad accounts once,
+      so it asks for `pages_show_list` (the Page list per app); include it in
+      Meta's App Review.
 - [ ] **GitHub App:** create it on GitHub with the settings from the guide's table.
       → `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`,
       `GITHUB_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`
@@ -130,7 +145,7 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
 ## 7. For each app in the stores: the Setup tab
 
 About 15 minutes per app, after connecting App Store Connect and Google Play
-on **Releases**. On the app's **Store** page → **Setup**:
+on **Connect your stores**. On the app's **Store** page → **Setup**:
 
 - [ ] Approve (or correct) what day2 proposed: links, contact, categories,
       content rights, age rating, App Review contact, price and countries,
@@ -147,11 +162,11 @@ on **Releases**. On the app's **Store** page → **Setup**:
 
 ## 8. For each app in the stores: Numbers
 
-- [ ] For each app in the stores, open **Numbers → Store reports**: paste the
-      App Store vendor number and the Play Console Cloud Storage URI, give the
-      Play service account "View app information and download bulk reports",
-      turn on the Play Developer Reporting API, and press **Test the
-      connection** for both (see [numbers.md](numbers.md))
+- [ ] For each app in the stores, on **Connect your stores**: paste the App
+      Store vendor number (checked with Apple), drop a one-time Admin key for
+      App Analytics, and check that Google's steps (Reporting API, Play invite,
+      reports bucket) are green — paste the Cloud Storage URI if day2 couldn't
+      find it (see [numbers.md](numbers.md))
 - [ ] A day later, check that **Numbers** shows App Store and Google Play
       installs next to day2's own numbers
 

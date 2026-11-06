@@ -81,7 +81,7 @@ describe("the launch checklist", () => {
     );
     expect(items.find((x) => x.id === "field_checks")!.state).toBe("done");
     expect(items.find((x) => x.id === "privacy_notice")).toMatchObject({ state: "you", next: "Review and merge D2-12." });
-    expect(items.find((x) => x.id === "release_setup")).toMatchObject({ essential: false, state: "you", next: "Connect App Store Connect on the Releases page." });
+    expect(items.find((x) => x.id === "release_setup")).toMatchObject({ essential: false, state: "you", next: "Connect App Store Connect on Connect your stores.", to: "/apps/app_d/connect" });
     expect(items.some((x) => x.id === "ads_handoff")).toBe(false);
   });
 

@@ -44,7 +44,7 @@ export function ownerSteps(r: CreateRequest, ids: Identifiers, o: { appId: strin
     steps.push({
       id: "app-store",
       title: "Create the app in App Store Connect",
-      detail: `In App Store Connect → Apps → “+” → New App: platform iOS, name “${ids.displayName}”, bundle ID ${ids.bundleId} (it appears after the first build), SKU ${ids.slug}. Needs a paid Apple Developer account. Then add an App Store Connect API key on the Releases page so day2 can submit and release.`,
+      detail: `In App Store Connect → Apps → “+” → New App: platform iOS, name “${ids.displayName}”, bundle ID ${ids.bundleId} (it appears after the first build), SKU ${ids.slug}. Needs a paid Apple Developer account. Then add an App Store Connect API key on Connect your stores so day2 can submit and release.`,
       link: { label: "App Store Connect", url: "https://appstoreconnect.apple.com/apps" },
       done: false,
     });
@@ -53,7 +53,7 @@ export function ownerSteps(r: CreateRequest, ids: Identifiers, o: { appId: strin
     steps.push({
       id: "play",
       title: "Create the app in Google Play Console",
-      detail: `In Play Console → Create app: name “${ids.displayName}”, package ${ids.androidPackage}. Google needs the very first upload done by hand: download the Android build from expo.dev and upload it to the internal testing track once. Then add a service account key on the Releases page so day2 can release.`,
+      detail: `In Play Console → Create app: name “${ids.displayName}”, package ${ids.androidPackage}. Google needs the very first upload done by hand: download the Android build from expo.dev and upload it to the internal testing track once. Then sign in with Google on Connect your stores so day2 can release.`,
       link: { label: "Play Console", url: "https://play.google.com/console" },
       done: false,
     });

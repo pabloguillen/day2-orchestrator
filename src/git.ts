@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import { gitEnv } from "./tenant";
+import { COMMIT_EXCLUDES } from "./day2-state-files";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,7 +64,8 @@ export async function hasChanges(cwd: string): Promise<boolean> {
 }
 
 export async function commitAll(cwd: string, message: string) {
-  await $`git -C ${cwd} add -A`.quiet();
+  // Everything except day2's own state files (day2-*.json…), which never belong in the customer's repo.
+  await $`git -C ${cwd} add -A -- . ${[...COMMIT_EXCLUDES]}`.quiet();
   await $`git -C ${cwd} commit -m ${message}`.quiet();
 }
 

@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { excludeDay2State } from "./day2-state-files";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AppEntry } from "./apps-registry";
@@ -31,6 +32,7 @@ export function withDay2Env(easJson: string, envKey: string, envEndpoint: string
 
 /** Keeps day2's own checkout of the app current (what day2 reads between passes), when nothing tracked is changed in it. */
 export async function syncCheckout(repoPath: string): Promise<void> {
+  excludeDay2State(repoPath);
   const dirty = (await $`git -C ${repoPath} status --porcelain --untracked-files=no`.quiet().nothrow().text()).trim();
   if (dirty) return;
   await $`git -C ${repoPath} pull --ff-only --quiet`.env(await gitEnv()).quiet().nothrow();

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,19 @@ import { ADS_FILENAME, choosePlatforms, creativesFor, loadAds, pausePlatformAds,
 import type { AdCopyPlan } from "./copy";
 import { filePlatformIdentities } from "./identities";
 import type { AdPlatform, AdStats, LaunchSpec, Launched, PlatformId, PlatformInfo } from "./types";
+
+// Learning (src/learning/) records outcomes in day2's data folder: keep it out of the repo.
+const savedDataDir = process.env.DAY2_DATA_DIR;
+const learningDir = mkdtempSync(join(tmpdir(), "day2-learning-test-"));
+beforeAll(() => {
+  process.env.DAY2_DATA_DIR = learningDir;
+});
+afterAll(() => {
+  if (savedDataDir === undefined) delete process.env.DAY2_DATA_DIR;
+  else process.env.DAY2_DATA_DIR = savedDataDir;
+  rmSync(learningDir, { recursive: true, force: true });
+});
+
 
 const NOW = new Date("2026-10-28T10:00:00Z");
 const DAY = 86_400_000;

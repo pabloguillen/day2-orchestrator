@@ -104,6 +104,7 @@ Everything else on this list is **not** checked at startup. If it's missing, the
   - ad-platform connections;
   - day2's tool connectors (Foreplay, Runway, Meta MCP);
   - customers' release credentials (Expo, App Store Connect, Google Play);
+  - owners' one-hour Google tokens during "Connect your stores" (deleted after setup);
   - rotated ad refresh tokens.
 
   Store a copy in a password manager. **If it's lost, every stored connection is unreadable and everyone has to reconnect.**
@@ -125,6 +126,12 @@ People need at least one way in. Set up the ones you want, and the login page sh
 - [ ] **Google sign-in** (optional). A Google Cloud OAuth client, type Web application. Publish the consent screen; it starts in Testing.
   - Redirect URI: `https://<domain>/api/auth/google/callback`
   → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- [ ] **Google for "Connect your stores"** (recommended). Customers sign in with Google once per app and day2 sets up their Google Cloud project, service account, Pub/Sub and Android push ([connect.md](connect.md)). A Web application OAuth client in day2's Google Cloud project — the sign-in client above works too (then add the second redirect URI and the scopes to it).
+  - Redirect URI: `https://<domain>/api/ads/connect/callback/googlecloud` (locally also the tunnel host's; the tunnel allowlist already covers the path).
+  - Scopes on the consent screen: `openid`, `email`, `.../auth/cloud-platform`, `.../auth/androidpublisher`. Both are **sensitive**: Google's verification of the consent screen can take weeks, and until then only listed test users can sign in. Start it early (go-live checklist).
+  - No refresh token is asked for; the owner's token lives encrypted for at most an hour and is revoked when setup ends, a sign-in fails or is cancelled, or the hour is up (backlog timer). PKCE and a single-use state guard the callback (migrations `024_connect.sql`, `025_connect_pkce.sql`).
+  - **Check:** Platform → Connect your stores lists what's missing.
+  → `DAY2_GOOGLE_OAUTH_CLIENT_ID`, `DAY2_GOOGLE_OAUTH_CLIENT_SECRET` (falls back to `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`)
 - [ ] **day2's GitHub App** (required in practice). One App does both GitHub sign-in and repo access.
   - Callback URL: `https://<domain>/api/auth/github/callback`
   - Permissions: Contents, Pull requests and Issues: read & write; Email addresses: read. Request OAuth during installation. Webhook off. Installable by any account.
@@ -183,9 +190,9 @@ For **each** platform you want:
   - Their OAuth comes back to `https://<domain>/api/connectors/callback`.
   - Tools without dynamic client registration take `DAY2_CONNECTOR_<ID>_CLIENT_ID` / `_CLIENT_SECRET`.
   - `DAY2_CONNECTOR_<ID>_MCP_URL` overrides the server address (e.g. `DAY2_CONNECTOR_FOREPLAY_MCP_URL`).
-- [ ] **Facebook Pages.** Meta needs one per app. Create it in day2's Meta Business account and enter its id on **Platform → Facebook Pages for ads** (deploy-hetzner §5.6).
+- [ ] **Facebook Pages.** Meta needs one per app. Create it in day2's Meta Business account and pick it (or enter its id) on **Platform → Facebook Pages for ads** (deploy-hetzner §5.6). The list comes from day2's Meta connection, which now also asks for `pages_show_list` — reconnect Meta once. An owner who picks their Page after Facebook sign-in on Ads sets the same value.
 - [ ] **Older env-based accounts** (optional; connecting on the Platform page replaces them): `META_ACCESS_TOKEN` + `DAY2_META_AD_ACCOUNT_ID` (+ `DAY2_META_DSA_PAYOR`), `TIKTOK_ACCESS_TOKEN` + `TIKTOK_ADVERTISER_ID`, `GOOGLE_ADS_REFRESH_TOKEN` + `GOOGLE_ADS_CUSTOMER_ID`, `LINKEDIN_REFRESH_TOKEN` + `LINKEDIN_AD_ACCOUNT_ID`, `SNAP_REFRESH_TOKEN` + `SNAP_AD_ACCOUNT_ID`, `PINTEREST_REFRESH_TOKEN` + `PINTEREST_AD_ACCOUNT_ID` (+ `PINTEREST_BOARD_ID`), `REDDIT_REFRESH_TOKEN` + `REDDIT_AD_ACCOUNT_ID` (+ `REDDIT_FUNDING_INSTRUMENT_ID`), `X_ACCESS_TOKEN` + `X_ACCESS_TOKEN_SECRET` + `X_ADS_ACCOUNT_ID` (+ `X_FUNDING_INSTRUMENT_ID`). See the table in [ads.md](ads.md#platforms).
-  - **Watch out:** the Growth page's "Meta connected" flag still looks for `DAY2_META_AD_ACCOUNT_ID` (`src/api-server.ts`). Set it even if you connected Meta on the Platform page.
+  - The Growth page's "Meta connected" flag is true with a Meta ad account connected on the Platform page or for the app; `DAY2_META_AD_ACCOUNT_ID` is no longer needed for it.
 - [ ] **Not built yet, don't set:** `DAY2_META_ADS_ACCESS_TOKEN`, `DAY2_GOOGLE_ADS_REFRESH_TOKEN` and `DAY2_TIKTOK_ADS_ACCESS_TOKEN` (`src/external-ingest.ts`). They are placeholders and report "not implemented" even when set.
 
 ---
@@ -225,12 +232,12 @@ For **each** platform you want:
 ### Mobile releases (EAS)
 
 - [ ] **Nothing to install.** The image has Node 22 and **eas-cli 27.2.0**, pinned in both the `Dockerfile` and `EAS_CLI_VERSION` in `src/mobile-release/eas.ts`. If `eas` were missing, day2 would fall back to `npx eas-cli@27.2.0`.
-- [ ] **No server credentials.** Each app's owner connects on **Releases**:
+- [ ] **No server credentials** beyond the Google OAuth client (section 5). Each app's owner connects on **Connect your stores** ([connect.md](connect.md)):
   - an Expo robot token (passed to eas as `EXPO_TOKEN` and to nothing else);
-  - an App Store Connect API key;
-  - a Google Play service account.
+  - an App Store Connect API key (the `.p8`; Key ID read from the file name);
+  - Google Play: **Sign in with Google** creates the service account and its key (or the owner pastes a key when the server has no Google client).
 
-  These are stored encrypted (`release_credentials`). Builds run on EAS's machines, so no Mac is needed on the server. See [mobile-releases.md](mobile-releases.md) and [store-privacy.md](store-privacy.md).
+  These are stored encrypted (`release_credentials`), as before; the Releases API still accepts them. Builds run on EAS's machines, so no Mac is needed on the server. See [mobile-releases.md](mobile-releases.md) and [store-privacy.md](store-privacy.md).
 - [ ] **Status: built, not verified.** Run one release of a test app through the over-the-air update path and one through the store path.
 
 ### Device checks in the cloud
@@ -260,7 +267,7 @@ For **each** platform you want:
 
 - [ ] **No server settings.** day2 sends through Expo's push service with each app's Expo token, the one connected on **Releases**. Tokens, campaigns and send records are in Postgres (`016_messages.sql`: `push_tokens`, `message_optouts`, `message_sends`, `app_messages`). Locally they're files under `<data>/messages/`.
 - [ ] **Outbound HTTPS to `exp.host`** must be allowed from the server.
-- [ ] **Per app, the owner:** for Android, uploads the FCM V1 service account key in EAS once. iOS needs nothing in most cases. See [messages.md](messages.md), "What the owner sets up".
+- [ ] **Per app:** for Android, Sign in with Google on Connect your stores sets up Firebase and uploads the FCM V1 key to EAS (with Expo connected); `google-services.json` arrives with a ticket. iOS needs nothing in most cases. See [messages.md](messages.md), "What the owner sets up".
 - [ ] **Ingest:** the app sends its push token to `POST /api/ingest/<key>/push`. It's public like the other ingest routes. The inbox Worker keeps these POSTs while day2 is away and replays them later (Live owns that route).
 - **Local mode:** pushes wait while the Mac sleeps. They go at the next good local time, or are skipped after 30 hours.
 - **Status: built, not verified** against a real Expo project and real devices.
@@ -269,7 +276,7 @@ For **each** platform you want:
 
 - [ ] **Nothing to set on the server** beyond `DAY2_PUBLIC_URL` (https) and `DAY2_SECRETS_KEY`. Migration `015_money.sql` (applied on start) adds the ledger, the notification queue and Money's encrypted keys. See [money.md](money.md).
 - [ ] **Public webhooks:** `/api/store-notify/apple/<app>` and `/api/store-notify/google/<app>` must be reachable from Apple and Google (they're in the tunnel allowlist and buffered by the inbox Worker). Apps that already use RevenueCat use `/api/store-notify/revenuecat/<app>` — **add that path to the tunnel allowlist and the Worker** if such an app is onboarded (not done yet).
-- [ ] **Per app, the owner** signs Apple's Paid Apps agreement and Google's payments profile, creates the In-App Purchase key and the Pub/Sub push (walkthroughs on the Money page), and an AdMob account if the plan has ads.
+- [ ] **Per app, the owner** signs Apple's Paid Apps agreement and Google's payments profile, adds the In-App Purchase key (Connect your stores or Money), enters the Pub/Sub topic in Play Console's Monetization setup, and an AdMob account if the plan has ads. day2 creates the Pub/Sub topic and push itself after Sign in with Google, and sets Apple's notification URL through the App Store Connect API ("Set it for me").
 - [ ] **Credits:** a plan ("how the app earns") is an agent run paid from credits (`scan_answer`, at most $2), every 60 days or when users grow 5×.
 - [ ] **Status: built and tested with fakes, not verified against real Apple/Google accounts.** First real check on Dotty: create the In-App Purchase key, set the server notification URL, press "Send a test notification", buy the subscription with a sandbox account in TestFlight and watch it arrive as a sandbox record.
 
@@ -295,7 +302,7 @@ For **each** platform you want:
 - [ ] **Nothing new to set on the server.** Numbers reads the App Store Connect key and Google Play service account each app connected on Releases. Migration `018_numbers.sql` (applied on start) adds `numbers_cache` and a `platform` column on `field_events` (older events show as "not reported"). See [numbers.md](numbers.md).
 - [ ] **When it runs:** once a day per app, after the growth autopilot on the backlog timer (`DAY2_BACKLOG_TICK_MINUTES`; 0 turns it off), and when the owner presses Refresh (at most every 10 minutes per app). The first pass reads up to 180 days of daily sales (one request per day), so it takes a few minutes per app.
 - [ ] **Network:** the server must reach `api.appstoreconnect.apple.com`, Apple's report download host, `storage.googleapis.com`, `oauth2.googleapis.com` and `playdeveloperreporting.googleapis.com`.
-- [ ] **Per app, the owner** pastes the Apple vendor number and the Play reports bucket on Numbers → Store reports, gives the Play service account "View app information and download bulk reports", and turns on the Play Developer Reporting API in its Google Cloud project. App Analytics needs an Admin key once (to start the reports).
+- [ ] **Per app, the owner** pastes the Apple vendor number on Connect your stores (checked with Apple). Sign in with Google turns on the Play Developer Reporting API, invites the service account with "View app information and download bulk reports" and finds the reports bucket when it can (else one paste). App Analytics needs an Admin key once — dropped on Connect your stores, used once, not kept.
 - [ ] **Credits:** none — Numbers only reads.
 - [ ] **Status: built and tested with recorded files, not verified against a real App Store Connect or Play account** (list in numbers.md).
 
@@ -381,11 +388,11 @@ Once day2 is deployed, an app owner never touches tunnels, addresses or keys for
 | day2 in the app | **day2.** A pull request adds it ("Install day2 field checks"). For an app that wired day2 in by hand with env variables, a pull request sets them in `eas.json` ("Turn on day2 in release builds"). The owner approves. |
 | Privacy notice | **day2**, with a pull request when the notice is in the app's code and the owner says yes. Otherwise the owner copies the drafted section. |
 | App Store / Google Play privacy answers | **The owner**, because Apple and Google don't let other tools fill these forms. **Do it with me** on the Privacy page walks through it one screen at a time, with the page to open, then confirms. |
-| Connecting Expo, App Store Connect, Google Play (once) | **The owner**, step by step on Releases, with the page to open at each step. day2 tries each connection against the app before saving it, and a mistake says what to fix: wrong role, app not invited, API off. |
+| Connecting Expo, App Store Connect, Google Play (once) | **The owner**, on **Connect your stores**: Sign in with Google (day2 does the Google Cloud side: APIs, service account, Pub/Sub, push, Play invite, reports bucket), one Expo robot token, and the Apple checklist (key, vendor number; with paid products the agreement and the In-App Purchase key). Each step is checked against the app, and a mistake says what to fix. See [connect.md](connect.md). |
 | Building and submitting | **day2**, after the connections. The owner approves release notes if they want to. |
 | Earning money (purchases, ads, prices) | **day2** plans it, creates products and prices, writes the code through tickets and verifies every purchase. **The owner** approves the plan and price changes, signs Apple's Paid Apps agreement and Google's payments profile, creates the In-App Purchase key, the Pub/Sub push and an AdMob account (each with **Do it with me** on the Money page), and adds the first in-app purchase to an app version in App Store Connect. |
 | Live settings and experiments | **day2.** One "Native foundations" release; after that, settings and experiments change over the air. The owner picks **day2 decides** or **Ask me first** on the Live page, and can describe experiments in plain words. |
-| Push notifications | **day2** builds them into the app (a ticket) and writes, sends and measures the messages. **The owner** uploads the Android FCM V1 key in EAS once, and approves announcements day2 writes. |
+| Push notifications | **day2** builds them into the app (a ticket), sets up Firebase and the FCM V1 key in EAS after Sign in with Google, and writes, sends and measures the messages. **The owner** approves announcements day2 writes. |
 
 | Store setup (App Store Connect and Google Play forms) | **day2** fills in everything Apple's and Google's APIs allow (links, contact, categories, age rating, App Review details, price and countries, Play details and graphics, previews) and keeps it in sync. **The owner** approves each fact once, enters the App Review demo account, and does the forms with no API (Play's content rating, target audience, ads, app access, declarations, category; both stores' privacy answers) with day2's prepared answers and **Do it with me**, then clicks Done. |
 | Store listing, screenshots, tests, reviews | **day2** researches, writes, frames, uploads and replies. The owner approves listing changes, screenshots, tests and replies on the Store page (or picks **day2 decides**), and enters test results from App Store Connect / the Play Console. Google Play experiments: **Do it with me**. |

@@ -247,7 +247,7 @@ export async function writeAppConfig(app: AppEntry, deps: HostingDeps, mode: "re
     const b = a.ok ? await setEasEnv(deps.run, app.repoPath, token, "preview", staging ?? production) : a;
     easEnv = a.ok && b.ok ? "set" : "failed";
     if (!b.ok) note = `EAS environment variables: ${b.error}`;
-  } else note = note ?? (token ? "EAS environment variables: the app isn't linked to an EAS project yet (after the first build)." : "EAS environment variables: connect Expo on the Releases page.");
+  } else note = note ?? (token ? "EAS environment variables: the app isn't linked to an EAS project yet (after the first build)." : "EAS environment variables: connect Expo on Connect your stores.");
   await deps.store.update(app.id, (s) => {
     s.appConfig = { easJson, easEnv, note };
   });

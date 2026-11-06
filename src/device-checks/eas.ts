@@ -74,7 +74,7 @@ export function runsFromJson(j: RunJson, platforms: DevicePlatform[], seconds: n
 export async function runEasChecks(i: { cwd: string; expoToken: string | null; log?: (t: string) => void }): Promise<{ runs: PlatformRun[]; link: string | null; note: string | null }> {
   const platforms: DevicePlatform[] = ["ios", "android"];
   const skip = (why: string) => ({ runs: platforms.map((p): PlatformRun => ({ platform: p, device: "", status: "skipped", why, failures: [], flows: false, shots: [] , seconds: 0 })), link: null, note: why });
-  if (!i.expoToken) return skip("connect the app's Expo account on the Releases page for device checks in the cloud");
+  if (!i.expoToken) return skip("connect the app's Expo account on Connect your stores for device checks in the cloud");
   const flows = flowDir(i.cwd);
   if (!flows) return skip("the app has no Maestro flows yet");
   const easPath = join(i.cwd, "eas.json");

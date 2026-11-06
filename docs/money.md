@@ -30,9 +30,9 @@ Code: `src/money/`. Console: the app's **Money** page. Design: [self-improving-a
 |---|---|---|
 | Accept Apple's **Paid Apps agreement**, add bank account and tax forms | App Store Connect → Business | Without it nothing can be sold, not even tested in TestFlight. |
 | Set up a **payments profile** | Play Console → Settings → Payments profile | Google pays you through it. |
-| Create the **In-App Purchase key** and paste it on the Money page | App Store Connect → Users and Access → Integrations → In-App Purchase | A separate key from the release key; day2 uses it to look up purchases. Stored encrypted, never shown again. day2 tries it with Apple first. |
-| Set the **server notification URL** (Version 2, production and sandbox) to `https://<day2>/api/store-notify/apple/<app>` | App Store Connect → the app → App Information | Apple tells day2 about every purchase, renewal and refund. "Send a test notification" checks it. |
-| Create the **Pub/Sub topic + push** and enter the topic in Play Console | Google Cloud + Play Console → Monetization setup | Google tells day2 about purchases. day2 creates the topic itself when the service account may; "Send test notification" in Play Console checks it. |
+| Create the **In-App Purchase key** and drop it on Connect your stores (or the Money page) | App Store Connect → Users and Access → Integrations → In-App Purchase | A separate key from the release key; day2 uses it to look up purchases. Stored encrypted, never shown again. day2 tries it with Apple first. |
+| Click **Set it for me** for the **server notification URL** on Connect your stores (or set it by hand: Version 2, production and sandbox, `https://<day2>/api/store-notify/apple/<app>`) | Connect your stores, or App Store Connect → the app → App Information | Apple tells day2 about every purchase, renewal and refund. day2 sets it with the App Store Connect key (`PATCH /v1/apps/{id}`, `subscriptionStatusUrl…`; not yet verified on a real account). "Send a test notification" checks it. |
+| Enter the **Pub/Sub topic** in Play Console | Play Console → Monetization setup | Google tells day2 about purchases. Sign in with Google on Connect your stores creates the topic and the push (with the owner's consent, not the service account's roles); Google's API can't set the topic in Play Console, so the page shows it to paste. "Send test notification" in Play Console checks it. |
 | Add the **first in-app purchase to an app version** | App Store Connect → the next version → In-App Purchases and Subscriptions | Apple's rule: the first in-app purchase is reviewed together with an app version. Each product also needs a review screenshot. |
 | If the plan has ads: create an **AdMob account**, add the app, create one ad unit per placement, enter the ids on the Money page, put AdMob's `app-ads.txt` line on your website | admob.google.com | Ads are paid into your own AdMob account. |
 
@@ -84,4 +84,4 @@ Built from Apple's and Google's documentation and tested with fakes only. Check 
 - Pub/Sub setup by the service account (needs Pub/Sub Admin; older Google Cloud projects may also need the Pub/Sub service agent to create tokens).
 - The Google Mobile Ads data disclosure rows (from Google's guidance, re-check its current page).
 - The `expo-iap` and `react-native-google-mobile-ads` API names in the tickets (the build agent checks the installed versions).
-- AdMob reporting API (not built). App Store notification URL can only be set by hand (no API used).
+- AdMob reporting API (not built). Setting the App Store notification URL through the App Store Connect API (`connect/apple.ts`) is built but not verified.

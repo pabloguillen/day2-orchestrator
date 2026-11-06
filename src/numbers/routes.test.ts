@@ -58,7 +58,7 @@ describe("Numbers API", () => {
     expect(r.body.days).toBe(30);
     expect(r.body.kind).toBe("mobile");
     expect(r.body.sections.map((s: { key: string }) => s.key)).toEqual(["installs", "active", "retention", "engagement", "money", "acquisition", "quality", "experiments"]);
-    expect(find(r.body, "installs.ios")).toMatchObject({ value: null, source: "app_store", missing: { fix: "Connect App Store Connect on Releases", to: "releases" } });
+    expect(find(r.body, "installs.ios")).toMatchObject({ value: null, source: "app_store", missing: { fix: "Connect App Store Connect on Connect your stores", to: "releases" } });
     expect(find(r.body, "newUsers").missing?.reason).toContain("No field data");
     expect(r.body.headline.revenue).toMatchObject({ key: "revenue", value: null });
     expect(r.body.refreshing).toBe(false);
@@ -94,7 +94,7 @@ describe("Numbers API", () => {
     ]);
     expect(find(r.body, "crashFree")).toMatchObject({ value: 1, label: "Crash-free sessions" });
     // Store data from the cache still needs the store connected to count.
-    expect(find(r.body, "installs.ios").missing?.fix).toBe("Connect App Store Connect on Releases");
+    expect(find(r.body, "installs.ios").missing?.fix).toBe("Connect App Store Connect on Connect your stores");
     expect(r.body.headline.newUsers.key).toBe("newUsers");
     expect(r.body.fetchedAt).toBeTruthy();
   });
@@ -113,7 +113,7 @@ describe("Numbers API", () => {
   });
 
   test("connection tests say what to connect first", async () => {
-    expect((await call("POST", `/api/apps/${appId}/numbers/test/apple`)).body).toEqual({ ok: false, message: "App Store Connect isn't connected — connect it on Releases first." });
+    expect((await call("POST", `/api/apps/${appId}/numbers/test/apple`)).body).toEqual({ ok: false, message: "App Store Connect isn't connected — connect it on Connect your stores first." });
     expect((await call("POST", `/api/apps/${appId}/numbers/test/google`)).body.ok).toBe(false);
     expect((await call("POST", `/api/apps/${appId}/numbers/test/amazon`)).status).toBe(404);
   });

@@ -18,6 +18,7 @@ import { AD_IDENTITIES_FILENAME, dbAdIdentities, fileAdIdentities, type AdIdenti
 import { dbFieldStore, dbIngestKeys, fileFieldStore, fileIngestKeys, type FieldStore, type IngestKeys } from "./field-store";
 import { githubEnv } from "./github-app";
 import { dbIntegrations, fileIntegrations, type IntegrationsStore } from "./integrations-store";
+import { dbGoogleSessions, fileGoogleSessions, type GoogleSessionStore } from "./connect/state";
 
 /**
  * Whose data a piece of work touches.
@@ -119,6 +120,13 @@ export function releaseCredentials(): ReleaseCredentialStore {
   if (serverMode() === "accounts") return dbReleaseCredentials(db());
   ensureLocalSecretsKey(join(dataDir(), ".day2-secrets-key"));
   return fileReleaseCredentials(join(dataDir(), ".day2-release-credentials.json"));
+}
+
+/** Owners' short-lived Google access tokens during "Sign in with Google" (connect/state.ts). */
+export function googleSessions(): GoogleSessionStore {
+  if (serverMode() === "accounts") return dbGoogleSessions(db());
+  ensureLocalSecretsKey(join(dataDir(), ".day2-secrets-key"));
+  return fileGoogleSessions(join(dataDir(), ".day2-connect-google-sessions.json"));
 }
 
 /** Conversions already sent to the ad platforms (ads/conversions.ts). */

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +10,19 @@ import { fileFieldStore, type ContractHealth } from "./field-store";
 import { appEvents, contractSignals, describeBroken, fieldSignals, INSTALL_KEY, installItem, pageHealth, placeLibrary, refreshContracts } from "./field-work";
 import type { PipelineDeps } from "./pipeline";
 import type { Batch } from "../packages/sensors/src/types";
+
+// Learning (src/learning/) notes fixed builds in day2's data folder: keep it out of the repo.
+const savedDataDir = process.env.DAY2_DATA_DIR;
+const learningDir = mkdtempSync(join(tmpdir(), "day2-learning-test-"));
+beforeAll(() => {
+  process.env.DAY2_DATA_DIR = learningDir;
+});
+afterAll(() => {
+  if (savedDataDir === undefined) delete process.env.DAY2_DATA_DIR;
+  else process.env.DAY2_DATA_DIR = savedDataDir;
+  rmSync(learningDir, { recursive: true, force: true });
+});
+
 
 const ROOT = mkdtempSync(join(tmpdir(), "day2-fieldwork-"));
 afterAll(() => rmSync(ROOT, { recursive: true, force: true }));

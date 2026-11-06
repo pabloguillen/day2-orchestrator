@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { COMMIT_EXCLUDES } from "../day2-state-files";
 import { dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AgentRunResult } from "../agent";
@@ -380,7 +381,7 @@ type Handler = (b: ExpoBuild, deps: CreateDeps) => Promise<ExpoBuild | null>;
 const git = (deps: CreateDeps, dir: string, ...args: string[]) => deps.run(["git", ...args], { cwd: dir, env: childEnv(null) });
 
 async function commit(deps: CreateDeps, dir: string, message: string): Promise<void> {
-  await git(deps, dir, "add", "-A");
+  await git(deps, dir, "add", "-A", "--", ".", ...COMMIT_EXCLUDES);
   await git(deps, dir, "-c", "user.name=day2", "-c", "user.email=day2@localhost", "commit", "-q", "-m", message);
 }
 

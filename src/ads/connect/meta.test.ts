@@ -28,7 +28,7 @@ describe("meta connect", () => {
       redirect_uri: "https://day2.example/cb",
       state: "st",
       response_type: "code",
-      scope: "ads_management,ads_read,business_management",
+      scope: "ads_management,ads_read,business_management,pages_show_list",
     });
     const i = new URL((await connect.authorizeUrl(app, { state: "st", redirectUri: "https://day2.example/cb", purpose: "identity" })).url);
     expect(i.searchParams.get("scope")).toBe("pages_show_list,pages_read_engagement,instagram_basic,business_management");

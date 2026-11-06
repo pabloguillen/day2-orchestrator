@@ -77,8 +77,8 @@ describe("nothing connected yet", () => {
       expect(n.value).toBeNull();
       expect(n.missing?.reason).toBeTruthy();
     }
-    expect(get(v, "installs.ios").missing).toEqual({ reason: "App Store Connect isn't connected.", fix: "Connect App Store Connect on Releases", to: "releases" });
-    expect(get(v, "installs.android").missing?.fix).toBe("Connect Google Play on Releases");
+    expect(get(v, "installs.ios").missing).toEqual({ reason: "App Store Connect isn't connected.", fix: "Connect App Store Connect on Connect your stores", to: "releases" });
+    expect(get(v, "installs.android").missing?.fix).toBe("Connect Google Play on Connect your stores");
     expect(get(v, "firstOpens").missing?.reason).toContain("No field data");
     expect(get(v, "newUsers").missing?.reason).toContain("No field data");
     expect(get(v, "revenue").missing).toMatchObject({ fix: "Set up how the app earns on Money", to: "money" });

@@ -292,8 +292,8 @@ export function spendBetween(c: CampaignInput, snapshots: NumbersDoc["adSpend"],
 // The view
 // ---------------------------------------------------------------------------
 
-const FIX_ASC = "Connect App Store Connect on Releases";
-const FIX_PLAY = "Connect Google Play on Releases";
+const FIX_ASC = "Connect App Store Connect on Connect your stores";
+const FIX_PLAY = "Connect Google Play on Connect your stores";
 const FIX_IDENTIFY = "day2 adds this with the identify ticket (Growth → Retention)";
 const FIX_FIELD = "Install day2's field checks in the app (the launch checklist on Home)";
 

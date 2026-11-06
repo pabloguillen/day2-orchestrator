@@ -99,7 +99,8 @@ import { forgetApp } from "./learning/runtime";
 import { captureSoon, memoryFor, mirrorBacklogRules, noteDecline, noteOwnerInput, type CreditRunner } from "./memory/runtime";
 import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
-import { ALL_PLATFORMS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
+import { ALL_PLATFORMS, CONNECTS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
+import { redact } from "./ads/http";
 import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnect, recheckIdentities, startConnect } from "./ads/connect-flow";
 import { fromUsd } from "./ads/fx";
 import { FORMAT_LABEL } from "./ads/learnings";
@@ -239,6 +240,8 @@ import { addTreatment, computeSnapshot, loadRetention, RETENTION_FILENAME, reten
 import { features } from "./features";
 import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/routes";
 import { registerMoneyRoutes } from "./money/routes";
+import { purgeGoogleSessions, registerConnectRoutes } from "./connect/routes";
+import { excludeDay2State } from "./day2-state-files";
 import {
   answerBuild,
   beginConnect,
@@ -432,6 +435,8 @@ registerMoneyRoutes({ route, json, httpError: (status, message) => new HttpError
 // ---- Live: settings and experiments over the air (src/live/routes.ts) ----
 registerLiveRoutes(route, { json, requireApp, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
 registerNumbersRoutes({ route, json, requireApp, requireManager, httpError: (status, message) => new HttpError(status, message) });
+// ---- Connect your stores (src/connect/routes.ts) — before the ads callback, whose pattern it shares ----
+registerConnectRoutes({ route, json, requireApp, requireManager, requireOperator, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What day2 knows: app memory (src/memory/routes.ts) ----
 registerMemoryRoutes(route, { json, requireApp, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What works: learning across apps (src/learning/routes.ts) ----
@@ -538,6 +543,7 @@ route("POST", "/api/apps", async (req, _params, t) => {
       rmSync(dir, { recursive: true, force: true });
       throw new HttpError(409, result.reason);
     }
+    excludeDay2State(result.app.repoPath);
     return json({ app: result.app }, { status: 201 });
   }
 
@@ -559,6 +565,7 @@ route("POST", "/api/apps", async (req, _params, t) => {
       rmSync(dir, { recursive: true, force: true });
       throw new HttpError(409, result.reason);
     }
+    excludeDay2State(result.app.repoPath);
     return json({ app: result.app }, { status: 201 });
   }
 
@@ -578,6 +585,7 @@ route("POST", "/api/apps", async (req, _params, t) => {
     appBaseUrl: body.appBaseUrl,
   });
   if (!result.ok) throw new HttpError(409, result.reason);
+  excludeDay2State(result.app.repoPath);
   return json({ app: result.app }, { status: 201 });
 });
 
@@ -695,6 +703,7 @@ route("POST", "/api/apps/upload", async (req, _params, t) => {
       rmSync(destDir, { recursive: true, force: true });
       throw new HttpError(409, result.reason);
     }
+    excludeDay2State(result.app.repoPath);
     return json({ app: result.app }, { status: 201 });
   } catch (err) {
     rmSync(destDir, { recursive: true, force: true });
@@ -2256,7 +2265,13 @@ route("POST", "/api/apps/:id/growth/ads/connect/pending/:pending", async (req, p
       return json({ ...r, ads: await adsResponse(app) });
     }
     if (typeof body.identityRef === "string") {
+      const platform = (await adConnections().pending(params.pending!).catch(() => null))?.platform;
       const r = await chooseIdentity(flowDeps(), params.pending!, app.id, body.identityRef, by);
+      // Meta: the picked Page is also the one paid ads run under (what Platform → Facebook Pages for ads stores).
+      if (platform === "meta") {
+        const pageId = body.identityRef.split(":")[0] ?? "";
+        if (isMetaPageId(pageId)) await adIdentities().set(app.id, pageId, by);
+      }
       return json({ ...r, ads: await adsResponse(app) });
     }
   } catch (err) {
@@ -2515,11 +2530,24 @@ route("GET", "/api/apps/:id/growth/autopilot", async (_req, params, t) => {
     paidAds: {
       // Credits only — never day2's dollar cost.
       monthlyAdCredits: creditsForListUsd(monthlyAdBudgetUsd(monthly)),
-      metaConnected: Boolean(tools.find((x) => x.id === "meta_ads")?.connected) && Boolean(process.env.DAY2_META_AD_ACCOUNT_ID),
+      metaConnected: await metaAdsConnected(app.id, Boolean(tools.find((x) => x.id === "meta_ads")?.connected)),
       pageAssigned: Boolean(page),
     },
   });
 });
+
+/**
+ * Whether paid ads can run on Meta for this app: a Meta ad account connected
+ * for the app or for day2 (Platform → Ad accounts), or the older env-based
+ * account (DAY2_META_AD_ACCOUNT_ID with the Meta tool connected).
+ */
+async function metaAdsConnected(appId: string, metaToolConnected: boolean): Promise<boolean> {
+  if (metaToolConnected && process.env.DAY2_META_AD_ACCOUNT_ID) return true;
+  const store = adConnections();
+  const own = await store.get({ appId }, "meta").catch(() => null);
+  if (own) return true;
+  return Boolean(await store.get("day2", "meta").catch(() => null)) || configuredPlatforms().has("meta");
+}
 
 route("PUT", "/api/apps/:id/growth/autopilot", async (req, params, t) => {
   requireManager(t);
@@ -2641,6 +2669,21 @@ route("PUT", "/api/platform/apps/:appId/ad-identity", async (req, params, t) => 
   if (!isMetaPageId(pageId)) throw new HttpError(400, "A Facebook Page id is a number (Page → About → Page transparency → Page ID).");
   await adIdentities().set(params.appId!, pageId, t.session?.user.login ?? "operator");
   return json({ ok: true });
+});
+
+/** The Facebook Pages (and linked Instagram accounts) day2's own Meta connection can run ads as — to pick one per app. */
+route("GET", "/api/platform/meta/pages", async (_req, _params, t) => {
+  requireOperator(t);
+  const conn = await adConnections().get("day2", "meta");
+  if (!conn) return json({ connected: false, pages: [] });
+  const app = CONNECTS.meta.appCredentials(process.env);
+  if (!app || !CONNECTS.meta.listIdentities) return json({ connected: false, pages: [] });
+  try {
+    const pages = await CONNECTS.meta.listIdentities(app, conn.tokens);
+    return json({ connected: true, pages });
+  } catch (err) {
+    return json({ connected: true, pages: [], error: `Meta didn't list the Pages (${redact((err as Error).message).slice(0, 200)}). Reconnect Meta on Ad accounts so day2 may see your Pages (pages_show_list).` });
+  }
 });
 
 route("DELETE", "/api/platform/apps/:appId/ad-identity", async (_req, params, t) => {
@@ -3281,6 +3324,8 @@ function startBacklogTimer(): void {
     if (running) return;
     running = true;
     try {
+      // Abandoned Google sign-ins (Connect your stores): deleted and revoked after an hour.
+      await purgeGoogleSessions().catch((err: Error) => console.error("[day2-connect] purge failed:", err.message));
       // Field reports past their keep-time go, once a day.
       if (Date.now() - prunedAt > 86_400_000) {
         prunedAt = Date.now();

@@ -86,15 +86,11 @@ Every step records whether it worked and, if not, why in plain words. The page s
 
 ## What the owner connects
 
-On **Releases** (once per app, already needed for releases):
+All on **Connect your stores** ([connect.md](connect.md)), once per app:
 
-1. An **App Store Connect API key**. For installs its role must be *Sales and Reports*, *Finance* or *Admin*. App Analytics (impressions, page views, sessions) needs *Admin* once so day2 can start the reports. After that, the reports keep coming.
-2. A **Google Play service account** key.
-
-On **Numbers → Store reports**:
-
-3. **Apple vendor number**: App Store Connect → Payments and Financial Reports, top left. Press **Test the connection**: day2 reads a sales report from 4 days ago.
-4. **Google Play**: in Play Console → Users and permissions, give the service account **"View app information and download bulk reports"** (installs) and "View app information" (vitals). Turn on the **Google Play Developer Reporting API** in the service account's Google Cloud project. Then go to Play Console → Download reports → Statistics, press **Copy Cloud Storage URI** and paste it. **Test the connection** lists the installs reports for the app's package.
+1. An **App Store Connect API key** (the one releases use). For installs its role must be *Sales and Reports*, *Finance*, *App Manager* or *Admin*. App Analytics (impressions, page views, sessions) needs an *Admin* key once so day2 can start the reports: the owner drops one there, day2 uses it for that one call and doesn't keep it. After that, the reports keep coming.
+2. **Apple vendor number**: App Store Connect → Payments and Financial Reports, top left (Apple's API can't look it up). day2 reads a sales report from 4 days ago before it keeps the number.
+3. **Google Play**: Sign in with Google turns on the **Play Developer Reporting API**, creates the service account and invites it with **"View app information and download bulk reports"** (with the Play Console address). It finds the reports bucket by trying `pubsite_prod_rev_<developer id>` with the owner's token; when that isn't it, the owner pastes the **Cloud Storage URI** once (Play Console → Download reports → Statistics → Copy Cloud Storage URI). The Numbers settings API and **Test the connection** still work as before.
 
 For day2's own numbers: first opens need the **fixed device id** (Privacy), and active users and retention need the app to **identify its users** (day2 adds both with its tickets).
 
