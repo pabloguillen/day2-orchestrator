@@ -241,6 +241,8 @@ import { features } from "./features";
 import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/routes";
 import { registerMoneyRoutes } from "./money/routes";
 import { purgeGoogleSessions, registerConnectRoutes } from "./connect/routes";
+import { registerSocialRoutes, serveMediaLink, socialServerSetup } from "./social/routes";
+import { connectMetaPage } from "./social/runtime";
 import { excludeDay2State } from "./day2-state-files";
 import {
   answerBuild,
@@ -437,6 +439,8 @@ registerLiveRoutes(route, { json, requireApp, runWithCredits, httpError: (status
 registerNumbersRoutes({ route, json, requireApp, requireManager, httpError: (status, message) => new HttpError(status, message) });
 // ---- Connect your stores (src/connect/routes.ts) — before the ads callback, whose pattern it shares ----
 registerConnectRoutes({ route, json, requireApp, requireManager, requireOperator, actorName, httpError: (status, message) => new HttpError(status, message) });
+// ---- Social posts on the owner's Instagram, Facebook Page and TikTok (src/social/routes.ts) — also before the ads callback ----
+registerSocialRoutes(route, { json, requireApp, requireManager, actorName, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
 // ---- What day2 knows: app memory (src/memory/routes.ts) ----
 registerMemoryRoutes(route, { json, requireApp, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What works: learning across apps (src/learning/routes.ts) ----
@@ -2265,12 +2269,15 @@ route("POST", "/api/apps/:id/growth/ads/connect/pending/:pending", async (req, p
       return json({ ...r, ads: await adsResponse(app) });
     }
     if (typeof body.identityRef === "string") {
-      const platform = (await adConnections().pending(params.pending!).catch(() => null))?.platform;
+      const pend = await adConnections().pending(params.pending!).catch(() => null);
+      const platform = pend?.platform;
       const r = await chooseIdentity(flowDeps(), params.pending!, app.id, body.identityRef, by);
       // Meta: the picked Page is also the one paid ads run under (what Platform → Facebook Pages for ads stores).
       if (platform === "meta") {
         const pageId = body.identityRef.split(":")[0] ?? "";
         if (isMetaPageId(pageId)) await adIdentities().set(app.id, pageId, by);
+        // The same sign-in asked for posting too: the Page (and its Instagram) are ready for Social.
+        if (isMetaPageId(pageId) && pend?.tokens?.scopes?.some((x) => x === "pages_manage_posts" || x === "instagram_content_publish")) await connectMetaPage(app.id, pend.tokens, pageId, by).catch(() => null);
       }
       return json({ ...r, ads: await adsResponse(app) });
     }
@@ -2320,15 +2327,16 @@ route(
     const url = new URL(req.url);
     const console = authConfig().consoleUrl;
     if (!isPlatform(params.platform)) return Response.redirect(`${console}/`, 302);
-    const pageOf = (scope: "day2" | { appId: string } | undefined) => (!scope ? "/" : scope === "day2" ? "/operator" : `/apps/${encodeURIComponent(scope.appId)}/growth/ads`);
+    const pageOf = (scope: "day2" | { appId: string } | undefined, purpose?: string) =>
+      !scope ? "/" : scope === "day2" ? "/operator" : purpose === "social" ? `/apps/${encodeURIComponent(scope.appId)}/social` : `/apps/${encodeURIComponent(scope.appId)}/growth/ads`;
     // Where the person started, so an error lands back on the same page.
     const q = url.searchParams;
     const started = q.get("state") ? await adConnections().pendingByState(q.get("state")!) : q.get("p") ? await adConnections().pending(q.get("p")!) : null;
     try {
       const r = await finishAdConnect(flowDeps(), { platform: params.platform, query: Object.fromEntries(q), callbackUrl: adsCallbackUrl(params.platform) });
-      return Response.redirect(`${console}${pageOf(r.scope)}?connect=${encodeURIComponent(r.pendingId)}&platform=${params.platform}`, 302);
+      return Response.redirect(`${console}${pageOf(r.scope, r.purpose)}?connect=${encodeURIComponent(r.pendingId)}&platform=${params.platform}`, 302);
     } catch (err) {
-      return Response.redirect(`${console}${pageOf(started?.scope)}?platform=${params.platform}&connectError=${encodeURIComponent((err as Error).message.slice(0, 300))}`, 302);
+      return Response.redirect(`${console}${pageOf(started?.scope, started?.purpose)}?platform=${params.platform}&connectError=${encodeURIComponent((err as Error).message.slice(0, 300))}`, 302);
     }
   },
   { public: true },
@@ -2361,6 +2369,8 @@ async function platformAdsResponse() {
       { id: "chromium", ok: Boolean(chromiumPath()), label: "Chromium, to make images and recordings", detail: chromiumPath() ? "installed" : "missing" },
       { id: "creatify", ok: Boolean(videoProviders().creatify), label: "Creatify, for AI presenter videos (optional)", detail: videoProviders().creatify ? "connected" : "CREATIFY_API_ID, CREATIFY_API_KEY" },
     ],
+    /** Organic posting (src/social/): what's missing on this server, and the redirect URIs to register. */
+    social: socialServerSetup(),
   };
 }
 
@@ -2459,15 +2469,18 @@ route(
   { public: true },
 );
 
-/** Ad images and videos, by unguessable id: ad platforms fetch them from here. */
+/** Ad images and videos, by unguessable id: ad platforms fetch them from here. Social post media only through its expiring link. */
 route(
   "GET",
   "/api/assets/:file",
   async (req, params) => {
+    // Social post media: an expiring link (src/social/), never the asset id itself.
+    const social = await serveMediaLink(req, params.file ?? "");
+    if (social) return social;
     const id = (params.file ?? "").replace(/\.[a-z0-9]+$/, "");
     if (!ASSET_ID_RE.test(id)) throw new HttpError(404, "Not found.");
     const a = await assetStore().get(id);
-    if (!a || !existsSync(a.path)) throw new HttpError(404, "Not found.");
+    if (!a || !existsSync(a.path) || a.purpose.startsWith("social:")) throw new HttpError(404, "Not found.");
     const f = Bun.file(a.path);
     const size = f.size;
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");

@@ -200,7 +200,8 @@ export function graphMessage(err: PlatformError): { text: string; transient: boo
   return { text: raw, transient: false };
 }
 
-export type GraphCall = <T>(what: string, method: "GET" | "POST" | "DELETE", path: string, opts?: { form?: Record<string, unknown>; query?: RequestInit2["query"] }) => Promise<T>;
+/** `retries`: attempts on 429/5xx/network errors (default 3); 1 = none — for calls that create something and must never repeat on their own. */
+export type GraphCall = <T>(what: string, method: "GET" | "POST" | "DELETE", path: string, opts?: { form?: Record<string, unknown>; query?: RequestInit2["query"]; retries?: number }) => Promise<T>;
 
 /**
  * Graph API calls with one token: OAuth header (never in the URL),
@@ -210,7 +211,7 @@ export type GraphCall = <T>(what: string, method: "GET" | "POST" | "DELETE", pat
 export function graphClient(o: { token: string; appSecret?: string; apiVersion: string }, deps: PlatformDeps): GraphCall {
   const base = `${GRAPH}/${o.apiVersion}`;
   const proof = o.appSecret ? createHmac("sha256", o.appSecret).update(o.token).digest("hex") : undefined;
-  return async <T>(what: string, method: "GET" | "POST" | "DELETE", path: string, opts: { form?: Record<string, unknown>; query?: RequestInit2["query"] } = {}): Promise<T> => {
+  return async <T>(what: string, method: "GET" | "POST" | "DELETE", path: string, opts: { form?: Record<string, unknown>; query?: RequestInit2["query"]; retries?: number } = {}): Promise<T> => {
     const form = opts.form ? Object.fromEntries(Object.entries(opts.form).filter(([, v]) => v !== undefined).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)])) : undefined;
     try {
       return await request<T>("meta", deps, `${base}/${path}`, {
@@ -218,6 +219,7 @@ export function graphClient(o: { token: string; appSecret?: string; apiVersion: 
         headers: { authorization: `OAuth ${o.token}` },
         form,
         query: { ...opts.query, appsecret_proof: proof },
+        ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
       });
     } catch (err) {
       if (!(err instanceof PlatformError)) throw err;

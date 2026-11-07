@@ -41,7 +41,7 @@ export type ProductType = (typeof PRODUCT_TYPES)[number];
 export const PLATFORMS = ["ios", "android", "both", "web"] as const;
 export type Platform = (typeof PLATFORMS)[number];
 
-export const METRICS = ["d7_retention", "conversion", "revenue_per_user", "store_conversion", "return_rate", "click_rate", "install_cost"] as const;
+export const METRICS = ["d7_retention", "conversion", "revenue_per_user", "store_conversion", "return_rate", "click_rate", "install_cost", "engagement_rate"] as const;
 export type Metric = (typeof METRICS)[number];
 
 export const METRIC_LABEL: Record<Metric, string> = {
@@ -52,6 +52,7 @@ export const METRIC_LABEL: Record<Metric, string> = {
   return_rate: "users coming back",
   click_rate: "click rate",
   install_cost: "cost per install",
+  engagement_rate: "engagement per view",
 };
 
 /** What a change's effect depends on — how much a result from another category says about this one (pattern-transferability.ts' mechanismDependsOn). */
@@ -90,6 +91,10 @@ export const CHANGE_KINDS = {
   "retention.lapsing": { label: "Treatment for lapsing users", depends: "category" },
   "acquisition.creative_format": { label: "Ad creative format", depends: "category" },
   "acquisition.channel": { label: "Ad channel", depends: "category" },
+  "social.format": { label: "Social post format", depends: "category" },
+  "social.hook": { label: "Social post opening", depends: "category" },
+  "social.topic": { label: "Social post topic", depends: "category" },
+  "social.post_time": { label: "Time of day to post", depends: "category" },
   "ui.copy": { label: "Wording in the app", depends: "category" },
   "ui.layout": { label: "Screen layout", depends: "little" },
   "other": { label: "Other change", depends: "category" },

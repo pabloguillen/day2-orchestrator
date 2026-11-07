@@ -31,7 +31,10 @@ describe("meta connect", () => {
       scope: "ads_management,ads_read,business_management,pages_show_list",
     });
     const i = new URL((await connect.authorizeUrl(app, { state: "st", redirectUri: "https://day2.example/cb", purpose: "identity" })).url);
-    expect(i.searchParams.get("scope")).toBe("pages_show_list,pages_read_engagement,instagram_basic,business_management");
+    // The Page sign-in also asks for organic posting and its results (src/social/).
+    expect(i.searchParams.get("scope")).toBe("pages_show_list,pages_read_engagement,instagram_basic,business_management,pages_manage_posts,instagram_content_publish,instagram_manage_insights,read_insights");
+    const s = new URL((await connect.authorizeUrl(app, { state: "st", redirectUri: "https://day2.example/cb", purpose: "social" })).url);
+    expect(s.searchParams.get("scope")).toBe(i.searchParams.get("scope"));
     expect(i.toString()).not.toContain("appsecret");
   });
 

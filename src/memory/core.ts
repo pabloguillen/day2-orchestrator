@@ -268,6 +268,7 @@ const KIND_WEIGHT: Record<Purpose, Record<MemoryKind, number>> = {
   messages: { audience: 1, preference: 1, do_not: 1, fact: 0.8, rule: 0.7, tech: 0.1 },
   create: { preference: 1, audience: 1, fact: 0.9, rule: 0.8, do_not: 0.8, tech: 0.8 },
   answer: { fact: 1, rule: 0.9, preference: 0.8, do_not: 0.8, tech: 0.8, audience: 0.7 },
+  social: { audience: 1, do_not: 1, preference: 1, rule: 0.8, fact: 0.8, tech: 0.1 },
 };
 
 const words = (s: string) => new Set(norm(s).split(" ").filter((w) => w.length > 3));

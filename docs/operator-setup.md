@@ -27,7 +27,7 @@ weeks. You can do the rest while you wait.
 |---|---|---|---|
 | 1 | Google sign-in client for "Connect your stores" | 20 min | Verification: weeks |
 | 2 | Meta developer app (gora8) | 30 min | Business verification + App Review: days to weeks |
-| 3 | TikTok developer app | 15 min | 2–3 business days |
+| 3 | TikTok developer apps (ads, and posting) | 15 min + 15 min | 2–3 business days; posting audit: days to weeks |
 | 4 | day2's own ad accounts | 10 min | none |
 | 5 | Supabase | done | — |
 | 6 | Optional: Creatify, Runway, YouTube | 5 min each | none |
@@ -181,7 +181,10 @@ You already have the app "gora8". These steps finish it.
 ### 2d. Products and the redirect URL
 11. In the app, open **Use cases** (or **Add product**). Add **Marketing API**
     (it may be called "Create & manage ads with Marketing API"), and
-    **Facebook Login for Business**.
+    **Facebook Login for Business**. For Social (posting on customers'
+    Instagram and Facebook Page, [social.md](social.md)) also add
+    **Instagram** ("Manage messaging & content on Instagram", the API setup
+    *with Facebook Login*) and **Pages** ("Manage everything on your Page").
 12. In the left menu, open **Facebook Login for Business** → **Settings**.
 13. Under **Client OAuth settings**, make sure **Client OAuth login** and
     **Web OAuth login** are on.
@@ -208,17 +211,46 @@ configuration ID.
     phone), and upload the document if asked.
 20. Submit. Meta answers within a few days.
 
-### 2f. App Review for the ad permissions (after business verification)
+### 2f. App Review for the ad and posting permissions (after business verification)
 21. In the developer app, open **App Review** → **Permissions and features**.
-22. For each of these, click **Request advanced access**:
-    - `ads_management` (create and change ads)
-    - `ads_read` (read ad results)
-    - `business_management` (find the ad accounts and Pages a person can use)
-    - `pages_show_list` (list a customer's Pages, to pick one per app)
-    - for the Page picker also: `pages_read_engagement`, `instagram_basic`
+22. For each of these, click **Request advanced access**. The line after each
+    is the usage justification, ready to paste:
+    - `ads_management` — gora8 creates, changes, pauses and stops ad
+      campaigns, ad sets and ads in the ad account the business connected,
+      within the budget its owner set.
+    - `ads_read` — gora8 reads results (spend, impressions, clicks,
+      conversions) of the ads it runs, to show them to the business owner and
+      move budget to what works.
+    - `business_management` — gora8 lists the ad accounts and Facebook Pages
+      the signed-in person can use, so they can pick the one for their app,
+      and requests access to the Page their ads run as.
+    - `pages_show_list` — gora8 lists the Pages the signed-in person manages,
+      so they can pick the Page for their app (for its ads and its posts).
+    - `pages_read_engagement` — gora8 reads the Page's name, its linked
+      Instagram account and the reactions, comments and shares on the posts it
+      published for the business, to show results and improve the next posts.
+    - `pages_manage_posts` — gora8 publishes photo and Reel posts on the
+      business's own Facebook Page: only posts the owner approved in gora8 (or
+      allowed to go out on their own).
+    - `instagram_basic` — gora8 reads the linked Instagram professional
+      account's id and username, to show which account it posts to and to
+      find the posts it published.
+    - `instagram_content_publish` — gora8 publishes Reels, feed posts and
+      Stories on the business's own Instagram professional account: only posts
+      the owner approved in gora8 (or allowed to go out on their own).
+    - `instagram_manage_insights` — gora8 reads reach, views, likes,
+      comments, shares and saves of the posts it published, 1, 3 and 7 days
+      after posting, to show the owner how they did and make better posts.
+    - `read_insights` — gora8 reads view counts of the Facebook Page posts it
+      published, to show the owner how they did and make better posts.
 23. For each, Meta asks how you use it and for a **screen recording**. Record
-    day2's console: Platform → Ad accounts → Connect Meta → Meta's consent
-    screen → back in day2 → choosing the ad account and the Page.
+    day2's console:
+    - Ads: Platform → Ad accounts → Connect Meta → Meta's consent screen →
+      back in day2 → choosing the ad account and the Page.
+    - Posting: an app → **Social** → Connect with Facebook → Meta's consent
+      screen → picking the Page → a post waiting for approval (preview, edit
+      the caption, Approve) → the post on Instagram and the Page → its results
+      on the Social page the next day.
 24. Submit. Until approval, only people with a role on the app (you, and
     anyone you add under **App roles**) can connect. That's enough for Dotty.
 
@@ -263,6 +295,56 @@ configuration ID.
     TIKTOK_APP_SECRET=
     ```
 12. Save.
+
+### 3d. TikTok Content Posting API (posting on customers' TikTok)
+
+This is a **different portal and a different app** from 3a–3c: the Marketing
+API (ads) lives on business-api.tiktok.com; posting videos to a customer's own
+TikTok is the **Content Posting API** on developers.tiktok.com.
+
+13. Go to **https://developers.tiktok.com** and log in (a TikTok account;
+    use gora8's). Open **Manage apps** → **Connect an app** (or **Create
+    app**). Choose an organization for gora8 if asked.
+14. **Basic information:** app name `gora8`, icon, category (e.g. Business /
+    Productivity), description e.g. "gora8 makes social posts for small app
+    businesses and, with the owner's approval, publishes them on the owner's
+    own TikTok account, then shows how they did." Terms URL
+    `https://gora8.com/terms`, privacy URL `https://gora8.com/privacy`.
+    Platform: **Web**, website `https://gora8.com`.
+15. **Add products:** **Login Kit** and **Content Posting API**. In Content
+    Posting API, turn on **Direct Post**.
+16. **Scopes:** `user.info.basic`, `video.publish`, `video.upload`,
+    `video.list`.
+17. **Login Kit → Redirect URI** (web), exactly:
+    ```
+    https://app.gora8.com/api/ads/connect/callback/tiktokposts
+    ```
+18. **Sandbox** (to test with Dotty before the audit): add Dotty's TikTok
+    account as a target user. Then **Submit for review** for the app itself;
+    TikTok checks the app details and the demo.
+19. Copy **Client key** and **Client secret**, and add to `.env`:
+    ```
+    TIKTOK_CONTENT_CLIENT_KEY=
+    TIKTOK_CONTENT_CLIENT_SECRET=
+    ```
+20. **Audit for public posts (after the app is approved).** Until TikTok
+    audits the app, every post is private ("Only me"), at most 5 creators can
+    post in 24 hours, and the posting account must be private. The console
+    says "TikTok audit pending: posts are private". To apply: in the app's
+    Content Posting API page, open **Apply for audit** (Direct Post). TikTok
+    wants:
+    - a screen recording of the full flow in gora8: Social → Connect TikTok →
+      TikTok's consent screen → a post waiting for approval with the preview,
+      the account name shown, the visibility dropdown with nothing picked,
+      Comment/Duet/Stitch off by default, the commercial content toggle with
+      "Your brand" / "Branded content" and the declaration text, editable
+      caption → Approve → the post on TikTok;
+    - that the app posts only original content the creator made with the
+      app and approved (gora8: the owner approves every TikTok post, even with
+      "Posts go out on their own" on);
+    - expected numbers: posts per creator per day (gora8 sends at most 2) and
+      creators per day;
+    - the privacy policy and terms URLs.
 
 ---
 
@@ -363,5 +445,8 @@ day2 reads `.env` only when it starts.
 3. **Expo:** follow the step and paste the robot token.
 4. **Apple:** go through the checklist.
 5. **Meta:** pick Dotty's Facebook Page.
+6. **Social:** Dotty → Social → Connect with Facebook (pick the Page with
+   Dotty's Instagram account) and Connect TikTok, then **Make a post now**
+   and approve it ([social.md](social.md), "First run with Dotty").
 
 Send me every error or screenshot (secrets covered).

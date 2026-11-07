@@ -17,7 +17,7 @@ import { CHANGE_KINDS, isCategory, isChangeKind, METRICS, nBucket, PLATFORMS, PR
  */
 
 export type Verdict = "better" | "worse" | "no_clear_change";
-export type OutcomeSource = "live" | "money" | "messages" | "store" | "retention" | "ads";
+export type OutcomeSource = "live" | "money" | "messages" | "store" | "retention" | "ads" | "social";
 
 export type Outcome = {
   id: string;
@@ -77,7 +77,7 @@ export function hashWith(salt: string, value: string): string {
   return createHmac("sha256", salt).update(value).digest("hex").slice(0, 24);
 }
 
-const SHARE_METRICS: ReadonlySet<Metric> = new Set<Metric>(["d7_retention", "conversion", "store_conversion", "return_rate", "click_rate"]);
+const SHARE_METRICS: ReadonlySet<Metric> = new Set<Metric>(["d7_retention", "conversion", "store_conversion", "return_rate", "click_rate", "engagement_rate"]);
 const Z90 = 1.6449;
 
 /** Inverse of the standard normal CDF (Acklam's approximation). */

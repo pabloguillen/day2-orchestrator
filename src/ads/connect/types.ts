@@ -37,7 +37,8 @@ export type AdAccountChoice = { id: string; name: string; currency: string; canS
 /** A page / company page / profile / handle the connecting person can run ads as. */
 export type IdentityChoice = { ref: string; name: string; kind: string };
 
-export type Purpose = "account" | "identity";
+/** "social": the app owner's Facebook sign-in for organic posting (src/social/) — Meta only. */
+export type Purpose = "account" | "identity" | "social";
 
 export interface PlatformConnect {
   platform: PlatformId;

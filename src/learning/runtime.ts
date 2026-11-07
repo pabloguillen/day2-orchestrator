@@ -188,7 +188,7 @@ export async function recordBet(
 // Using it
 // ---------------------------------------------------------------------------
 
-export type Module = "live" | "money" | "messages" | "store" | "retention" | "create" | "growth";
+export type Module = "live" | "money" | "messages" | "store" | "retention" | "create" | "growth" | "social";
 
 const MODULE_KINDS: Record<Module, (k: ChangeKind) => boolean> = {
   live: (k) => /^(onboarding|paywall|ui|push\.permission|store\.review)/.test(k),
@@ -198,6 +198,7 @@ const MODULE_KINDS: Record<Module, (k: ChangeKind) => boolean> = {
   retention: (k) => /^retention\./.test(k),
   create: (k) => k !== "other",
   growth: (k) => /^acquisition\./.test(k),
+  social: (k) => /^social\./.test(k),
 };
 
 export type Worked = { kind: ChangeKind; text: string; pHelps: number; apps: number };

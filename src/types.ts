@@ -79,6 +79,9 @@ export type AutonomyAreaConfig = {
 export type AutonomyConfig = {
   defaultLevel: AutonomyLevel;
   areas: AutonomyAreaConfig[];
+  /** What day2 may do on its own outside the code: "auto" = social posts go
+   * out without asking (src/social/). Absent = ask first (the default). */
+  channels?: { socialPosts?: "ask" | "auto" };
 };
 
 /** The subset of a pipeline run's state that autonomy evaluation needs. */

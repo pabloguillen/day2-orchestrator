@@ -36,7 +36,7 @@ export async function startConnect(d: FlowDeps, o: { platform: PlatformId; scope
 }
 
 /** The platform sent the person back. Returns the pending id and where to send the person in the console. */
-export async function finishConnect(d: FlowDeps, o: { platform: PlatformId; query: Record<string, string>; callbackUrl: string }): Promise<{ pendingId: string; scope: Scope; appId: string | null }> {
+export async function finishConnect(d: FlowDeps, o: { platform: PlatformId; query: Record<string, string>; callbackUrl: string }): Promise<{ pendingId: string; scope: Scope; appId: string | null; purpose: Purpose }> {
   const p = o.query.state ? await d.store.pendingByState(o.query.state) : o.query.p ? await d.store.pending(o.query.p) : null;
   if (!p || p.platform !== o.platform) throw new Error("That sign-in expired — start connecting again.");
   if (o.query.error) throw new Error(`${platformInfo(o.platform).name} said: ${o.query.error_description ?? o.query.error}`);
@@ -45,7 +45,7 @@ export async function finishConnect(d: FlowDeps, o: { platform: PlatformId; quer
   const redirectUri = o.platform === "x" ? `${o.callbackUrl}?p=${p.id}` : o.callbackUrl;
   const tokens = await c.exchange(app, { query: o.query, redirectUri, ...(p.pending ? { pending: p.pending } : {}) }, d.platformDeps);
   await d.store.setPendingTokens(p.id, tokens);
-  return { pendingId: p.id, scope: p.scope, appId: p.appId };
+  return { pendingId: p.id, scope: p.scope, appId: p.appId, purpose: p.purpose };
 }
 
 export type Choices = { platform: PlatformId; purpose: Purpose; scope: "day2" | "app"; accounts: AdAccountChoice[]; identities: IdentityChoice[] };

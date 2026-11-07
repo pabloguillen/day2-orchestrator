@@ -8,7 +8,7 @@ import { researchCompetitorDistributionAngles } from "./competitor-feed";
 import { authConfig } from "./auth";
 import { connectorMcpServers, findConnector } from "./connectors";
 import { authorize, CreditsError } from "./credits";
-import { autopilotPass, type AutopilotDeps } from "./growth-autopilot";
+import { AUTOPILOT_FILENAME, autopilotPass, loadAutopilot, type AutopilotDeps } from "./growth-autopilot";
 import { benchmarkGrowthFeatures } from "./growth-optimizer";
 import { GROWTH_CONFIG_FILENAME, loadGrowthConfig } from "./growth-config";
 import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
@@ -34,6 +34,7 @@ import { moneyPassDeps } from "./money/run";
 import { storeDeps } from "./store-listing/deps";
 import { numbersDaily } from "./numbers/run";
 import { captureMemory, chargedRunner } from "./memory/runtime";
+import { socialPassFor } from "./social/runtime";
 
 /**
  * Runs the growth autopilot (growth-autopilot.ts) for every app, each as its
@@ -197,6 +198,15 @@ export async function autopilotAll(): Promise<void> {
         if (did.length) console.log(`[day2-autopilot] ${app.name}: ${did.join(", ")}`);
       } catch (err) {
         console.error(`[day2-autopilot] ${app.name}: ${(err as Error).message}`);
+      }
+      // Social: make posts when due (autopilot on), publish approved ones at their time, read results.
+      try {
+        const on = loadAutopilot(resolve(app.repoPath, AUTOPILOT_FILENAME)).enabled;
+        const r = await socialPassFor(tenant, app, { make: on });
+        const did = r && [r.made.length && `${r.made.length} new post${r.made.length === 1 ? "" : "s"}`, r.publish?.published.length && `${r.publish.published.length} published`, r.publish?.failed.length && `${r.publish.failed.length} failed`, r.feedback?.collected && `${r.feedback.collected} results read`].filter(Boolean);
+        if (did?.length) console.log(`[day2-social] ${app.name}: ${did.join(", ")}`);
+      } catch (err) {
+        console.error(`[day2-social] ${app.name}: ${(err as Error).message}`);
       }
       // Numbers: what the stores reported, once a day (read-only; runs even with the autopilot off).
       try {

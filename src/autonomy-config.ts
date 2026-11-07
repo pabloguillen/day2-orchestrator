@@ -115,3 +115,12 @@ export function renderConfigSummary(config: AutonomyConfig): string {
   }
   return lines.join("\n");
 }
+
+/** "Posts go out on their own" (src/social/): off unless the owner turned it on. */
+export function socialAutoPublish(config: AutonomyConfig): boolean {
+  return config.channels?.socialPosts === "auto";
+}
+
+export function setSocialAutoPublish(config: AutonomyConfig, on: boolean): AutonomyConfig {
+  return { ...config, channels: { ...(config.channels ?? {}), socialPosts: on ? "auto" : "ask" } };
+}

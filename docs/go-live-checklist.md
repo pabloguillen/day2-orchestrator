@@ -37,8 +37,13 @@ None of these is done. The details are in the sections below.
       deploying.md §10).
 - [ ] **Reviews that take weeks**, started early: Google's verification of
       the "Connect your stores" sign-in, Meta's Business verification and
-      App Review, TikTok's Marketing API approval
-      ([operator-setup.md](operator-setup.md) steps 1h, 2e–2f, 3).
+      App Review (now including the posting permissions for Social), TikTok's
+      Marketing API approval, and TikTok's Content Posting API app review and
+      audit (without the audit, TikTok posts stay private)
+      ([operator-setup.md](operator-setup.md) steps 1h, 2e–2f, 3, 3d).
+- [ ] **Social posting run once against real accounts** (Dotty): an
+      Instagram Reel, a Facebook post and a TikTok video published, results
+      read after 24 h ([social.md](social.md), "First run with Dotty").
 
 ## 1. Decide the address
 
@@ -175,6 +180,17 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       **What day2 knows** (under "You said no to", and as a note to confirm).
 - [ ] As an operator, open **Platform → What works across apps** and see the
       library (empty at first) and the build playbook.
+
+## 6b. Social posts
+
+- [ ] Migration `026_social.sql` ran.
+- [ ] Env: `TIKTOK_CONTENT_CLIENT_KEY`, `TIKTOK_CONTENT_CLIENT_SECRET` (Meta
+      uses the ads app's `META_APP_ID` / `META_APP_SECRET`).
+- [ ] Redirect URIs registered: `https://<domain>/api/ads/connect/callback/meta`
+      (Meta) and `https://<domain>/api/ads/connect/callback/tiktokposts`
+      (TikTok Login Kit). Platform → Ad accounts lists anything missing.
+- [ ] Privacy page says day2 publishes posts and reads post statistics on
+      the owner's connected accounts (site/privacy.html, done).
 
 ## 7. For each app in the stores: the Setup tab
 

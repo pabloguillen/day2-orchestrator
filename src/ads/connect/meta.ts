@@ -1,6 +1,7 @@
 import { request } from "../http";
 import { PlatformError, type PlatformDeps } from "../types";
 import { describeAccount, graphAll, graphClient, graphMessage, GRAPH, META_API_VERSION, normalizeAccountId, type MetaCreds } from "../platforms/meta";
+import { SOCIAL_SCOPES } from "../../social/meta";
 import type { AdAccountChoice, AppCredentials, IdentityChoice, PlatformConnect, Tokens } from "./types";
 
 /**
@@ -12,13 +13,21 @@ import type { AdAccountChoice, AppCredentials, IdentityChoice, PlatformConnect, 
  * - purpose "identity": the app owner picks the Facebook Page (and linked
  *   Instagram account) the ads show as; day2's business then requests
  *   access to that Page (Business Management API, client_pages), which the
- *   owner approves in Meta Business Suite.
+ *   owner approves in Meta Business Suite. The same sign-in also grants
+ *   organic posting on the Page and its Instagram account (and reading the
+ *   posts' results) — purpose "social" is that sign-in started from the
+ *   Social page (src/social/).
  */
 
+// The owner's Page sign-in also asks for organic posting and its results
+// (src/social/meta.ts SOCIAL_SCOPES), so one Facebook sign-in covers the
+// Page ads show as and the posts day2 publishes for the app.
+const IDENTITY_SCOPES = [...new Set(["pages_show_list", "pages_read_engagement", "instagram_basic", "business_management", ...SOCIAL_SCOPES])];
 const SCOPES = {
   // pages_show_list: after connecting, the Pages (and their Instagram accounts) can be picked per app.
   account: ["ads_management", "ads_read", "business_management", "pages_show_list"],
-  identity: ["pages_show_list", "pages_read_engagement", "instagram_basic", "business_management"],
+  identity: IDENTITY_SCOPES,
+  social: IDENTITY_SCOPES,
 } as const;
 
 /** Tasks day2 asks for on the app's Page: run ads as it and read their results. */

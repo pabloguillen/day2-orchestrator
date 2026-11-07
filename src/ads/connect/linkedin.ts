@@ -21,6 +21,8 @@ const ID = "linkedin" as const;
 const SCOPES: Record<Purpose, string[]> = {
   account: ["rw_ads", "r_ads_reporting", "w_organization_social", "rw_conversions"],
   identity: ["rw_organization_admin"],
+  // Organic posting is Meta/TikTok only (src/social/); never started for LinkedIn.
+  social: ["rw_organization_admin"],
 };
 const CAMPAIGN_ROLES = ["ACCOUNT_BILLING_ADMIN", "ACCOUNT_MANAGER", "CAMPAIGN_MANAGER"];
 const PAGE_ROLES_FOR_ADS = ["ADMINISTRATOR", "DIRECT_SPONSORED_CONTENT_POSTER"];

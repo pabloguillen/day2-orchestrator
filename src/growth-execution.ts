@@ -92,6 +92,12 @@ export type ChannelExecutionOptions = {
    * earned track record; a real ad spend or a real public post is neither,
    * yet, for this system. */
   allowLiveAction?: boolean;
+  /** The real external call for this action, when one exists. Wired for
+   * `social_content` (src/social/publish.ts publishes on the owner's own
+   * Instagram / Facebook Page / TikTok); every other channel still has none
+   * and reports that honestly. Runs only after every gate above passed and
+   * `allowLiveAction` is true. */
+  liveAction?: () => Promise<{ externalRef: string }>;
 };
 
 export type ChannelExecutionResult =
@@ -145,7 +151,15 @@ export async function executeChannelAction(opts: ChannelExecutionOptions): Promi
     return { status: "blocked_by_unconnected_account", capability: opts.requiredCapability };
   }
 
-  const spendDecision = evaluateSpend(opts.spendRequest, opts.budget, opts.ledger);
+  // A free organic action (e.g. a social post on the owner's own account)
+  // spends nothing: only the kill switch applies — evaluateSpend refuses
+  // non-positive amounts by design, since every *spend* must be positive.
+  const spendDecision: SpendDecision =
+    opts.spendRequest.amountUsd === 0
+      ? opts.budget.killSwitch
+        ? { allowed: false, reason: "Kill switch is on — all growth actions are paused.", remainingMonthlyUsd: opts.budget.monthlyBudgetUsd, remainingDailyUsd: null }
+        : { allowed: true, reason: "Free organic action — nothing is spent.", remainingMonthlyUsd: opts.budget.monthlyBudgetUsd, remainingDailyUsd: null }
+      : evaluateSpend(opts.spendRequest, opts.budget, opts.ledger);
   if (!spendDecision.allowed) {
     return { status: "blocked_by_budget", spendDecision };
   }
@@ -174,28 +188,31 @@ export async function executeChannelAction(opts: ChannelExecutionOptions): Promi
 }
 
 /**
- * The one real external call this whole plan gates behind `allowLiveAction`
- * — and, per the user's explicit "no real money, no real public-facing
- * action yet," deliberately not implemented in this pass. Unlike
- * `allowLiveSpend` (kept as a pure, unimplemented type-level seam per the
- * plan's ad-platform 3-way split), `allowLiveAction` IS a real, reachable
- * code path here — the ordering/placement above is provably correct and
- * live-testable — it just has nothing real to call yet, since no MCP
- * tool-invocation mechanism exists anywhere in this codebase, and honestly
- * reports that rather than faking a result. This is the concrete seam
- * where real tool invocation gets wired in once the owner authorizes it.
+ * The one real external call this whole plan gates behind `allowLiveAction`.
+ * Wired for organic social posts: `social_content` with a `liveAction`
+ * (src/social/publish.ts — the owner connected their own accounts and
+ * approved the post, or turned on "Posts go out on their own"). Every other
+ * channel still has no real tool to call and honestly reports that rather
+ * than faking a result.
  */
 async function performLiveAction(
   opts: ChannelExecutionOptions,
-  _spendDecision: SpendDecision,
+  spendDecision: SpendDecision,
 ): Promise<ChannelExecutionResult> {
-  void opts;
+  if (opts.creative.arm.channel === "social_content" && opts.liveAction) {
+    try {
+      const { externalRef } = await opts.liveAction();
+      return { status: "executed", spendDecision, externalRef };
+    } catch (err) {
+      return { status: "execution_failed", reason: (err as Error).message.slice(0, 500) };
+    }
+  }
   return {
     status: "execution_failed",
     reason:
-      "Live execution is not implemented in this pass — no real MCP tool-invocation mechanism exists yet. " +
-      "allowLiveAction is real and reachable (unlike allowLiveSpend's pure type-level seam); calling out to " +
-      "a real bound tool is deliberately unbuilt until the owner authorizes real spend/publishing.",
+      "Live execution is not implemented for this channel — no real tool-invocation mechanism exists for it yet. " +
+      "allowLiveAction is real and reachable; only social_content (organic posts on the owner's own accounts) " +
+      "has a real external call wired so far.",
   };
 }
 

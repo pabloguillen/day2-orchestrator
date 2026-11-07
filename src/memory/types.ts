@@ -15,7 +15,7 @@ export type MemorySourceKind = (typeof MEMORY_SOURCES)[number];
 export type MemoryStatus = "active" | "needs_confirmation" | "retired";
 
 /** What an agent is about to do with the app — memoryFor ranks by it. */
-export const PURPOSES = ["build", "plan", "bug", "growth", "money", "store", "messages", "create", "answer"] as const;
+export const PURPOSES = ["build", "plan", "bug", "growth", "money", "store", "messages", "create", "answer", "social"] as const;
 export type Purpose = (typeof PURPOSES)[number];
 
 /** Where an item came from, with a link the console can open. */
@@ -117,6 +117,7 @@ export const PROPOSAL_KINDS = [
   "growth.bet",
   "backlog.ticket",
   "create.screen",
+  "social.post",
 ] as const;
 export type ProposalKind = (typeof PROPOSAL_KINDS)[number];
 
