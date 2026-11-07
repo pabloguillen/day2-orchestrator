@@ -1,0 +1,123 @@
+/* gora8.com: ink on cream, the same identity as the console.
+ * Inter is served from this site (no Google Fonts request, so no visitor IP
+ * goes to Google). License: fonts/Inter-LICENSE.txt (SIL OFL 1.1). */
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(/fonts/inter-latin-ext-opsz-normal.woff2) format('woff2-variations');
+  unicode-range: U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(/fonts/inter-latin-opsz-normal.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+:root {
+  --cream: #F3F1EC;
+  --paper: #FAF9F5;
+  --ink: #15181A;
+  --ink-2: #5C5A53;
+  --hairline: #E2DED4;
+  --chip: #EAE6DC;
+  --max: 1120px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--cream);
+  color: var(--ink);
+  font-family: Inter, -apple-system, "Segoe UI", Arial, sans-serif;
+  font-optical-sizing: auto;
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ink); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+
+.wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+
+/* Header */
+.top { display: flex; align-items: center; justify-content: space-between; padding-block: 22px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 18px; letter-spacing: -0.02em; }
+.brand svg { width: 22px; height: 30px; }
+.nav { display: flex; gap: 22px; font-size: 14px; font-weight: 500; }
+.nav a { text-decoration: none; color: var(--ink-2); }
+.nav a:hover { color: var(--ink); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 44px; padding: 0 22px; border-radius: 10px;
+  font-size: 15px; font-weight: 500; text-decoration: none;
+  transition: transform .08s ease;
+}
+.btn:active { transform: translateY(1px); }
+.btn-ink {
+  background: var(--ink); color: var(--cream);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(0,0,0,.3), 0 2px 0 rgba(12,14,16,.22), 0 10px 20px rgba(21,24,26,.08);
+}
+.btn-paper { background: var(--paper); color: var(--ink); border: 1px solid var(--hairline); }
+.btn:focus-visible, a:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+/* Hero */
+.hero { position: relative; overflow: hidden; }
+.hero-inner { position: relative; z-index: 1; padding: 96px 0 120px; max-width: 640px; }
+.badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border-radius: 999px; background: var(--chip);
+  font-size: 13px; font-weight: 500; color: var(--ink);
+}
+.badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink); display: inline-block; }
+h1 {
+  font-size: clamp(42px, 7vw, 72px); line-height: 1.02; font-weight: 500;
+  letter-spacing: -0.035em; margin: 22px 0 22px;
+}
+h1 span { color: var(--ink-2); }
+.lede { font-size: 18px; color: var(--ink-2); max-width: 540px; margin: 0 0 32px; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.note { margin-top: 18px; font-size: 13px; color: var(--ink-2); }
+
+/* The contour art: the logo's ellipses, grown into a landscape. */
+.contours {
+  position: absolute; z-index: 0; right: -220px; top: -40px;
+  width: 820px; height: 820px; color: var(--ink); opacity: .9; pointer-events: none;
+}
+@media (max-width: 900px) {
+  .hero-inner { padding: 56px 0 300px; }
+  .contours { width: 520px; height: 520px; right: -150px; top: auto; bottom: -190px; opacity: .55; }
+}
+
+/* Three lines */
+.points { border-top: 1px solid var(--hairline); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; padding-block: 40px 72px; }
+.points h2 { font-size: 15px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+.points p { margin: 0; font-size: 15px; color: var(--ink-2); }
+@media (max-width: 760px) { .points { grid-template-columns: 1fr; gap: 24px; } }
+
+/* Footer */
+.foot { border-top: 1px solid var(--hairline); padding-block: 28px 40px; display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: center; justify-content: space-between; font-size: 14px; color: var(--ink-2); }
+.foot nav { display: flex; flex-wrap: wrap; gap: 20px; }
+.foot a { color: var(--ink-2); text-decoration: none; }
+.foot a:hover { color: var(--ink); }
+
+/* Legal pages */
+.doc { max-width: 720px; padding-block: 56px 80px; }
+.doc h1 { font-size: clamp(36px, 5vw, 52px); margin: 0 0 8px; }
+.doc .meta { color: var(--ink-2); font-size: 14px; margin: 0 0 40px; }
+.doc h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.015em; margin: 40px 0 10px; }
+.doc h3 { font-size: 16px; font-weight: 600; margin: 24px 0 6px; }
+.doc p, .doc li { color: #2A2C2B; }
+.doc ul { padding-left: 20px; }
+.doc li { margin: 4px 0; }
+.fill { background: var(--chip); border-radius: 4px; padding: 0 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .9em; }
+.draft { border: 1px solid var(--hairline); background: var(--paper); border-radius: 10px; padding: 14px 16px; font-size: 14px; color: var(--ink-2); margin: 0 0 32px; }

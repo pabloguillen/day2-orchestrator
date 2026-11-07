@@ -17,6 +17,9 @@ makes it reachable from outside.
   different name, look for the closest match. If you're stuck, send a
   screenshot with the secrets covered.
 
+**Before steps 1h and 2e:** gora8.com must be live with an Impressum,
+privacy policy and terms. See [website.md](website.md).
+
 Order: start the three reviews first (steps 1–3), because they take days to
 weeks. You can do the rest while you wait.
 
