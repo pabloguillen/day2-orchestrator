@@ -4,11 +4,42 @@ What's left before day2 runs in production. Nothing here is urgent — except
 one thing that takes weeks: **Google's verification of the consent screen for
 "Connect your stores"** (section 3). Start that first.
 day2 keeps working locally on your own machine in the meantime. The details
-for each step are in [deploy-hetzner.md](deploy-hetzner.md).
+for each step are in [deploy-hetzner.md](deploy-hetzner.md). What you set up
+now, while day2 runs on your Mac, is in [operator-setup.md](operator-setup.md).
+
+## Status: not done yet
+
+None of these is done. The details are in the sections below.
+
+- [ ] **The server**, rented and set up (sections 2, 4, 5)
+- [ ] **The domain `app.gora8.com` pointing at the server.** Today it points
+      at your Mac through the Cloudflare tunnel.
+- [ ] **The Claude API key** (`ANTHROPIC_API_KEY`) on the server. Locally
+      day2 uses your Claude subscription, which is for your own use only.
+- [ ] **A `DAY2_SECRETS_KEY` that never changes.** Take the one from your
+      Mac's `.env` to the server and back it up somewhere safe. If it
+      changes, every stored key and token becomes unreadable, and the
+      anonymous learning across apps starts over (section 6).
+- [ ] **Supabase Pro.** day2's "gora8" organization exists on the Free plan
+      (tested 2026-11-05); upgrade it before hosting real apps (section 6,
+      Hosting).
+- [ ] **Supabase's data processing agreement (DPA)** signed, and Supabase
+      listed as a subprocessor (end of section 8).
+- [ ] **An email sender for apps** (`DAY2_HOSTING_SMTP_URL`,
+      `DAY2_HOSTING_SMTP_FROM`), and day2's own (`SMTP_URL`, `MAIL_FROM`).
+- [ ] **Terms and privacy notice**, including the opt-out for learning across
+      apps (section 6a), and what day2 does with customers' Google, Apple
+      and Meta access (connect.md).
+- [ ] **The TesterArmy checks** as the cloud test runner (section 6,
+      deploying.md §10).
+- [ ] **Reviews that take weeks**, started early: Google's verification of
+      the "Connect your stores" sign-in, Meta's Business verification and
+      App Review, TikTok's Marketing API approval
+      ([operator-setup.md](operator-setup.md) steps 1h, 2e–2f, 3).
 
 ## 1. Decide the address
 
-For example `app.yourdomain.com`. Every account below needs it.
+`app.gora8.com`. Every account below needs it.
 
 ## 2. Rent the server
 
