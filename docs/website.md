@@ -14,19 +14,13 @@ site itself).
 | `site/style.css` | Ink on cream, same identity as the console |
 | `site/_headers` | Security headers for Cloudflare Pages |
 
-## 1. Fill in the placeholders
+## 1. Details
 
-Every grey `[ … ]` field must be filled in before going public: legal name,
-address, phone, register entry, VAT id, the responsible data protection
-authority, prices. Find them all with:
-
-```
-cd ~/Projects/day2/day2/orchestrator && grep -n "class=\"fill\"" site/*.html
-```
-
-Have the privacy policy and the terms checked by a lawyer before real
-customers sign up. They describe what day2/gora8 really does today, but they
-are a starting point, not legal advice.
+Filled in for Pablo Guillen (sole proprietor), Gürtelstraße 35, 10247 Berlin.
+Update the Impressum when you get a VAT ID (USt-IdNr.) or register a company,
+and the privacy page's provider list when a server host and an email provider
+are chosen. Have the privacy policy and terms checked by a lawyer before real
+customers sign up.
 
 ## 2. Publish to Cloudflare Pages
 

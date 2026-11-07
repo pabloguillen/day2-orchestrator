@@ -30,6 +30,9 @@ None of these is done. The details are in the sections below.
 - [ ] **Terms and privacy notice**, including the opt-out for learning across
       apps (section 6a), and what day2 does with customers' Google, Apple
       and Meta access (connect.md).
+- [ ] **gora8.com privacy page updated** with the server host (e.g. Hetzner)
+      and the email provider once they're chosen, and a VAT ID in the
+      Impressum once you have one (site/, see website.md).
 - [ ] **The TesterArmy checks** as the cloud test runner (section 6,
       deploying.md §10).
 - [ ] **Reviews that take weeks**, started early: Google's verification of
