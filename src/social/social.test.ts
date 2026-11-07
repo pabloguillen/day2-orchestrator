@@ -124,8 +124,9 @@ describe("making posts", () => {
   test("formats per platform; arms day2 can make", () => {
     expect(formatsFor(["instagram", "facebook", "tiktok"], "video").map((x) => x.format)).toEqual(["reel", "fb_reel", "tiktok_video"]);
     expect(formatsFor(["instagram", "facebook", "tiktok"], "image").map((x) => x.format)).toEqual(["feed", "story", "fb_post"]);
-    expect(availableArms({ platforms: ["tiktok"], pageUrl: null, creatify: false })).toEqual(["motion-graphics-short-video"]);
-    expect(availableArms({ platforms: ["instagram"], pageUrl: "https://x", creatify: true })).toHaveLength(4);
+    expect(availableArms({ platforms: ["tiktok"], pageUrl: null, presenter: false, generated: false })).toEqual(["motion-graphics-short-video"]);
+    expect(availableArms({ platforms: ["instagram"], pageUrl: "https://x", presenter: true, generated: false })).toHaveLength(4);
+    expect(availableArms({ platforms: ["instagram"], pageUrl: "https://x", presenter: true, generated: true })).toHaveLength(5);
   });
 
   test("transcode: H.264 High, AAC 48 kHz, 1080×1920, silence added when there's no audio", () => {
@@ -152,7 +153,7 @@ describe("making posts", () => {
     const assets = fileAssetStore(join(dir, "assets"), "https://day2.test");
     writeFileSync(join(dir, "v.mp4"), "v");
     const video = await assets.put(join(dir, "v.mp4"), { appId: "dotty", purpose: "social:x", label: "v", kind: "video", ratio: "9:16", width: 1080, height: 1920, mime: "video/mp4", source: "motion_template", aiGenerated: false, aiPerson: false });
-    const media: MediaOut = { video, cover: null, feedImage: null, storyImage: null, costUsd: 0, aiGenerated: false, notes: [] };
+    const media: MediaOut = { video, cover: null, feedImage: null, storyImage: null, costUsd: 0, aiGenerated: false, aiPerson: false, made: [], notes: [] };
     const prompts: string[] = [];
     const r = await draftPosts({ id: "dotty", name: "Dotty" }, profile, {
       posts,
@@ -165,7 +166,7 @@ describe("making posts", () => {
       produce: async () => media,
       screens: async () => ["shot.png"],
       pageUrl: null,
-      creatify: null,
+      creator: null,
       memory: "<<<DAY2_MEMORY_START>>>\n- Never mention exams.\n<<<DAY2_MEMORY_END>>>",
       avoid: ["social.post:tip/question: old idea"],
       worked: [],
@@ -209,6 +210,28 @@ describe("making posts", () => {
     expect(held.r.posts.every((p) => p.status === "draft" && !p.safety.ok)).toBe(true);
   });
 
+  test("creator tools: a generated-clip format only when a tool may make it; the post records what made it", async () => {
+    const cand = { id: "luma", name: "Luma", account: "own", creds: {}, def: {} as never, estimateUsd: 1, estimateCredits: 0 } as const;
+    const kit = { purpose: "posts" as const, candidates: (j: { capability: string }) => (j.capability === "generated_video" ? [cand] : []), pick: () => cand, run: async () => { throw new Error("not here"); } };
+    const seen: string[] = [];
+    writeFileSync(join(dir, "v2.mp4"), "v");
+    const video = await fileAssetStore(join(dir, "assets"), "https://day2.test").put(join(dir, "v2.mp4"), { appId: "dotty", purpose: "social:x", label: "v", kind: "video", ratio: "9:16", width: 1080, height: 1920, mime: "video/mp4", source: "luma", aiGenerated: true, aiPerson: false });
+    const made = [{ tool: "luma" as const, name: "Luma", capability: "generated_video" as const, account: "own" as const }];
+    const { r, prompts } = await draft({
+      creator: kit as never,
+      rng: () => 0.999,
+      produce: async (i) => (seen.push(i.arm), { video, cover: null, feedImage: null, storyImage: null, costUsd: 0, prebilledUsd: 0.6, aiGenerated: true, aiPerson: false, made, notes: [] }),
+    });
+    expect(r.posts[0]!.source.tools).toEqual(made);
+    // The kit already charged its jobs: nothing left for the caller to bill, but it's counted on the post.
+    expect([r.costUsd, r.prebilledUsd]).toEqual([0, 0.6]);
+    expect(r.posts[1]!.tiktok!.isAigc).toBe(true);
+    if (seen[0] === "generated-broll-short-video") expect(prompts[0]).toContain("generated shot");
+    const none = await draft({ creator: null, produce: async (i) => (seen.push(i.arm), { video, cover: null, feedImage: null, storyImage: null, costUsd: 0, aiGenerated: false, aiPerson: false, made: [], notes: [] }) });
+    expect(seen.at(-1)).not.toBe("generated-broll-short-video");
+    expect(none.r.posts[0]!.source.tools).toBeUndefined();
+  });
+
   test("generic copy is dropped before any media is made", async () => {
     let made = false;
     const { r } = await draft({
@@ -249,7 +272,7 @@ describe("feedback", () => {
     const statePath = join(dir, "day2-social.json");
     writeFileSync(statePath, JSON.stringify({ learnings: { ...emptyLearnings(), rates: [0.02, 0.03, 0.02, 0.025, 0.03] } }));
     const iso = published.toISOString();
-    const p: Post = { id: "sp_fb", appId: "dotty", group: "g", status: "published", kind: "video", language: "de", idea: { topic: "tip", hook: "question", title: "x", brandAngle: null, trend: null }, source: { arm: "motion-graphics-short-video", armKey: "", experimentId: null, made: "" }, targets: [{ platform: "instagram", format: "reel", assetId: "a", caption: "c", hashtags: [], status: "published", externalId: "m1", publishedAt: iso, attempts: 0, metrics: [] }], scheduledAt: iso, timeSlot: "evening", timeWhy: null, safety: { ok: true, issues: [], checkedAt: iso }, costCredits: 0, createdAt: iso, updatedAt: iso };
+    const p: Post = { id: "sp_fb", appId: "dotty", group: "g", status: "published", kind: "video", language: "de", idea: { topic: "tip", hook: "question", title: "x", brandAngle: null, trend: null }, source: { arm: "motion-graphics-short-video", armKey: "", experimentId: null, made: "", tools: [{ tool: "elevenlabs", name: "ElevenLabs", capability: "voice", account: "own" }] }, targets: [{ platform: "instagram", format: "reel", assetId: "a", caption: "c", hashtags: [], status: "published", externalId: "m1", publishedAt: iso, attempts: 0, metrics: [] }], scheduledAt: iso, timeSlot: "evening", timeWhy: null, safety: { ok: true, issues: [], checkedAt: iso }, costCredits: 0, createdAt: iso, updatedAt: iso };
     await posts.insert(p);
     const insights = { data: [{ name: "reach", values: [{ value: 800 }] }, { name: "views", values: [{ value: 1000 }] }, { name: "likes", values: [{ value: 80 }] }, { name: "comments", values: [{ value: 10 }] }, { name: "shares", values: [{ value: 5 }] }, { name: "saved", values: [{ value: 5 }] }] };
     const learned: string[] = [];
@@ -263,6 +286,9 @@ describe("feedback", () => {
     await run("2026-11-04T19:00:00Z", 1);
     const alloc = loadAllocatorState(join(dir, "alloc.json"));
     expect(alloc.arms[0]).toMatchObject({ arm: { channel: "social_content", formatTag: "motion-graphics-short-video" }, attempts: 1 });
+    // …and per creator tool, so the next pick learns which tool works for this kind of post.
+    expect(alloc.arms[1]).toMatchObject({ arm: { formatTag: "motion-graphics-short-video@elevenlabs" }, attempts: 1 });
+    expect(loadSocialState(statePath).learnings.tools?.["motion-graphics-short-video@elevenlabs"]?.posts).toBe(1);
     expect(loadSocialState(statePath).learnings.hooks.question?.posts).toBe(1);
     expect(learned).toEqual([]);
     await run("2026-11-08T19:00:00Z", 1);

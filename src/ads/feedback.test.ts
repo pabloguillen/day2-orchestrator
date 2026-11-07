@@ -231,7 +231,7 @@ describe("a pass on the app's own ad account", () => {
     accounts: new Map([["tiktok", { billing: "own" as const, currency: "EUR" }]]),
     identities,
     assets,
-    providers: { creatify: null, runway: null },
+    providers: { presenter: null, generated: null },
     events: async () => events,
     users: async () => [],
     sentConversions: sent,

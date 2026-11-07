@@ -99,7 +99,7 @@ import { forgetApp } from "./learning/runtime";
 import { captureSoon, memoryFor, mirrorBacklogRules, noteDecline, noteOwnerInput, type CreditRunner } from "./memory/runtime";
 import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
-import { ALL_PLATFORMS, CONNECTS, configuredPlatforms, connectable, platformInfo, resolvePlatforms, videoProviders } from "./ads/registry";
+import { ALL_PLATFORMS, CONNECTS, configuredPlatforms, connectable, platformInfo, resolvePlatforms } from "./ads/registry";
 import { redact } from "./ads/http";
 import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnect, recheckIdentities, startConnect } from "./ads/connect-flow";
 import { fromUsd } from "./ads/fx";
@@ -242,6 +242,7 @@ import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/route
 import { registerMoneyRoutes } from "./money/routes";
 import { purgeGoogleSessions, registerConnectRoutes } from "./connect/routes";
 import { registerSocialRoutes, serveMediaLink, socialServerSetup } from "./social/routes";
+import { creatorToolChecks, registerCreatorToolRoutes } from "./creative/routes";
 import { connectMetaPage } from "./social/runtime";
 import { excludeDay2State } from "./day2-state-files";
 import {
@@ -441,6 +442,7 @@ registerNumbersRoutes({ route, json, requireApp, requireManager, httpError: (sta
 registerConnectRoutes({ route, json, requireApp, requireManager, requireOperator, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- Social posts on the owner's Instagram, Facebook Page and TikTok (src/social/routes.ts) — also before the ads callback ----
 registerSocialRoutes(route, { json, requireApp, requireManager, actorName, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
+registerCreatorToolRoutes(route, { json, requireApp, requireManager, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What day2 knows: app memory (src/memory/routes.ts) ----
 registerMemoryRoutes(route, { json, requireApp, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What works: learning across apps (src/learning/routes.ts) ----
@@ -2368,7 +2370,7 @@ async function platformAdsResponse() {
       { id: "ffmpeg", ok: which("ffmpeg"), label: "ffmpeg, to make videos", detail: which("ffmpeg") ? "installed" : "missing" },
       { id: "chromium", ok: Boolean(chromiumPath()), label: "Chromium, to make images and recordings", detail: chromiumPath() ? "installed" : "missing" },
       { id: "meta_login_config", ok: Boolean(process.env.META_LOGIN_CONFIG_ID?.trim()), label: "A Facebook Login for Business configuration for Meta (recommended for Business-type Meta apps)", detail: process.env.META_LOGIN_CONFIG_ID?.trim() ? "set" : "META_LOGIN_CONFIG_ID" },
-      { id: "creatify", ok: Boolean(videoProviders().creatify), label: "Creatify, for AI presenter videos (optional)", detail: videoProviders().creatify ? "connected" : "CREATIFY_API_ID, CREATIFY_API_KEY" },
+      ...creatorToolChecks(),
     ],
     /** Organic posting (src/social/): what's missing on this server, and the redirect URIs to register. */
     social: socialServerSetup(),

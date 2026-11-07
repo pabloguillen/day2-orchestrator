@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { safeDownload } from "../creative/download";
 import { extname, join } from "node:path";
 import { chromium, devices, type Browser } from "playwright";
 import { chromiumPath } from "../simulation";
@@ -29,7 +30,16 @@ export const SIZE: Record<Ratio, { w: number; h: number }> = {
   "2:3": { w: 1000, h: 1500 },
 };
 
-export type Brand = { name: string; colors: string[]; logoPath?: string; font?: string };
+export type Brand = {
+  name: string;
+  colors: string[];
+  logoPath?: string;
+  font?: string;
+  /** A generated background scene (creator tools): shown behind the phone, darkened for legible text. */
+  backgroundImage?: string;
+  /** Brand DNA's imagery style, for generated scenes. */
+  imagery?: string;
+};
 export type FrameCopy = { headline: string; cta: string };
 
 /** HTML-escapes text from copy. */
@@ -98,7 +108,7 @@ export function frameHtml(ratio: Ratio, copy: FrameCopy, brand: Brand, screensho
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:${L.w}px;height:${L.h}px;background:transparent;overflow:hidden}
 body{font-family:${font};color:${fg};position:relative}
-.bg{position:absolute;inset:0;background:radial-gradient(120% 90% at 20% 0%, ${accent}33 0%, transparent 60%), ${bg}}
+.bg{position:absolute;inset:0;background:${brand.backgroundImage && dataUri(brand.backgroundImage) ? `linear-gradient(${bg}cc, ${bg}99), url("${dataUri(brand.backgroundImage)}") center/cover no-repeat, ${bg}` : `radial-gradient(120% 90% at 20% 0%, ${accent}33 0%, transparent 60%), ${bg}`}}
 .text{position:absolute;${textBox}gap:${Math.round(28 * scale)}px}
 .brand{display:flex;align-items:center;gap:${Math.round(14 * scale)}px;font-weight:600;font-size:${Math.round(30 * scale)}px;opacity:.9}
 .brand img{height:${Math.round(48 * scale)}px;width:auto;border-radius:${Math.round(10 * scale)}px}
@@ -301,9 +311,8 @@ export async function probe(file: string): Promise<{ durationSec: number; width:
 }
 
 /** Downloads a provider's result to a file. */
-export async function download(url: string, out: string, doFetch: typeof fetch = fetch): Promise<string> {
-  const res = await doFetch(url);
-  if (!res.ok) throw new Error(`Couldn't download the generated video (${res.status}).`);
-  writeFileSync(out, new Uint8Array(await res.arrayBuffer()));
+/** A generated video from the tool that made it (`tool`: its id): https, known hosts, public addresses, size and type checked (creative/download.ts). */
+export async function download(url: string, out: string, tool: string, doFetch: typeof fetch = fetch): Promise<string> {
+  await safeDownload(url, out, { tool, kind: "video", fetch: doFetch });
   return out;
 }

@@ -17,7 +17,7 @@ import { collectConversions, OPTIMIZE_FOR_SIGNUPS_AFTER, type SentConversions } 
 import { fromUsd, toUsd } from "./fx";
 import { fit } from "./http";
 import type { PlatformIdentityStore } from "./identities";
-import { computeLearnings, copyHints, formatOf, formatsToSkip, platformOrder, recordInAllocator, type Format, type Learnings } from "./learnings";
+import { computeLearnings, copyHints, formatOf, formatsToSkip, platformOrder, recordInAllocator, toolOf, type Format, type Learnings } from "./learnings";
 import { produceContent, type ProduceInput, type Produced } from "./produce";
 import type { VideoProvider } from "./providers/video";
 import { platformResults, retentionFrom, shortKey, type PlatformResult, type Retention } from "./results";
@@ -97,7 +97,8 @@ export type PlatformCampaign = {
   optimizeFor: "clicks" | "signups";
   /** The month spend is counted from ("2026-10") and the lifetime spend when it started. */
   month: { id: string; spendAtStart: number };
-  creatives: Array<{ key: string; variant: number; assetId: string | null; kind: "image" | "video" | "text"; format?: Format; headline?: string; paused?: string | null }>;
+  /** `tool`: the creator tool that made the asset (learning per tool). */
+  creatives: Array<{ key: string; variant: number; assetId: string | null; kind: "image" | "video" | "text"; format?: Format; tool?: string; headline?: string; paused?: string | null }>;
   /** Spend per ad (creative key), USD. */
   adSpendUsd?: Record<string, number>;
 };
@@ -322,7 +323,8 @@ export type PlatformAdsDeps = {
   accounts?: Map<PlatformId, { billing: Billing; currency: string }>;
   identities: PlatformIdentityStore;
   assets: AssetStore;
-  providers: { creatify: VideoProvider | null; runway: VideoProvider | null };
+  /** The creator tool picked for presenter and generated video (or null: built-in formats only). */
+  providers: { presenter: VideoProvider | null; generated: VideoProvider | null };
   events: (app: AppEntry, sinceIso: string) => Promise<EventLike[] | null>;
   /** Identified users' active days (retention engine); absent = fit unknown, cost alone. */
   users?: (app: AppEntry) => Promise<UserActivity[]>;
@@ -627,7 +629,10 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
     const ads = [...allResults.entries()].flatMap(([betId, rs]) =>
       rs.flatMap((r) => {
         const c = file.campaigns.find((x) => x.betId === betId && x.platform === r.platform);
-        return r.ads.map((a) => ({ key: a.key, format: c?.creatives.find((x) => x.key === a.key)?.format ?? ("image" as Format), people: a.people, outcomes: a.outcomes, spendUsd: a.spendUsd }));
+        return r.ads.map((a) => {
+          const cr = c?.creatives.find((x) => x.key === a.key);
+          return { key: a.key, format: cr?.format ?? ("image" as Format), ...(cr?.tool ? { tool: cr.tool } : {}), people: a.people, outcomes: a.outcomes, spendUsd: a.spendUsd };
+        });
       }),
     );
     const allocPath = resolve(app.repoPath, ALLOCATOR_FILENAME);
@@ -754,7 +759,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           copy: content.copy,
           platforms: chosen.map((c) => deps.infos.get(c.id)!),
           store: deps.assets,
-          providers: { creatify: skip.includes("presenter") ? null : deps.providers.creatify, runway: skip.includes("generated") ? null : deps.providers.runway },
+          providers: { presenter: skip.includes("presenter") ? null : deps.providers.presenter, generated: skip.includes("generated") ? null : deps.providers.generated },
           generativeBudgetUsd: genOk.ok ? GENERATIVE_BUDGET_USD : 0,
           ...(skip.includes("walkthrough") ? { skipWalkthrough: true } : {}),
           ...(skip.includes("motion") ? { skipMotion: true } : {}),
@@ -762,7 +767,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
         if (r.costUsd > 0) await recordCharge(deps.credits, { id: `adgen:${app.id}:${b.id}`, appId: app.id, service: "content_generation", costUsd: r.costUsd, description: `Ad videos for ${b.id}` }, now);
         produced = r.assets;
         content.assets = r.assets.map((a) => ({ assetId: a.asset.id, variant: a.variant }));
-        content.costUsd = r.costUsd;
+        content.costUsd = r.costUsd + (r.prebilledUsd ?? 0);
         content.notes = [...r.notes, ...skip.map((f) => `Not made: ${f} ads (they lost in earlier experiments).`)];
         for (const n of content.notes) log(`${b.id}: ${n}`);
         const counts = { image: r.assets.filter((a) => a.asset.kind === "image" && !a.asset.label.startsWith("Cover")).length, video: r.assets.filter((a) => a.asset.kind === "video").length };
@@ -831,7 +836,7 @@ export async function runPlatformAds(app: AppEntry, profile: AppProfile, deps: P
           review: null,
           optimizeFor,
           month: { id: monthId(now), spendAtStart: 0 },
-          creatives: creatives.map((c) => ({ key: c.key, variant: c.variant, assetId: c.asset?.id ?? null, kind: c.asset ? c.asset.kind : "text", format: c.format, headline: c.copy.headline, paused: null })),
+          creatives: creatives.map((c) => ({ key: c.key, variant: c.variant, assetId: c.asset?.id ?? null, kind: c.asset ? c.asset.kind : "text", format: c.format, ...(c.asset && toolOf(c.asset.source) ? { tool: toolOf(c.asset.source)! } : {}), headline: c.copy.headline, paused: null })),
         });
         save();
         report.launched.push(`${b.id}:${ch.id}`);

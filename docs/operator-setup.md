@@ -401,7 +401,9 @@ is fine until go-live.
 ## 6. Optional: videos and trend research
 
 Without these, day2 works fine. It skips presenter videos, generated video
-shots and YouTube trends, and says so.
+shots and YouTube trends, and says so. Owners can also connect their own
+accounts for any creator tool on Growth → Accounts (docs/creator-tools.md);
+the keys below are day2's own accounts, billed to customers in credits.
 
 **Creatify** (AI presenter videos)
 1. Sign up at https://creatify.ai and choose a plan with API access.
@@ -421,6 +423,34 @@ shots and YouTube trends, and says so.
    RUNWAYML_API_SECRET=
    DAY2_ADS_RUNWAY=on
    ```
+
+**HeyGen** (presenter videos with stock avatars)
+1. Sign up at https://app.heygen.com and buy API credits (pay as you go).
+2. Open **Settings → API** and copy the **API key**.
+3. Add `HEYGEN_API_KEY=` to `.env`.
+
+**Luma** (generated video clips)
+1. Sign up at https://platform.lumalabs.ai and add credits.
+2. Create an **API key** (starts with `luma-api-`; shown once).
+3. Add `LUMA_API_KEY=` and, from your plan, `LUMA_USD_PER_CREDIT=` to `.env`.
+
+**Google** (generated video clips via Gemini Omni)
+1. Open https://aistudio.google.com/apikey and create an API key in the
+   `gora8` project; turn on billing for it.
+2. Add `GEMINI_API_KEY=` to `.env`.
+
+**ElevenLabs** (voiceovers and music)
+1. Sign up at https://elevenlabs.io and choose a plan with API access.
+2. Open **Developers → API keys**, create a key and copy it.
+3. Add `ELEVENLABS_API_KEY=` to `.env`.
+
+**OpenAI Images** (image backgrounds)
+1. Open https://platform.openai.com/api-keys (organization verified for image
+   models) and create a key.
+2. Add `OPENAI_API_KEY=` to `.env`.
+
+Runway and Creatify are used for every app by default once set; the others
+are offered to owners, who switch them on per app.
 
 **YouTube** (trend research)
 1. In Google Cloud (the `gora8` project from step 1), search for **YouTube

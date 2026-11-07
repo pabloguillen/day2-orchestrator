@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromiumPath } from "../simulation";
@@ -92,7 +92,10 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
       async generate(job) {
         generated++;
         expect(job).toMatchObject({ kind: "avatar_ad", script: COPY.script, language: "de" });
-        return { url: `http://localhost:${server.port}/clip.mp4`, aiPerson: true, costUsd: 0.99, providerJobId: "j1" };
+        // Creator tools hand over a file already on day2's disk (downloads from the tool go through creative/download.ts).
+        const f = join(root, "clip-copy.mp4");
+        copyFileSync(clip, f);
+        return { url: "", file: f, aiPerson: true, costUsd: 0.99, providerJobId: "j1" };
       },
     };
     const r = await produceContent({
@@ -103,7 +106,7 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
       copy: COPY,
       platforms: PLATFORMS,
       store,
-      providers: { creatify, runway: null },
+      providers: { presenter: creatify, generated: null },
       generativeBudgetUsd: 5,
       videoSeconds: 4,
       motionSeconds: 2,
@@ -147,7 +150,7 @@ describe.skipIf(!EXE || !FFMPEG)("making the ads, for real", () => {
   test("generated video is skipped when it would exceed its budget", async () => {
     const store = fileAssetStore(join(root, "assets2"), "https://day2.example");
     const pricey: VideoProvider = { id: "creatify", kinds: ["avatar_ad"], estimateUsd: () => 50, generate: async () => { throw new Error("must not run"); } };
-    const r = await produceContent({ appId: "app_p", purpose: "B-2", pageUrl: `http://localhost:${server.port}/`, brand: { name: "Buddy", colors: ["#111111"] }, copy: COPY, platforms: [PLATFORMS[0]!], store, providers: { creatify: pricey, runway: null }, generativeBudgetUsd: 5, videoSeconds: 3, skipMotion: true });
+    const r = await produceContent({ appId: "app_p", purpose: "B-2", pageUrl: `http://localhost:${server.port}/`, brand: { name: "Buddy", colors: ["#111111"] }, copy: COPY, platforms: [PLATFORMS[0]!], store, providers: { presenter: pricey, generated: null }, generativeBudgetUsd: 5, videoSeconds: 3, skipMotion: true });
     expect(r.notes[0]).toContain("skipped");
     expect(r.assets.some((a) => a.asset.source === "creatify")).toBe(false);
   }, 120_000);

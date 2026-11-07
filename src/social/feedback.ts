@@ -3,6 +3,7 @@ import { loadAllocatorState, recordWeightedOutcome, saveAllocatorState } from ".
 import type { Verdict } from "../learning/library";
 import type { ChangeKind } from "../learning/taxonomy";
 import { socialArm } from "./make";
+import { toolArm } from "../creative/select";
 import { emptyMetrics, facebookMetrics, instagramMetrics, type MetaPublishCtx } from "./meta";
 import { audienceTimeZone, slotOf } from "./schedule";
 import { addScore, loadSocialState, updateSocialState } from "./state";
@@ -61,7 +62,7 @@ export function verdictOf(rate: number, rates: number[]): Verdict | null {
   return "no_clear_change";
 }
 
-const ARM_WORDS: Record<SocialArm, string> = { "motion-graphics-short-video": "motion video", "app-walkthrough-short-video": "app walkthrough video", "ugc-style-short-video": "ai presenter video", "static-image-post": "still image" };
+const ARM_WORDS: Record<SocialArm, string> = { "motion-graphics-short-video": "motion video", "app-walkthrough-short-video": "app walkthrough video", "ugc-style-short-video": "ai presenter video", "generated-broll-short-video": "generated video clip", "static-image-post": "still image" };
 
 /** The post's total across its targets for one window. Pure. */
 export function totals(p: Post, window: MetricsWindow): Metrics | null {
@@ -165,13 +166,16 @@ async function learnFrom(appId: string, post: Post, d: FeedbackDeps): Promise<Me
       const rates = state.learnings.rates;
       if (window === "72h") {
         const reward = rewardOf(rate, median(rates));
-        saveAllocatorState(d.allocatorPath, recordWeightedOutcome(loadAllocatorState(d.allocatorPath), socialArm(post.source.arm), reward, 0));
+        let alloc = recordWeightedOutcome(loadAllocatorState(d.allocatorPath), socialArm(post.source.arm), reward, 0);
+        // Which creator tool made it: "<format>@<tool>" arms, so the tool choice learns per kind of post.
+        for (const t of post.source.tools ?? []) alloc = recordWeightedOutcome(alloc, toolArm(socialArm(post.source.arm), t.tool), reward, 0);
+        saveAllocatorState(d.allocatorPath, alloc);
         const tz = audienceTimeZone(post.language);
         updateSocialState(d.statePath, (s) => {
           const l = s.learnings;
           const slots = { ...l.slots };
           for (const t of live) if (t.publishedAt) slots[t.platform] = addScore(slots[t.platform] ?? {}, slotOf(new Date(t.publishedAt), tz), reward);
-          return { ...s, learnings: { ...l, hooks: addScore(l.hooks, post.idea.hook, reward), topics: addScore(l.topics, post.idea.topic, reward), formats: addScore(l.formats, post.source.arm, reward), slots } };
+          return { ...s, learnings: { ...l, hooks: addScore(l.hooks, post.idea.hook, reward), topics: addScore(l.topics, post.idea.topic, reward), formats: addScore(l.formats, post.source.arm, reward), tools: (post.source.tools ?? []).reduce((acc, t) => addScore(acc, `${post.source.arm}@${t.tool}`, reward), l.tools ?? {}), slots } };
         });
       } else {
         const verdict = verdictOf(rate, rates);

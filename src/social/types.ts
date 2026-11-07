@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { MadeWith } from "../creative/types";
 /**
  * Organic social posts (docs/social.md): day2 makes posts for an app from
  * its real screens and Brand DNA, the owner approves them (by default), and
@@ -48,7 +49,7 @@ export const TIME_SLOTS = ["morning", "midday", "afternoon", "evening", "late"] 
 export type TimeSlot = (typeof TIME_SLOTS)[number];
 
 /** How the visual was made: the allocator's format arms for social_content. */
-export const SOCIAL_ARMS = ["motion-graphics-short-video", "app-walkthrough-short-video", "ugc-style-short-video", "static-image-post"] as const;
+export const SOCIAL_ARMS = ["motion-graphics-short-video", "app-walkthrough-short-video", "ugc-style-short-video", "generated-broll-short-video", "static-image-post"] as const;
 export type SocialArm = (typeof SOCIAL_ARMS)[number];
 
 export type Metrics = {
@@ -114,7 +115,8 @@ export type Post = {
   kind: "video" | "image";
   language: string;
   idea: { topic: Topic; hook: HookStyle; title: string; brandAngle: string | null; trend: string | null };
-  source: { arm: SocialArm; armKey: string; experimentId: string | null; made: string };
+  /** `tools`: the creator tools that made the media (docs/creator-tools.md), shown as "Made with …". */
+  source: { arm: SocialArm; armKey: string; experimentId: string | null; made: string; tools?: MadeWith[] };
   targets: Target[];
   scheduledAt: string | null;
   timeSlot: TimeSlot | null;

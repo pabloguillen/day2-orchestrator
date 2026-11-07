@@ -18,6 +18,8 @@ export type SocialLearnings = {
   hooks: Partial<Record<HookStyle, Score>>;
   topics: Partial<Record<Topic, Score>>;
   formats: Partial<Record<SocialArm, Score>>;
+  /** Per "<format>@<creator tool>" (e.g. "generated-broll-short-video@runway"). */
+  tools?: Record<string, Score>;
   slots: Partial<Record<SocialPlatform, SlotStats>>;
   /** Engagement per view of this app's measured posts (7-day results), for "did well" / boost candidates. */
   rates: number[];

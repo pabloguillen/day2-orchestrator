@@ -20,15 +20,18 @@ import type { AssetSpec, PlatformInfo, Ratio } from "./types";
  *  - Motion videos (motion.ts): kinetic text + the app's real screenshots on
  *    a phone + CTA end card, rendered in-house — per variant and video
  *    format, at most MAX_MOTION_VIDEOS;
- *  - AI presenter video (Creatify), when connected and the script passed
- *    both checks: 9:16, plus 1:1 when needed;
- *  - generated motion shot (Runway) of the 9:16 image, when enabled.
+ *  - AI presenter video, from the creator tool picked for it (Creatify,
+ *    HeyGen — docs/creator-tools.md), when the script passed both checks:
+ *    9:16, plus 1:1 when needed;
+ *  - generated motion shot of the 9:16 image (Runway, Luma, Google), when a
+ *    creator tool may be used.
  *
  * Every file is stored as an Asset (served by day2) and labelled with what
  * made it. Generation costs are returned so the caller can bill them.
  */
 
-export type Produced = { assets: Array<{ asset: StoredAsset; variant: number }>; costUsd: number; notes: string[] };
+/** `costUsd`: still to be billed by the caller; `prebilledUsd`: generations the creator tools already charged. */
+export type Produced = { assets: Array<{ asset: StoredAsset; variant: number }>; costUsd: number; prebilledUsd?: number; notes: string[] };
 
 export type ProduceInput = {
   appId: string;
@@ -38,7 +41,8 @@ export type ProduceInput = {
   copy: AdCopyPlan;
   platforms: PlatformInfo[];
   store: AssetStore;
-  providers: { creatify?: VideoProvider | null; runway?: VideoProvider | null };
+  /** The creator tool picked for each kind of generated video (src/creative/kit.ts kitVideoProvider). */
+  providers: { presenter?: VideoProvider | null; generated?: VideoProvider | null };
   /** Spend limit for generative video in this run, USD (0 = none). */
   generativeBudgetUsd: number;
   /** Don't make app walkthrough videos (they kept losing). */
@@ -151,8 +155,9 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
       try {
         const r = await provider.generate(job);
         budget -= r.costUsd;
-        out.costUsd += r.costUsd;
-        const raw = await download(r.url, join(dir, `${provider.id}-${r.providerJobId}.mp4`));
+        if (r.billed) out.prebilledUsd = (out.prebilledUsd ?? 0) + r.costUsd;
+        else out.costUsd += r.costUsd;
+        const raw = r.file ?? (await download(r.url, join(dir, `${provider.id}-${r.providerJobId}.mp4`), provider.id));
         for (const ratio of ratios) {
           const f = join(dir, `${provider.id}-${ratio.replace(/[:.]/g, "x")}.mp4`);
           await normalizeVideo(raw, ratio, f, { padColor: i.brand.colors[0], maxSeconds: 60 });
@@ -160,20 +165,20 @@ export async function produceContent(i: ProduceInput): Promise<Produced> {
           const cover = await coverFrom(f, join(dir, `${provider.id}-cover-${ratio.replace(/[:.]/g, "x")}.jpg`));
           const { w, h } = SIZE[ratio];
           const thumb = await i.store.put(cover, { appId: i.appId, purpose: i.purpose, label: label("Cover", ratio), kind: "image", ratio, width: w, height: h, mime: "image/jpeg", source: provider.id, aiGenerated, aiPerson: r.aiPerson });
-          await store(f, { appId: i.appId, purpose: i.purpose, label: label(what, ratio), kind: "video", ratio, width: w, height: h, durationSec: p.durationSec, mime: "video/mp4", source: provider.id, aiGenerated, aiPerson: r.aiPerson, costUsd: r.costUsd / ratios.length, thumbnailId: thumb.id }, 0);
+          await store(f, { appId: i.appId, purpose: i.purpose, label: label(provider.name ? `${what} · ${provider.name}` : what, ratio), kind: "video", ratio, width: w, height: h, durationSec: p.durationSec, mime: "video/mp4", source: provider.id, aiGenerated, aiPerson: r.aiPerson, costUsd: r.costUsd / ratios.length, thumbnailId: thumb.id }, 0);
         }
       } catch (err) {
         out.notes.push(`${what} failed: ${(err as Error).message.slice(0, 200)}`);
       }
     };
     const presenterRatios = need.video.filter((r) => r === "9:16" || r === "1:1");
-    if (i.providers.creatify && i.copy.script && presenterRatios.length) {
-      await gen(i.providers.creatify, { kind: "avatar_ad", ratio: "9:16", durationSec: 30, script: i.copy.script, language: i.copy.languages[0], appName: i.brand.name }, presenterRatios, "AI presenter video", true);
+    if (i.providers.presenter && i.copy.script && presenterRatios.length) {
+      await gen(i.providers.presenter, { kind: "avatar_ad", ratio: "9:16", durationSec: 30, script: i.copy.script, language: i.copy.languages[0], appName: i.brand.name }, presenterRatios, "AI presenter video", true);
     }
     const nine = out.assets.find((a) => a.asset.kind === "image" && a.asset.ratio === "9:16");
-    if (i.providers.runway && nine && need.video.includes("9:16")) {
+    if (i.providers.generated && nine && need.video.includes("9:16")) {
       await gen(
-        i.providers.runway,
+        i.providers.generated,
         { kind: "image_to_video", ratio: "9:16", durationSec: 5, imageUrl: `data:image/jpeg;base64,${readFileSync(nine.asset.path).toString("base64")}`, prompt: "Slow, steady camera push-in toward the phone; soft light; keep all text and the phone screen exactly as they are.", appName: i.brand.name },
         ["9:16"],
         "Generated motion video",

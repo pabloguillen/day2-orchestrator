@@ -37,8 +37,16 @@ switch on Autonomy, and server setup on Platform.
   week). At most one new post a day, and none while 3 are waiting for the owner.
 - Format: the growth allocator's social_content arms (Thompson sampling on this
   app's own results): Motion video from the app's real screens, a walkthrough
-  recording (web apps), an AI presenter video (only with Creatify set up), or a
-  still image.
+  recording (web apps), an AI presenter video (with a presenter tool), a
+  generated clip of the app's real screen with a voiceover (with a video tool),
+  or a still image (its background generated when an image tool may be used).
+- Creator tools ([creator-tools.md](creator-tools.md)): presenter videos
+  (Creatify, HeyGen), generated clips (Runway, Luma, Google), voiceovers and
+  music (ElevenLabs) and image backgrounds (OpenAI Images), on day2's account
+  (credits, monthly cap per tool) or the owner's own. day2 picks the tool per
+  format from this app's results per `<format>@<tool>`, falls back to the
+  built-in formats when none fits, and each post card says what made it
+  ("Made with Runway"). Results feed the allocator per tool at 72 hours.
 - Words: one writer run with the app profile, Brand DNA (social channel note),
   `memoryFor(app, 'social')`, the owner's declined ideas, what worked for this
   app (openings, topics) and for similar apps (cross-app learning,
@@ -129,7 +137,7 @@ switch on Autonomy, and server setup on Platform.
   content" must be ticked; branded content can't be private; the matching
   declaration ("By posting, you agree to TikTok's Music Usage Confirmation" /
   "…Branded Content Policy and Music Usage Confirmation") is shown.
-- AI presenter videos are labelled AI-generated (`is_aigc`).
+- AI presenter videos, generated clips and posts with a generated background are labelled AI-generated (`is_aigc`).
 - The owner sees the preview and can edit every text; day2 adds no watermark.
 - **TikTok posts always wait for the owner**, even with "Posts go out on
   their own" on: TikTok requires the creator's express consent per upload.

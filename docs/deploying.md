@@ -206,6 +206,13 @@ For **each** platform you want:
   → `CREATIFY_API_ID`, `CREATIFY_API_KEY`; optional `CREATIFY_USD_PER_CREDIT` (default $0.198), `CREATIFY_AVATAR_ID`, `CREATIFY_VOICE_ID`, `CREATIFY_SCRIPT_STYLE`, `CREATIFY_VISUAL_STYLE`
 - [ ] **Runway** (generated motion shots, optional, off by default). An API key from dev.runwayml.com.
   → `RUNWAYML_API_SECRET`, `DAY2_ADS_RUNWAY=on`; optional `RUNWAY_MODEL`, `RUNWAY_USD_PER_CREDIT`
+- [ ] **More creator tools** (optional; [creator-tools.md](creator-tools.md)). day2's own account for each; owners can turn them on per app ("Use day2's", billed in credits, monthly cap) or connect their own keys instead.
+  → HeyGen (presenter videos): `HEYGEN_API_KEY`; optional `HEYGEN_AVATAR_ID`, `HEYGEN_VOICE_ID`, `HEYGEN_ENGINE`, `HEYGEN_USD_PER_SECOND`
+  → Luma (generated clips): `LUMA_API_KEY`; optional `LUMA_MODEL`, `LUMA_RESOLUTION`, `LUMA_USD_PER_CREDIT`
+  → Google, Gemini Omni (generated clips): `GEMINI_API_KEY`; optional `GEMINI_VIDEO_MODEL`, `GEMINI_VIDEO_USD_PER_SECOND`
+  → ElevenLabs (voiceovers, music): `ELEVENLABS_API_KEY`; optional `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL`, `ELEVENLABS_USD_PER_1K_CHARS`, `ELEVENLABS_USD_PER_MUSIC_MINUTE`
+  → OpenAI Images (image backgrounds): `OPENAI_API_KEY`; optional `OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_QUALITY`, `OPENAI_IMAGE_USD_PER_IMAGE`
+  → Owners' own keys are stored encrypted with `DAY2_SECRETS_KEY` (section 4).
 - [ ] **Trend research** (optional). Without these keys the research runs without that source and says so.
   → `YOUTUBE_API_KEY` (Google Cloud, YouTube Data API v3), and Reddit's three vars (section 6)
 

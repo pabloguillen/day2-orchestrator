@@ -92,6 +92,8 @@ function postView(app: AppEntry, p: Post) {
     language: p.language,
     idea: p.idea,
     arm: p.source.arm,
+    /** "Made with Runway": the creator tools behind the media, and whose account (own = billed by the tool, not in credits). */
+    madeWith: (p.source.tools ?? []).map((t) => ({ tool: t.tool, name: t.name, capability: t.capability, account: t.account })),
     scheduledAt: p.scheduledAt,
     timeWhy: p.timeWhy,
     safety: p.safety,

@@ -21,7 +21,8 @@ import { createTicket, rankBacklog, withBacklog } from "./backlog";
 import { backlogFile } from "./backlog-work";
 import { resolve } from "node:path";
 import { researchRetention } from "./retention";
-import { resolvePlatforms, videoProviders } from "./ads/registry";
+import { resolvePlatforms } from "./ads/registry";
+import { adsVideoProviders } from "./creative/kit";
 import { recheckIdentities } from "./ads/connect-flow";
 import { refreshRates } from "./ads/fx";
 import { CRASH_CONTRACT, USER_DAY_DAYS } from "./field-store";
@@ -96,7 +97,7 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
         accounts: new Map(ids.map((id) => [id, { billing: resolved.get(id)!.billing, currency: resolved.get(id)!.currency }])),
         identities: platformIdentities(),
         assets: assetStore(),
-        providers: videoProviders(),
+        providers: await adsVideoProviders(tenant.accountId, app, tenant.credits).catch(() => ({ presenter: null, generated: null })),
         sentConversions: sentConversions(),
         users: async (a: AppEntry) => (await fieldStore().activity(a.id, new Date(Date.now() - USER_DAY_DAYS * 86_400_000).toISOString().slice(0, 10))).users,
         retention: (a: AppEntry) => fieldStore().retention(a.id),

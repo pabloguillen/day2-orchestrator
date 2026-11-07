@@ -36,12 +36,21 @@ export type VideoResult = {
   /** What this generation actually cost day2. */
   costUsd: number;
   providerJobId: string;
+  /** Already on day2's disk (creator tools that return bytes): used instead of downloading `url`. */
+  file?: string;
+  /** Whose account made it (creator tools): the owner's own one isn't billed in credits. */
+  account?: "own" | "day2";
+  /** `costUsd` was already charged to the credits ledger (creator tools bill each job themselves). */
+  billed?: boolean;
 };
 
-export type VideoProviderId = "creatify" | "runway";
+/** The creator tool that made it (src/creative/types.ts ToolId); also the asset's source. */
+export type VideoProviderId = "creatify" | "runway" | "heygen" | "luma" | "gemini_video" | "elevenlabs" | "openai_images";
 
 export interface VideoProvider {
   id: VideoProviderId;
+  /** Shown in labels ("AI presenter video · HeyGen"). */
+  name?: string;
   kinds: VideoJob["kind"][];
   /** Expected cost before generating (for budgeting / credit checks). */
   estimateUsd(job: VideoJob): number;
@@ -57,7 +66,7 @@ export type VideoProviderDeps = Pick<PlatformDeps, "fetch" | "sleep"> & {
 
 export class ProviderError extends Error {
   constructor(
-    public provider: VideoProviderId,
+    public provider: VideoProviderId | string,
     message: string,
     public status?: number,
     /** Worth retrying later (rate limits, outages, transient render failures). */

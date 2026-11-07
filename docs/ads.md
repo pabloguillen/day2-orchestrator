@@ -67,8 +67,10 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
    - **Images.** The app's real landing page, as a phone screenshot, in a frame with the brand colour, headline and button. One image per ratio per variant.
    - **Walkthrough videos.** A real screen recording of the page, composed into the same frame with ffmpeg. It only scrolls: nothing is tapped or typed on the live app. Each video gets a cover image and an audio track.
    - **Motion videos** (`ads/motion.ts`). Animated product ads made in-house: kinetic headline, the app's real screenshots moving in a phone frame, benefit lines, end card with the button. Rendered frame by frame in Chromium and encoded with ffmpeg — no vendor, nothing generated: every screen is a real screenshot and every word is checked copy.
-   - **AI presenter videos (Creatify).** Made when Creatify is connected and the script passed both checks.
-   - **Generated motion shots (Runway).** Off by default; switch on with `DAY2_ADS_RUNWAY=on`.
+   - **AI presenter videos** (Creatify or HeyGen). Made when a presenter tool may be used for the app's ads and the script passed both checks.
+   - **Generated motion shots** (Runway, Luma or Google) of the 9:16 image, when a video tool may be used for the app's ads.
+
+   Both come from the app's **creator tools** ([creator-tools.md](creator-tools.md)): day2's account (billed in credits, within the tool's monthly cap) or the owner's own (not billed in credits). day2 picks the tool per format from the results of earlier ads per `<format>@<tool>`; each ad remembers the tool that made it, and `learnings.tools` shows wins and losses per tool.
 
    Generated video is capped at $12 per experiment (before markup) and billed as content generation. Files are kept on day2's disk and served at `/api/assets/<unguessable id>`, because most platforms fetch media by URL.
 5. **Launch.**
@@ -156,9 +158,10 @@ Older setups can still put day2's account in the environment (below); connecting
 - Until then day2 runs the app on the platforms that are ready, and the console says what's missing.
 - Meta Pages assigned on the Platform page count automatically.
 
-**Video providers** (`src/ads/providers/`):
+**Video providers** (creator tools, `src/creative/`, with Creatify and Runway in `src/ads/providers/`):
 - Creatify: `CREATIFY_API_ID`, `CREATIFY_API_KEY`, optional `CREATIFY_USD_PER_CREDIT` (default $0.198, the Starter API plan), `CREATIFY_AVATAR_ID`, `CREATIFY_VOICE_ID`.
 - Runway: `RUNWAYML_API_SECRET` and `DAY2_ADS_RUNWAY=on`.
+- HeyGen, Luma, Google (Gemini Omni), ElevenLabs, OpenAI Images: see [creator-tools.md](creator-tools.md#for-operators-days-own-accounts). Owners can also connect their own accounts on Growth → Accounts.
 
 The server image includes ffmpeg and Chromium.
 

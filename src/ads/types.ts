@@ -29,7 +29,7 @@ export type AssetSpec = {
   mimes: string[];
 };
 
-export type AssetSource = "screenshot" | "template" | "screen_recording" | "creatify" | "runway" | "upload" | "motion_template";
+export type AssetSource = "screenshot" | "template" | "screen_recording" | "creatify" | "runway" | "upload" | "motion_template" | "heygen" | "luma" | "gemini_video" | "elevenlabs" | "openai_images";
 
 /** A finished image or video, stored and served by day2. */
 export type Asset = {

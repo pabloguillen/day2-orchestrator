@@ -2,7 +2,8 @@ import { join, resolve } from "node:path";
 import type { AppEntry } from "../apps-registry";
 import { hasStores, refreshAppLinks, smartLink, storeScreenshots } from "../ads/app-links";
 import { ensureLocalSecretsKey } from "../ads/connections";
-import { CONNECTS, videoProviders } from "../ads/registry";
+import { CONNECTS } from "../ads/registry";
+import { creatorKitFor } from "../creative/kit";
 import { META_API_VERSION } from "../ads/platforms/meta";
 import type { Tokens } from "../ads/connect/types";
 import { authConfig } from "../auth";
@@ -170,6 +171,8 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
         const competitors = competitorsOf(app);
         const worked = await workedLines(app, "social").catch(() => [] as string[]);
         const autonomy = loadAutonomyConfig(resolve(app.repoPath, AUTONOMY_CONFIG_FILENAME));
+        // Each day2-account tool job is charged by the kit right after it runs (a later failure can't lose the charge).
+        const creator = await creatorKitFor(tenant.accountId, app, "posts", { billing: { credits: tenant.credits, appId: app.id, appName: app.name } }).catch(() => null);
         const { result, credits } = await run("content_generation", "Social post (autopilot)", WRITE_MAX_USD * 3, () =>
           draftPosts(app, profile, {
             posts,
@@ -179,7 +182,7 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
             checks: { truthful: checkTruthfulClaims, authentic: checkAuthenticity },
             screens: async () => (appLinks && hasStores(appLinks) ? await storeScreenshots(appLinks, join(tmpdir(), `day2-social-shots-${app.id}`)).catch(() => []) : []),
             pageUrl: storeApp ? null : (app.appBaseUrl ?? null),
-            creatify: videoProviders().creatify,
+            creator,
             memory: ctx.memory,
             avoid: ctx.avoid,
             worked,
@@ -195,8 +198,8 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
             now: new Date(),
           }),
         );
-        if (result.costUsd > 0) await recordCharge(tenant.credits, { id: `socialgen:${app.id}:${result.posts[0]?.group ?? Date.now()}`, appId: app.id, service: "content_generation", costUsd: result.costUsd, description: "Social post video" }).catch(() => null);
-        const total = credits + (result.costUsd > 0 ? creditsForCost(result.costUsd, "content_generation") : 0);
+        if (result.costUsd > 0) await recordCharge(tenant.credits, { id: `socialgen:${app.id}:${result.posts[0]?.group ?? Date.now()}`, appId: app.id, service: "content_generation", costUsd: result.costUsd, description: `Social post media${result.posts[0]?.source.tools?.length ? ` (${[...new Set(result.posts[0].source.tools.filter((x) => x.account === "day2").map((x) => x.name))].join(", ")})` : ""}` }).catch(() => null);
+        const total = credits + (result.costUsd > 0 ? creditsForCost(result.costUsd, "content_generation") : 0) + (result.prebilledUsd ? creditsForCost(result.prebilledUsd, "content_generation") : 0);
         for (const p of result.posts) await posts.update(app.id, p.id, (x) => ({ ...x, costCredits: Math.round(total / result.posts.length), targets: x.targets.map((t) => (t.platform === "facebook" && link ? { ...t, linkTag: "social.fb" } : t)) }));
         return { ...result, credits: total };
       },
