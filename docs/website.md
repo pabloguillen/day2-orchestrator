@@ -22,6 +22,12 @@ and the privacy page's provider list when a server host and an email provider
 are chosen. Have the privacy policy and terms checked by a lawyer before real
 customers sign up.
 
+Email addresses in the pages are wrapped in `<!--email_off-->` …
+`<!--/email_off-->`. Without that, Cloudflare's Email Address Obfuscation
+turns them into "[email protected]", and the decoding script it relies on
+is blocked by the site's security headers. Keep the markers on any new
+address.
+
 ## 2. Publish to Cloudflare Pages
 
 Wrangler is the Cloudflare tool `deploy/inbox/setup.sh` already uses, so
