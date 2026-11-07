@@ -175,7 +175,10 @@ You already have the app "gora8". These steps finish it.
    META_APP_ID=
    META_APP_SECRET=
    DAY2_META_BUSINESS_ID=
+   META_LOGIN_CONFIG_ID=
    ```
+   `META_LOGIN_CONFIG_ID` is the login configuration from step 15a (gora8
+   is a Business-type app, so its sign-in needs one).
 10. Save.
 
 ### 2d. Products and the redirect URL
@@ -195,11 +198,28 @@ You already have the app "gora8". These steps finish it.
     Meta may add a slash at the end; that's fine.
 15. Click **Save changes**.
 
-**If Meta's sign-in later says the feature isn't available, or asks for a
-"configuration":** Facebook Login for Business sometimes needs a login
-configuration ID instead of a list of permissions. day2 currently asks for
-permissions directly. Tell me if you see this and I'll add support for the
-configuration ID.
+**The login configuration** (needed for Business-type apps like gora8; if
+the Instagram use case says "no compatible configuration found", this is
+the fix):
+
+15a. In the left menu, open **Facebook Login for Business** →
+     **Configurations** (**Konfigurationen**) → **Create configuration**.
+     Name it e.g. "gora8 connect", pick **General login** and the token
+     type **User access token**.
+15b. Tick these 10 permissions: `ads_management`, `ads_read`,
+     `business_management`, `instagram_basic`, `instagram_content_publish`,
+     `instagram_manage_insights`, `pages_manage_posts`,
+     `pages_read_engagement`, `pages_show_list`, `read_insights`.
+     Create it.
+15c. Copy its **Configuration ID** (gora8's: `5591455221080623`) into
+     `.env` as `META_LOGIN_CONFIG_ID=` (step 9) and restart day2. day2 then
+     opens Meta's sign-in with this configuration instead of a permission
+     list, for every Meta connect (day2's ad account, the app owner's ad
+     account, the owner's Page and Social posting). Optional:
+     `META_LOGIN_CONFIG_ID_ADS` / `META_LOGIN_CONFIG_ID_SOCIAL` use a
+     different configuration for the ad-account connect or the Page/Social
+     connect. Without `META_LOGIN_CONFIG_ID`, day2 asks for the permissions
+     directly (works for non-Business apps).
 
 ### 2e. Business verification (takes days)
 16. Go to **https://business.facebook.com/settings** → **Security center**.

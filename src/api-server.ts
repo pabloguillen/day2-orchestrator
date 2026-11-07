@@ -2367,6 +2367,7 @@ async function platformAdsResponse() {
       { id: "secrets", ok: hasSecretsKey(), label: "An encryption key for connected accounts", detail: hasSecretsKey() ? "set" : "DAY2_SECRETS_KEY" },
       { id: "ffmpeg", ok: which("ffmpeg"), label: "ffmpeg, to make videos", detail: which("ffmpeg") ? "installed" : "missing" },
       { id: "chromium", ok: Boolean(chromiumPath()), label: "Chromium, to make images and recordings", detail: chromiumPath() ? "installed" : "missing" },
+      { id: "meta_login_config", ok: Boolean(process.env.META_LOGIN_CONFIG_ID?.trim()), label: "A Facebook Login for Business configuration for Meta (recommended for Business-type Meta apps)", detail: process.env.META_LOGIN_CONFIG_ID?.trim() ? "set" : "META_LOGIN_CONFIG_ID" },
       { id: "creatify", ok: Boolean(videoProviders().creatify), label: "Creatify, for AI presenter videos (optional)", detail: videoProviders().creatify ? "connected" : "CREATIFY_API_ID, CREATIFY_API_KEY" },
     ],
     /** Organic posting (src/social/): what's missing on this server, and the redirect URIs to register. */

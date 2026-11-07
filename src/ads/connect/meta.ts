@@ -17,6 +17,16 @@ import type { AdAccountChoice, AppCredentials, IdentityChoice, PlatformConnect, 
  *   organic posting on the Page and its Instagram account (and reading the
  *   posts' results) — purpose "social" is that sign-in started from the
  *   Social page (src/social/).
+ *
+ * Business-type Meta apps use Facebook Login for Business: their use cases
+ * only accept a login configuration (Facebook Login for Business →
+ * Configurations), so the dialog is opened with `config_id` instead of a
+ * `scope` list. META_LOGIN_CONFIG_ID sets it for every purpose;
+ * META_LOGIN_CONFIG_ID_ADS (purpose "account") and
+ * META_LOGIN_CONFIG_ID_SOCIAL ("identity", "social") override it. The
+ * permissions granted are read from /me/permissions after the exchange,
+ * either way.
+ * https://developers.facebook.com/docs/facebook-login/facebook-login-for-business
  */
 
 // The owner's Page sign-in also asks for organic posting and its results
@@ -33,6 +43,12 @@ const SCOPES = {
 /** Tasks day2 asks for on the app's Page: run ads as it and read their results. */
 const PAGE_TASKS = ["ADVERTISE", "ANALYZE"];
 const APPROVE_TODO = "Approve day2's request in Meta Business Suite → Requests (Settings → Requests → Received), so day2 can run ads as your Page.";
+
+/** The login configuration for this purpose, or null (then the dialog asks for SCOPES). */
+export function loginConfigId(app: AppCredentials, purpose: keyof typeof SCOPES): string | null {
+  const own = purpose === "account" ? app.loginConfigIdAds : app.loginConfigIdSocial;
+  return own || app.loginConfigId || null;
+}
 
 const version = (app: AppCredentials) => app.apiVersion ?? META_API_VERSION;
 
@@ -60,9 +76,12 @@ type PageRow = { id: string; name?: string; tasks?: string[]; instagram_business
 
 export const connect: PlatformConnect = {
   platform: "meta",
-  appEnv: ["META_APP_ID", "META_APP_SECRET"],
+  appEnv: ["META_APP_ID", "META_APP_SECRET", "META_LOGIN_CONFIG_ID (optional)"],
 
-  /** META_APP_ID, META_APP_SECRET; optional DAY2_META_BUSINESS_ID (needed for grantIdentity), META_API_VERSION. */
+  /**
+   * META_APP_ID, META_APP_SECRET; optional DAY2_META_BUSINESS_ID (needed for grantIdentity), META_API_VERSION,
+   * META_LOGIN_CONFIG_ID (+ META_LOGIN_CONFIG_ID_ADS / META_LOGIN_CONFIG_ID_SOCIAL overrides).
+   */
   appCredentials(env) {
     const appId = env.META_APP_ID?.trim();
     const appSecret = env.META_APP_SECRET?.trim();
@@ -72,6 +91,10 @@ export const connect: PlatformConnect = {
     if (businessId) app.businessId = businessId;
     const v = env.META_API_VERSION?.trim();
     if (v && /^v\d+\.\d+$/.test(v)) app.apiVersion = v;
+    for (const [key, name] of [["loginConfigId", "META_LOGIN_CONFIG_ID"], ["loginConfigIdAds", "META_LOGIN_CONFIG_ID_ADS"], ["loginConfigIdSocial", "META_LOGIN_CONFIG_ID_SOCIAL"]] as const) {
+      const id = env[name]?.trim();
+      if (id) app[key] = id;
+    }
     return app;
   },
 
@@ -81,7 +104,14 @@ export const connect: PlatformConnect = {
     u.searchParams.set("redirect_uri", o.redirectUri);
     u.searchParams.set("state", o.state);
     u.searchParams.set("response_type", "code");
-    u.searchParams.set("scope", SCOPES[o.purpose].join(","));
+    const configId = loginConfigId(app, o.purpose);
+    if (configId) {
+      // Facebook Login for Business: the configuration carries the permissions.
+      u.searchParams.set("config_id", configId);
+      u.searchParams.set("override_default_response_type", "true");
+    } else {
+      u.searchParams.set("scope", SCOPES[o.purpose].join(","));
+    }
     return { url: u.toString() };
   },
 

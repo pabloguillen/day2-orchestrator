@@ -176,7 +176,10 @@ See [operator-setup.md](operator-setup.md) §2d/2f (Meta: products, the new
 permissions for App Review) and §3d (TikTok Content Posting API).
 
 - Env: `META_APP_ID`, `META_APP_SECRET` (the same Meta app as ads; optional
-  `META_API_VERSION`, default v26.0), `TIKTOK_CONTENT_CLIENT_KEY`,
+  `META_API_VERSION`, default v26.0; `META_LOGIN_CONFIG_ID`, recommended for
+  Business-type Meta apps, makes the sign-in use that Facebook Login for
+  Business configuration instead of a scope list, optional override
+  `META_LOGIN_CONFIG_ID_SOCIAL`), `TIKTOK_CONTENT_CLIENT_KEY`,
   `TIKTOK_CONTENT_CLIENT_SECRET` (a separate TikTok app from the Marketing
   API's `TIKTOK_APP_ID`), optional `TIKTOK_CONTENT_API_BASE`.
 - Redirect URIs: `https://<domain>/api/ads/connect/callback/meta` (already

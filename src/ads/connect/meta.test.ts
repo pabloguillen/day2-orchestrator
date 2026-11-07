@@ -17,7 +17,8 @@ describe("meta connect", () => {
     expect(connect.appCredentials({ META_APP_ID: "a" })).toBeNull();
     expect(connect.appCredentials({ META_APP_ID: "a", META_APP_SECRET: "s" })).toEqual({ appId: "a", appSecret: "s" });
     expect(connect.appCredentials({ META_APP_ID: "a", META_APP_SECRET: "s", DAY2_META_BUSINESS_ID: "b" })).toEqual({ appId: "a", appSecret: "s", businessId: "b" });
-    expect(connect.appEnv).toEqual(["META_APP_ID", "META_APP_SECRET"]);
+    expect(connect.appCredentials({ META_APP_ID: "a", META_APP_SECRET: "s", META_LOGIN_CONFIG_ID: " 5591455221080623 ", META_LOGIN_CONFIG_ID_SOCIAL: "77" })).toEqual({ appId: "a", appSecret: "s", loginConfigId: "5591455221080623", loginConfigIdSocial: "77" });
+    expect(connect.appEnv).toEqual(["META_APP_ID", "META_APP_SECRET", "META_LOGIN_CONFIG_ID (optional)"]);
   });
 
   test("authorizeUrl asks for ads scopes or page scopes", async () => {
@@ -36,6 +37,44 @@ describe("meta connect", () => {
     const s = new URL((await connect.authorizeUrl(app, { state: "st", redirectUri: "https://day2.example/cb", purpose: "social" })).url);
     expect(s.searchParams.get("scope")).toBe(i.searchParams.get("scope"));
     expect(i.toString()).not.toContain("appsecret");
+  });
+
+  test("authorizeUrl with a Facebook Login for Business configuration: config_id instead of scope", async () => {
+    const withConfig = { ...app, loginConfigId: "5591455221080623" };
+    for (const purpose of ["account", "identity", "social"] as const) {
+      const u = new URL((await connect.authorizeUrl(withConfig, { state: "st", redirectUri: "https://day2.example/cb", purpose })).url);
+      expect(u.origin + u.pathname).toBe(`https://www.facebook.com/${META_API_VERSION}/dialog/oauth`);
+      expect(Object.fromEntries(u.searchParams)).toEqual({
+        client_id: "app1",
+        redirect_uri: "https://day2.example/cb",
+        state: "st",
+        response_type: "code",
+        config_id: "5591455221080623",
+        override_default_response_type: "true",
+      });
+    }
+    // Per-purpose overrides.
+    const split = { ...app, loginConfigId: "1", loginConfigIdAds: "2", loginConfigIdSocial: "3" };
+    const cfg = async (purpose: "account" | "identity" | "social") => new URL((await connect.authorizeUrl(split, { state: "st", redirectUri: "https://day2.example/cb", purpose })).url).searchParams.get("config_id");
+    expect([await cfg("account"), await cfg("identity"), await cfg("social")]).toEqual(["2", "3", "3"]);
+    const adsOnly = { ...app, loginConfigIdAds: "2" };
+    const s = new URL((await connect.authorizeUrl(adsOnly, { state: "st", redirectUri: "https://day2.example/cb", purpose: "social" })).url);
+    expect(s.searchParams.get("config_id")).toBeNull();
+    expect(s.searchParams.get("scope")).toContain("pages_manage_posts");
+  });
+
+  test("exchange with a login configuration: granted permissions come from /me/permissions", async () => {
+    const f = scriptedFetch([
+      { method: "GET", url: `${G}/oauth/access_token`, json: { access_token: "SHORT", expires_in: 5000 } },
+      { method: "GET", url: `${G}/oauth/access_token`, json: { access_token: "LONG", expires_in: 5183944 } },
+      { url: `${G}/me?fields=id`, json: { id: "u1" } },
+      {
+        url: `${G}/me/permissions`,
+        json: { data: [{ permission: "pages_show_list", status: "granted" }, { permission: "instagram_content_publish", status: "declined" }, { permission: "pages_manage_posts", status: "granted" }] },
+      },
+    ]);
+    const t = await connect.exchange({ ...app, loginConfigId: "5591455221080623" }, { query: { code: "CODE", state: "st" }, redirectUri: "https://day2.example/cb" }, { fetch: f.fetch, sleep: noSleep });
+    expect(t.scopes).toEqual(["pages_show_list", "pages_manage_posts"]);
   });
 
   test("exchange: code → short-lived → long-lived token, user id and granted scopes", async () => {

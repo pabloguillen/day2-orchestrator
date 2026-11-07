@@ -279,6 +279,20 @@ describe("Social API", () => {
     const u = new URL(meta.body!.url);
     expect(u.searchParams.get("redirect_uri")).toBe(`${ORIGIN}/api/ads/connect/callback/meta`);
     expect(u.searchParams.get("scope")).toContain("instagram_content_publish");
+    expect(u.searchParams.get("config_id")).toBeNull();
+    // A Business-type Meta app: the Facebook Login for Business configuration replaces the scope list.
+    process.env.META_LOGIN_CONFIG_ID = "5591455221080623";
+    try {
+      const c = await call("POST", `/api/apps/${appId}/social/connect/meta`, { cookie: alice, body: {} });
+      const cu = new URL(c.body!.url);
+      expect(cu.searchParams.get("config_id")).toBe("5591455221080623");
+      expect(cu.searchParams.get("override_default_response_type")).toBe("true");
+      expect(cu.searchParams.get("response_type")).toBe("code");
+      expect(cu.searchParams.get("scope")).toBeNull();
+      expect(cu.searchParams.get("state")).toBeTruthy();
+    } finally {
+      delete process.env.META_LOGIN_CONFIG_ID;
+    }
   });
 
   test("TikTok's callback is public, refuses unknown sign-ins, and lands back on the console", async () => {

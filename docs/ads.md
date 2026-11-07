@@ -32,7 +32,7 @@ Who connects what:
 
 | Platform | Developer app keys |
 |---|---|
-| Meta | `META_APP_ID`, `META_APP_SECRET` (+ `DAY2_META_BUSINESS_ID` for Page access requests) |
+| Meta | `META_APP_ID`, `META_APP_SECRET` (+ `DAY2_META_BUSINESS_ID` for Page access requests; `META_LOGIN_CONFIG_ID`, recommended for Business-type apps: the Facebook Login for Business configuration sent as `config_id` instead of a scope list, optional `META_LOGIN_CONFIG_ID_ADS` override; [operator-setup.md](operator-setup.md) §2d) |
 | TikTok | `TIKTOK_APP_ID`, `TIKTOK_APP_SECRET` |
 | Google | `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID` |
 | LinkedIn | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` |
