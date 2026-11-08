@@ -396,6 +396,36 @@ step 7.
 Done: day2 connects to the "gora8" organization. It's on the Free plan, which
 is fine until go-live.
 
+Demo backends for real screens (creative-quality.md §2b) are created in the
+same organization (`<app>-<id>-demo`). The Free plan allows **2 active
+projects**: with the hosting projects that's quickly full — day2 then shows
+"no room for another project" on Growth → Formats and creates nothing. day2
+pauses a demo project after each capture (`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off`
+keeps it running); paused projects don't count against the 2.
+
+## 5b. Capturing real screens on your Mac (Xcode, Maestro, EAS)
+
+Posts show your apps' real screens, captured on the iPhone Simulator.
+
+1. **Xcode** from the Mac App Store; open it once, accept the licence, and in
+   Xcode → Settings → Components install an iOS Simulator runtime. Check:
+   `xcrun simctl list devices available` lists an iPhone.
+2. **Maestro** (the flow runner): in Terminal
+   `curl -fsSL "https://get.maestro.mobile.dev" | bash`, then open a new
+   Terminal window and check `maestro --version`. (Java 17+ is needed; macOS
+   asks to install it on first run if missing — `brew install openjdk@17`.)
+3. Run day2 on the Mac (`bun run src/api-server.ts` with your `.env`): with
+   Xcode present captures run locally (`DAY2_CAPTURE=local` forces it,
+   `off` stops it).
+4. Optional, Android: Android Studio with one virtual device (Device
+   Manager); used when an app has no iOS build.
+5. **EAS instead of the Mac** (deployed day2): `DAY2_CAPTURE=eas` and the
+   app's Expo account connected (Connect your stores). day2 runs an EAS
+   Workflow (simulator build with its `day2-demo` profile + a Maestro job)
+   and downloads the screenshots artifact. That download isn't verified
+   against a real run yet; if it fails the card says so and the Mac path is
+   the way.
+
 ---
 
 ## 6. Optional: videos and trend research

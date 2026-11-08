@@ -110,6 +110,10 @@ export function supabaseApi(token: string, deps: SupabaseDeps = {}) {
     backups: (ref: string) => call<{ region: string; pitr_enabled: boolean; walg_enabled: boolean; backups: Array<{ id: number; status: string; inserted_at: string; is_physical_backup: boolean }> }>("GET", `${p(ref)}/database/backups`),
     diskUtil: (ref: string) => call<{ timestamp: string; metrics: { fs_size_bytes: number; fs_avail_bytes: number; fs_used_bytes: number } }>("GET", `${p(ref)}/config/disk/util`),
 
+    // ---- Data API (PostgREST) settings: which schemas the REST API serves ----
+    postgrestConfig: (ref: string) => call<{ db_schema: string; max_rows?: number; db_extra_search_path?: string }>("GET", `${p(ref)}/postgrest`),
+    updatePostgrest: (ref: string, patch: { db_schema?: string }) => call<{ db_schema: string }>("PATCH", `${p(ref)}/postgrest`, { body: patch }),
+
     // ---- Storage ----
     buckets: (ref: string) => call<Array<{ id: string; name: string; public: boolean }>>("GET", `${p(ref)}/storage/buckets`),
 

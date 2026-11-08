@@ -88,6 +88,11 @@ export function promptProblem(text: string, opts: { scene?: boolean; allow?: str
 /** Added to every scene prompt: the tools' content policies and day2's own rules. */
 export const SCENE_RULES = "No real or recognizable people: no people, faces or hands at all; no added text, captions, logos or brand names; nothing violent, sexual or unsafe; suitable for ages 13+.";
 
+/** Added to every demo-cast profile photo prompt (ImageJob subject "fictional_person"). */
+export const FICTIONAL_PERSON_RULES = "The person is invented and must not look like any real, famous or recognizable individual. A clearly adult person (20s), never a child or teenager. Fully clothed, friendly, everyday setting. No text, letters, captions, logos, brand names or watermarks; nothing violent, sexual or unsafe.";
+
+const isFictionalPerson = (job: CreativeJob) => job.capability === "image" && job.subject === "fictional_person";
+
 const KIND: Record<CreativeJob["capability"], MediaKind> = { presenter_video: "video", generated_video: "video", image: "image", voice: "audio", music: "audio" };
 
 const EXT: Record<string, string> = { "video/mp4": ".mp4", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav" };
@@ -101,11 +106,13 @@ export function creatorKit(i: { purpose: Purpose; states: ToolState[]; deps?: To
     candidates: (job) => candidates(i.states, i.purpose, job, creditsFor),
     pick: (job, ctx) => pickTool(kit.candidates(job), ctx),
     async run(c, job, dir = mkdtempSync(join(tmpdir(), "day2-creative-"))) {
-      const scene = job.capability === "generated_video" || job.capability === "image";
+      const person = isFictionalPerson(job);
+      const scene = !person && (job.capability === "generated_video" || job.capability === "image");
       const words = job.capability === "presenter_video" ? job.script : job.capability === "voice" ? job.text : job.prompt;
-      const problem = promptProblem(words, { scene, allow: "appName" in job ? [job.appName] : [] });
+      // A demo-cast photo describes an invented person on purpose; it still may not name anyone (handles, links, real names, "two capitalised words").
+      const problem = promptProblem(words, { scene, allow: "appName" in job ? [job.appName] : [] }) ?? (person && looksLikeName(words.replace(/\b(?:Photorealistic|Natural|Shot|Daylight)\b/g, "")) ? "it seems to name a person" : null);
       if (problem) throw new Error(`Not sent to ${c.name}: ${problem}.`);
-      const safe: CreativeJob = scene ? { ...job, prompt: `${job.prompt.trim()}\n${SCENE_RULES}` } : job;
+      const safe: CreativeJob = scene ? { ...job, prompt: `${job.prompt.trim()}\n${SCENE_RULES}` } : person && job.capability === "image" ? { ...job, prompt: `${job.prompt.trim()}\n${FICTIONAL_PERSON_RULES}` } : job;
       const st = i.states.find((s) => s.def.id === c.id);
       const day2 = c.account === "day2";
       // 1. Reserve the estimate against the cap, from the settings as they are now.
@@ -148,7 +155,7 @@ export function creatorKit(i: { purpose: Purpose; states: ToolState[]; deps?: To
           await recordCharge(i.billing.credits, { id: `creator:${i.billing.appId}:${c.id}:${out.providerJobId}`, appId: i.billing.appId, service: "content_generation", costUsd: out.costUsd, description: `${CAPABILITY_LABEL[job.capability].replace(/s$/, "")} (${c.name})` });
           charged = true;
         }
-        return { file, mime: out.mime, durationSec: out.durationSec, aiPerson: out.aiPerson, billedUsd: day2 ? out.costUsd : 0, charged, costUsd: out.costUsd, credits, made: { tool: c.id, name: c.name, capability: job.capability, account: c.account }, providerJobId: out.providerJobId };
+        return { file, mime: out.mime, durationSec: out.durationSec, aiPerson: out.aiPerson || person, billedUsd: day2 ? out.costUsd : 0, charged, costUsd: out.costUsd, credits, made: { tool: c.id, name: c.name, capability: job.capability, account: c.account }, providerJobId: out.providerJobId };
       } catch (err) {
         release(reserved);
         throw err;

@@ -58,7 +58,7 @@ export type ScreenAsset = {
   height: number;
   /** The language of the screen's UI text, when known (null = unknown). */
   language: string | null;
-  source: "capture" | "recording" | "store" | "web" | "mock";
+  source: "capture" | "recording" | "store" | "web" | "mock" | "upload";
   name?: string;
   /** Share of the height the status bar takes (cropped off in cards). */
   statusBar?: number;

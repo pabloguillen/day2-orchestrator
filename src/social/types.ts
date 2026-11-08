@@ -179,6 +179,8 @@ export type PostCreative = {
   videoId?: string | null;
   /** The screens it was made from (assets), for re-rendering after an edit. */
   screens?: Array<{ id: string; width: number; height: number; language: string | null; statusBar: number; name: string; source: string }>;
+  /** The post shows AI-generated (fictional) people or photos — the demo cast. TikTok gets is_aigc; the card says so. */
+  aiContent?: { aiGenerated: boolean; aiPerson: boolean; why: string } | null;
 };
 
 export type SocialSettings = {

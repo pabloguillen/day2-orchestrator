@@ -12,6 +12,7 @@ import { preferenceLines, type CreativeState } from "./taste";
 import { TEMPLATES } from "./templates";
 import type { BrollAsset, Ratio, ShotList, TemplateId } from "./templates/types";
 import type { VisionRun } from "./vision";
+import { markAiJpeg } from "./ai-label";
 
 /**
  * The studio: one idea in, 1–2 finished variants out (docs/creative-quality.md).
@@ -66,14 +67,16 @@ export type StudioInput = {
 
 /** The screens a post was made from, kept as assets (so an edit can re-render the slides later). */
 export type KeptScreen = { id: string; width: number; height: number; language: string | null; statusBar: number; name: string; source: string };
-export type StudioOut = { variants: StudioVariant[]; dropped: string[]; warning: string | null; kit: ResolvedKit; screens?: KeptScreen[] };
+/** `aiContent`: the screens show day2's AI-generated demo cast — every asset and post made from them carries the AI label. */
+export type StudioOut = { variants: StudioVariant[]; dropped: string[]; warning: string | null; kit: ResolvedKit; screens?: KeptScreen[]; aiContent?: { aiGenerated: boolean; aiPerson: boolean } | null };
 
 export async function runStudio(i: StudioInput): Promise<StudioOut> {
   const kit = resolveKit(i.kit, { repoPath: i.repoPath, appName: i.appName, dna: i.dna });
   // Post language wins over the kit's guess (the owner may have set it on Social).
   kit.language = i.language;
   const brief = kitBrief(kit, i.kit);
-  const out: StudioOut = { variants: [], dropped: [], warning: i.screens.warning, kit };
+  const out: StudioOut = { variants: [], dropped: [], warning: i.screens.warning, kit, aiContent: i.screens.aiContent ?? null };
+  const ai = { aiGenerated: Boolean(i.screens.aiContent?.aiGenerated), aiPerson: Boolean(i.screens.aiContent?.aiPerson) };
   if (!i.screens.screens.length) {
     out.dropped.push("day2 has no real screen of the app yet");
     return out;
@@ -114,7 +117,7 @@ export async function runStudio(i: StudioInput): Promise<StudioOut> {
       for (const [k, sc] of i.screens.screens.entries()) {
         const copy = join(dir, `screen-${k}${sc.file.match(/\.(png|jpe?g)$/i)?.[0] ?? ".png"}`);
         copyFileSync(sc.file, copy);
-        const a = await i.store.put(copy, { appId: i.appId, purpose: `${i.tag}:screens`, label: `Screen ${k + 1}`, kind: "image", ratio: "9:16", width: sc.width, height: sc.height, mime: /\.png$/i.test(copy) ? "image/png" : "image/jpeg", source: "screenshot", aiGenerated: false, aiPerson: false });
+        const a = await i.store.put(copy, { appId: i.appId, purpose: `${i.tag}:screens`, label: `Screen ${k + 1}`, kind: "image", ratio: "9:16", width: sc.width, height: sc.height, mime: /\.png$/i.test(copy) ? "image/png" : "image/jpeg", source: "screenshot", ...ai });
         out.screens.push({ id: a.id, width: sc.width, height: sc.height, language: sc.language, statusBar: sc.statusBar ?? 0, name: sc.name ?? `screen-${k + 1}`, source: sc.source });
       }
     }
@@ -125,9 +128,11 @@ export async function runStudio(i: StudioInput): Promise<StudioOut> {
 }
 
 async function storeRendered(i: StudioInput, r: Rendered, name: string): Promise<Pick<StudioVariant, "video" | "cover" | "slides">> {
-  const base = { appId: i.appId, purpose: i.tag, aiGenerated: false, aiPerson: false, source: "motion_template" as const };
+  const base = { appId: i.appId, purpose: i.tag, aiGenerated: Boolean(i.screens.aiContent?.aiGenerated), aiPerson: Boolean(i.screens.aiContent?.aiPerson), source: "motion_template" as const };
   let cover: StoredAsset | null = null;
   let video: StoredAsset | null = null;
+  // Images that show the AI-generated demo cast carry the standard AI mark (Meta's "AI info").
+  if (base.aiGenerated) for (const f of [r.video?.cover, ...r.slides.flatMap((s) => s.files)]) if (f) markAiJpeg(f);
   if (r.video) {
     cover = await i.store.put(r.video.cover, { ...base, label: `Cover · ${TEMPLATES[r.template].label}`, kind: "image", ratio: "9:16", width: 1080, height: 1920, mime: "image/jpeg" });
     video = await i.store.put(r.video.file, { ...base, label: `${TEMPLATES[r.template].label} video`, kind: "video", ratio: "9:16", width: 1080, height: 1920, mime: "video/mp4", durationSec: r.video.seconds, thumbnailId: cover.id });

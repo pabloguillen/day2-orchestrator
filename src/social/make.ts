@@ -590,7 +590,8 @@ async function draftWithStudio(app: { id: string; name: string }, d: DraftDeps, 
         timeSlot: w.slot,
         timeWhy: w.why,
         safety: { ok: safety.length === 0, issues: safety, checkedAt: nowIso },
-        tiktok: family.includes("tiktok") ? { privacyLevel: null, allowComment: false, allowDuet: false, allowStitch: false, disclose: false, yourBrand: false, brandedContent: false, isAigc: false } : null,
+        // Screens with day2's AI-generated demo cast: labelled as AI-generated content.
+        tiktok: family.includes("tiktok") ? { privacyLevel: null, allowComment: false, allowDuet: false, allowStitch: false, disclose: false, yourBrand: false, brandedContent: false, isAigc: Boolean(out.aiContent?.aiGenerated) } : null,
         ...(auto ? { approvedBy: "day2 (posts go out on their own)", approvedAt: nowIso } : {}),
         costCredits: 0,
         createdAt: nowIso,
@@ -621,6 +622,7 @@ function creativeOf(v: StudioVariant, out: StudioOut, index: number, set: string
     squareIds: (v.slides["1:1"] ?? []).map((a) => a.id),
     videoId: v.video?.id ?? null,
     ...(out.screens ? { screens: out.screens } : {}),
+    ...(out.aiContent?.aiGenerated ? { aiContent: { aiGenerated: true, aiPerson: Boolean(out.aiContent.aiPerson), why: "The screens show day2's demo cast: AI-generated, fictional people and photos." } } : {}),
   };
 }
 

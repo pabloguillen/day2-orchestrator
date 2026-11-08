@@ -33,6 +33,8 @@ export const KNOWN_HOSTS: Record<string, string[]> = {
   gemini_video: ["googleapis.com", "googleusercontent.com"],
   elevenlabs: ["elevenlabs.io"],
   openai_images: ["oaiusercontent.com", "openai.com"],
+  // EAS workflow artifacts (capture screenshots): Expo's API and its signed storage links.
+  eas: ["expo.dev", "expo.io", "storage.googleapis.com"],
 };
 
 export const MAX_BYTES: Record<MediaKind, number> = { video: 200 * 1024 * 1024, image: 20 * 1024 * 1024, audio: 50 * 1024 * 1024 };

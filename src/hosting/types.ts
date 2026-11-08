@@ -194,6 +194,41 @@ export type HostingState = {
   takeover: { state: "none" | "ready" | "moved" | "failed"; orgSlug: string | null; at: string | null; by: string | null; error: string | null; warnings: string[] };
   problem: { text: string; at: string } | null;
   log: HostingLog[];
+  /** The app's separate demo project for marketing screens (hosting/demo.ts) — never the live database. */
+  demo?: DemoBackend | null;
+};
+
+export const DEMO_STEPS = ["project", "healthy", "keys", "auth_config", "schemas", "migrations", "plan", "users", "rows", "uploads"] as const;
+export type DemoStep = (typeof DEMO_STEPS)[number];
+
+/** What day2 created and filled (nothing secret: keys and the demo login are in the encrypted secrets). */
+export type DemoBackend = {
+  /** Who created it — only a project day2 created as a demo is ever seeded. */
+  createdBy: "day2-demo";
+  ref: string;
+  name: string;
+  orgSlug: string;
+  region: Region;
+  url: string;
+  publishableKey: string | null;
+  createdAt: string;
+  status: ProjectStatus;
+  done: DemoStep[];
+  working: DemoStep | null;
+  migrations: { applied: number; total: number; failed: { file: string; error: string } | null };
+  /** The seed plan used (data) and what it put in. */
+  plan: { source: "model" | "heuristic"; tables: string[]; notes: string[] } | null;
+  /** The whole seed plan (hosting/seed-plan.ts) — data only, checked against the schema. */
+  spec?: unknown;
+  seededAt: string | null;
+  castSeed: number | null;
+  rows: number;
+  uploads: number;
+  /** Rows and users day2 added (to replace them when the cast changes). */
+  seeded: { users: string[]; rows: Array<{ table: string; column: string; values: string[] }> };
+  pausedAt: string | null;
+  problem: string | null;
+  log: HostingLog[];
 };
 
 export const emptyProvider = (): ProviderState => ({ state: "off", label: null, checkedAt: null, error: null });
@@ -236,7 +271,11 @@ export type SecretKind =
   | "apple"
   | "google"
   | "smtp"
-  | "owner_token";
+  | "owner_token"
+  | "db_password:demo"
+  | "secret_key:demo"
+  /** The demo account Maestro signs in with ({ email, password }) — never logged or shown. */
+  | "demo_login";
 
 export type AppleSignIn = { teamId: string; keyId: string; privateKey: string; servicesId: string | null };
 export type GoogleSignIn = { webClientId: string; webClientSecret: string; iosClientId: string | null; androidClientId: string | null };

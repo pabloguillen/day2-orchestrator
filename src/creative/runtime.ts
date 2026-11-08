@@ -13,6 +13,8 @@ import { loadCreativeState, updateCreativeState } from "./taste";
 import type { BrollAsset, TemplateId } from "./templates/types";
 import { runVision } from "./vision";
 import type { SocialIdea } from "../social/make";
+import { loadUploadSet } from "./upload";
+import { currentTenant } from "../tenant";
 
 /**
  * Wiring the studio to day2's real stores: the brand kit from the app's
@@ -28,13 +30,14 @@ export const BROLL_PURPOSE = "broll";
 export async function screensFor(app: Pick<AppEntry, "id" | "repoPath">, language: string, o: { links: AppLinks | null; webShots?: () => Promise<string[]> }): Promise<ScreenChoice> {
   const locale = localeFor(language);
   const capture = loadCaptureSet(app.id, locale);
+  const upload = loadUploadSet(app.id, locale);
   const sets = await storeListingFor(app as AppEntry).load(app.id).then((f) => f.screenshots).catch(() => []);
   const storeLocale = storeRawFor(sets, language);
-  const store = o.links && hasStores(o.links) && !capture && !storeLocale.length ? await storeScreenshots(o.links, join(tmpdir(), `day2-studio-shots-${app.id}`)).catch(() => [] as string[]) : [];
+  const store = o.links && hasStores(o.links) && !capture && !upload && !storeLocale.length ? await storeScreenshots(o.links, join(tmpdir(), `day2-studio-shots-${app.id}`)).catch(() => [] as string[]) : [];
   // App Store screenshots come from Apple's US/DE/GB lookup: their language isn't known; most first apps ship English ones.
   const storeLang = store.length ? (o.links?.ios ? "en" : null) : null;
-  const web = !capture && !storeLocale.length && !store.length && o.webShots ? await o.webShots().catch(() => []) : [];
-  return chooseScreens({ language, capture, storeLocale, store: store.map((f) => ({ file: f, language: storeLang })), web, dims: imageSize });
+  const web = !capture && !upload && !storeLocale.length && !store.length && o.webShots ? await o.webShots().catch(() => []) : [];
+  return chooseScreens({ language, capture, upload, version: appVersion(app.repoPath), storeLocale, store: store.map((f) => ({ file: f, language: storeLang })), web, dims: imageSize });
 }
 
 /** The owner's own clips and photos (Creative library), newest first. */
@@ -62,6 +65,14 @@ export type StudioCall = (o: { idea: SocialIdea; forced: TemplateId | null; vari
 export function socialStudio(app: AppEntry, profile: AppProfile, o: { language: string; assets: AssetStore; links: AppLinks | null; posts: number; music?: () => Promise<string | null>; log?: (t: string) => void }): StudioCall {
   return async ({ idea, forced, variants, want, tag }) => {
     const kit = ensureBrandKit(app.repoPath);
+    // Real screens first: a new app version, or the first How it works post, starts a capture (the first one waits for it).
+    const tenant = currentTenant();
+    if (tenant && process.env.DAY2_CAPTURE !== "off") {
+      const { maybeAutoCapture } = await import("./real-screens");
+      const firstHow = !loadCreativeState(app.repoPath).howItWorksAt && (forced === "how-it-works" || o.posts < 3);
+      const r = await maybeAutoCapture(tenant, app, { making: firstHow ? "how-it-works" : null, wait: firstHow }).catch(() => null);
+      if (r) o.log?.(r === "new_version" ? "New app version: capturing its screens again for the next posts." : "Captured real screens for the first How it works post.");
+    }
     const state = loadCreativeState(app.repoPath);
     const out = await runStudio({
       appId: app.id,

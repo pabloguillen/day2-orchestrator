@@ -200,13 +200,22 @@ export type CaptureDeps = {
   log?: (t: string) => void;
 };
 
-/** Runs Maestro's flow on a device with variables; screenshots land in outDir. */
-export async function runMaestro(o: { deviceId: string; flow: string; outDir: string; env: Record<string, string> }): Promise<{ ok: boolean; why: string | null }> {
-  if (!has("maestro")) return { ok: false, why: "Maestro isn't installed (curl -fsSL https://get.maestro.mobile.dev | bash)" };
+export const MAESTRO_INSTALL = 'curl -fsSL "https://get.maestro.mobile.dev" | bash';
+
+/**
+ * Runs Maestro's flow on a device with variables; screenshots land in
+ * outDir. `secretEnv` (e.g. the demo login, MAESTRO_* names) goes into
+ * Maestro's environment — which flows can read — never onto the command
+ * line, and is cut out of any error text.
+ */
+export async function runMaestro(o: { deviceId: string; flow: string; outDir: string; env: Record<string, string>; secretEnv?: Record<string, string> }): Promise<{ ok: boolean; why: string | null }> {
+  if (!has("maestro")) return { ok: false, why: `Maestro isn't installed (${MAESTRO_INSTALL})` };
   mkdirSync(o.outDir, { recursive: true });
   const vars = Object.entries(o.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-  const r = await runCmd(["maestro", "--device", o.deviceId, "test", o.flow, ...vars, "--test-output-dir", o.outDir], { cwd: o.outDir, env: { MAESTRO_CLI_NO_ANALYTICS: "1" }, timeoutMs: 20 * 60_000 });
-  return r.code === 0 ? { ok: true, why: null } : { ok: false, why: r.timedOut ? "the flow took longer than 20 minutes" : `the flow failed: ${tail(r.out + r.err, 4)}` };
+  const r = await runCmd(["maestro", "--device", o.deviceId, "test", o.flow, ...vars, "--test-output-dir", o.outDir], { cwd: o.outDir, env: { MAESTRO_CLI_NO_ANALYTICS: "1", ...(o.secretEnv ?? {}) }, timeoutMs: 20 * 60_000 });
+  let why = r.timedOut ? "the flow took longer than 20 minutes" : `the flow failed: ${tail(r.out + r.err, 4)}`;
+  for (const v of Object.values(o.secretEnv ?? {})) if (v) why = why.split(v).join("[hidden]");
+  return r.code === 0 ? { ok: true, why: null } : { ok: false, why };
 }
 
 /**

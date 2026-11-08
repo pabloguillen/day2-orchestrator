@@ -58,15 +58,135 @@ with `DAY2_LOCALE`, `DAY2_DEMO=1` (the demo data the device checks use) and
 **stale on a new app version** (or after 30 days). EAS cloud runs that
 produce screenshots feed the same cache.
 
-Fallback order (`chooseScreens`): fresh captures in the language → the store
-screenshot pipeline's raw captures for that locale → App Store screenshots
-with a **"Screens are in English"** warning on the post card (and the
-critique counts it) → web screenshots. Screens can't be re-rendered in
-another language (they're pictures), so day2 never silently mixes.
+Fallback order (`chooseScreens`): fresh captures in the language → the
+owner's **uploaded screenshots** for that language → older captures (from
+before the latest version) → the store screenshot pipeline's raw captures
+for that locale → App Store screenshots with a **"Screens are in English"**
+warning on the post card (and the critique counts it) → web screenshots.
+Screens can't be re-rendered in another language (they're pictures), so
+day2 never silently mixes.
 
 Clean frames: the status bar is cropped off in cards, screens are shown
 large and bleeding off the edge (no device frame), and every template
 zooms to / lifts off the region that matters.
+
+## 2b. Real screens: demo cast, demo backend, flow, capture, upload
+
+Until this, `captureMoments` was never called, Dotty had no Maestro flow
+and no demo data — posts fell back to English App Store screenshots. The
+pipeline now (Growth → Formats):
+
+```
+profile + brand kit + language ─► demo cast (JSON, checked) ─► owner approves
+                                   + pictures (image tool / bundled / placeholder)
+app's supabase/migrations ─► schema ─► seed plan (data, checked) ─┐
+day2's Supabase org ─► separate "-demo" project ◄── migrations ◄──┘ rows + pictures + users
+build agent ticket ─► .maestro/day2/store-screens.yaml (+ .json, demo sign-in, day2-demo profile) as a PR
+capture (Mac simulator or EAS) ─► capture set (marked AI content) ─► chooseScreens "capture"
+```
+
+**Demo cast** (`creative/demo-cast/`): ~8 fictional friends (first names
+for the audience's locale, age 18–40 checked — the prompt asks 18–30 —
+short bios, "look" words for the photo), friendships (self = the demo
+account, 5+ friends, one pending), places with invented names, 8–10
+moments (place, caption, minutes ago, what the photo shows), reactions,
+comments, a weekly leaderboard. A text-only model run writes it from the
+app's purpose/features/audience/tone — never user data — as JSON after a
+marker; `validateCast` refuses minors, real names (deny list), handles,
+links and emails and drops dangling references; one retry with the
+problems, then the seeded built-in cast (`fakeCastDraft`, also the test
+fake). Pictures (`images.ts`): the posts' image tool through the creator
+kit (caps, credits, own key first) — profile photos as `subject:
+"fictional_person"` (prompt describes clothes/hair only and adds
+`FICTIONAL_PERSON_RULES`: invented, clearly adult, no text/logos), moment
+photos as scenes (no people). Today that's **OpenAI Images**; Gemini is
+connected for video only. No tool → the app's bundled demo pictures (e.g.
+Dotty's `src/assets/welcome/*.jpg`), else coloured placeholders, and the
+card says so. Stored in the asset store (purpose `demo-cast`) with
+`aiGenerated`/`aiPerson`; the cast JSON in `<data>/demo-cast/<app>/`.
+Regenerate makes a new draft; only an **approved** cast is seeded.
+
+**Demo backend** (`hosting/demo.ts`, Supabase apps with migrations only —
+others: "not supported yet" + upload): a project `<app>-<id>-demo` in
+day2's organization (the hosting operator config), Free-plan limit checked
+first and on create ("no room for another project … pause or delete one,
+or upgrade"); sign-ups disabled; the app's own schemas exposed to the REST
+API (`PATCH /v1/projects/{ref}/postgrest`); the app's migrations applied
+with `SET check_function_bodies = off` (+ PostGIS in public when the
+migrations use `public.geography` without creating it). The **seed plan**
+(`hosting/seed-plan.ts`) maps cast entities onto tables as data: per table
+`for: people|friendships|places|moments|reactions|comments|leaderboard`
+and per column a constant, `{field}`, `{id}`, `{ref}`, `{time}` or
+`{image}`, plus upload rules (`{owner}/{id}.jpg`). A model writes it from
+the schema read out of the migrations (`schema-introspect.ts`: columns,
+required, defaults, generated, references, `in (…)`/`~`/`char_length`
+checks, RLS, buckets) or the built-in planner does; `validateSeedPlan`
+refuses unknown tables/columns, reserved schemas (auth, storage, …),
+generated columns, missing required columns, wrong types, references the
+entity doesn't have, tables filled before what they point at, unknown
+buckets and unsafe paths. Then: one auth user per person (Auth admin API;
+the self user's login `{email, password}` kept encrypted as `demo_login`,
+never logged or returned), rows as JSON to the demo project's REST API
+(duplicates ignored, so re-seeding is idempotent; stable ids per cast
+seed), pictures to its buckets. A new cast deletes the old cast's rows and
+users first. **Guard**: only the project recorded as day2's demo (ref,
+"-demo" name, matching URL, not one of the app's hosted environments, not
+any Supabase ref found in the app's repo/config) is written to, and
+Supabase is asked before each step that it still has that name and
+organization. Dotty: 28 migrations → profiles, friendships, places,
+moments, reactions, comments; buckets `dotty-avatars`, `dotty-moments`;
+the leaderboard comes from Dotty's own `user_points()`.
+
+**Flow ticket** (`creative/demo-flow.ts`, source key `creative:demo-flow`,
+created after the demo backend is ready): the build agent makes the
+Supabase URL/key overridable by `EXPO_PUBLIC_SUPABASE_URL/KEY` (current
+values as fallback), adds an email/password sign-in shown only when
+`EXPO_PUBLIC_DAY2_DEMO=1`, an eas.json `day2-demo` profile without secrets,
+`store-screens.yaml` signing in with `${MAESTRO_DAY2_DEMO_EMAIL}` /
+`${MAESTRO_DAY2_DEMO_PASSWORD}` (Maestro reads `MAESTRO_*` from its
+environment) and `takeScreenshot: day2-shot-<name>` per moment, the
+`.json` notes, optionally `social-moments.yaml` with a recording. Nothing
+secret is committed.
+
+**Capture** (`creative/capture-run.ts`, wired through `real-screens.ts`):
+on the Mac, a clean checkout of main is built for the simulator with the
+demo backend's public URL/key and `EXPO_PUBLIC_DAY2_DEMO=1`, installed, the
+locale/status bar set (`simctlCommands`; Android: `adbCommands` with
+SystemUI demo mode), and the flow run with the login in Maestro's
+environment only (cut out of error text). Without `maestro` on PATH the
+card shows `curl -fsSL "https://get.maestro.mobile.dev" | bash`. With
+`DAY2_CAPTURE=eas`: eas.json gets the `day2-demo` profile with the demo
+values and `.eas/workflows/day2-capture.yml` is written into the temporary
+checkout (build → `type: maestro` job with `environment: preview`,
+`record_screen`, and an `after_maestro_tests` hook running
+`eas/upload_artifact` for `day2-shot-*.png`); the login goes in as
+`secret` EAS variables; after `eas workflow:run --wait`, `eas workflow:view
+--json` is searched for the artifact's link, downloaded with
+`safeDownload` (host list `eas`), archives unpacked (no absolute paths,
+"..", or symlinks followed). The EAS docs don't document how to fetch
+artifacts from the CLI — **unverified**; if no link comes back the card
+says so and the Mac path stays. One capture per app at a time, status +
+log polled by the console, the demo project paused afterwards. Triggers:
+**Capture screens** (Formats), a new app version (stale capture, on the
+next post), and before the first How it works post (waits for it).
+
+**AI label**: a capture of the demo cast is marked `aiContent`; the studio
+stores its assets with `aiGenerated/aiPerson`, writes IPTC
+`DigitalSourceType = compositeWithTrainedAlgorithmicMedia` XMP into every
+JPEG slide/cover (what Meta reads for "AI info"), sets TikTok `is_aigc`,
+and the post's `creative.aiContent` explains it on the card.
+
+**Upload** (`creative/upload.ts`): 3–8 PNG/JPEG phone screenshots per
+language, ≤ 10 MB each / 60 MB together, magic bytes checked, size and
+portrait shape read from the header before decoding, re-encoded by ffmpeg
+with the image demuxer forced and `-protocol_whitelist file`, metadata
+dropped (EXIF/GPS gone), stored per app and locale; warning on the page to
+use a demo account, never real friends.
+
+Sample: `bun run src/creative/demo-cast/sample-cli.ts <dotty repo> <out>`
+writes the cast (fake model, Dotty's bundled pictures), the seed plan and a
+rows preview for Dotty's migrations, the flow ticket, mock screens filled
+with the cast and a How it works post from them.
 
 ## 3. Motion engine and templates
 
@@ -227,18 +347,32 @@ screenshot pipeline could use (separate APIs, shared `render.ts`).
 | `POST /social/posts/make` `{template?}` | make a post (optionally a template) |
 | `POST /social/posts/:post/pick` | Use this one |
 | `PATCH /social/posts/:post` `{slideOrder?, slideTexts?}` | reorder / re-word slides |
+| `POST /creative/demo-cast` · `/demo-cast/approve` · `GET /demo-cast/images/:asset` | write (background) / approve the demo cast; its pictures (app-scoped) |
+| `POST /creative/demo-backend` | create + fill the demo backend, then the flow ticket (background) |
+| `POST /creative/capture` | capture now (background; status in `GET /creative` → `real.capture`) |
+| `POST /creative/screens` (form: `language`, `files`) · `DELETE /creative/screens/:locale` · `GET /creative/screens/:locale/:file` | the owner's screenshots |
 
 All scoped to an app of the signed-in account; changes need an owner or
 admin. Env: `DAY2_CREATIVE_STUDIO=off` (old built-in media),
 `DAY2_CREATIVE_VISION=off` (layout checks only, no vision runs),
-`DAY2_CREATIVE_VARIANTS=1`, `DAY2_VISION_MODEL`.
+`DAY2_CREATIVE_VARIANTS=1`, `DAY2_VISION_MODEL`, `DAY2_CAPTURE=local|eas|off`,
+`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off`, `DAY2_DEMO_CAST_MODEL=fake`.
 
 ## 9. What's honest
 
 - No simulator here: the Dotty samples use **mock captures** rebuilt from
   Dotty's own tokens, fonts, 3D icons and demo pictures
-  (`src/creative/fixtures/dotty-mock-screens.ts`). The capture path is
-  unit-tested (commands, plan, fallback), not run on a Mac yet.
+  (`src/creative/fixtures/dotty-mock-screens.ts`, optionally filled with a
+  demo cast). The capture path is tested with fake devices and a fake EAS,
+  not run on a Mac or EAS yet.
+- The demo backend is tested against a fake Management API and a fake
+  demo project: no real Supabase project was created. Dotty's migrations
+  have never been applied to a fresh project — they reference a legacy
+  table (`public.places_osm`) in function bodies (hence
+  `check_function_bodies = off`) and need PostGIS; a migration that still
+  fails stops the setup with its name on the card.
+- The seed-plan model run and the cast model run are tested with fakes; the
+  built-in planner is what's verified against Dotty's real schema.
 - Focus boxes come from the art director looking at screenshots; they can
   be off by a bit — the zoom then shows the neighbourhood of the element.
 - The vision critic is a model; the layout checks are exact. Both are

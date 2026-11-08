@@ -224,7 +224,7 @@ export async function makeScreenshots(app: AppEntry, d: StorePassDeps): Promise<
       { cwd: wd.dir, appId: app.id, bundleId: d.ids.bundleId, packageName: d.ids.packageName, locales: f.settings.locales, outDir: out },
       { target: (p) => (p === "ios" ? iosTarget(d.ids.bundleId!, d.appName) : androidTarget(d.ids.packageName!)), log: (t) => d.log(t) },
     );
-    const names = [...new Set(Object.values(cap.shots).flatMap((byLoc) => Object.values(byLoc ?? {}).flat().map((p) => p.split("/").pop()!.replace(/\.png$/i, ""))))].sort();
+    const names = [...new Set(Object.values(cap.shots).flatMap((byLoc) => Object.values(byLoc ?? {}).flat().map((p) => p.split("/").pop()!.replace(/\.png$/i, "").replace(/^day2-shot-/, ""))))].sort();
     if (!names.length) throw new Error(`no screenshots came out${cap.notes.length ? ` (${cap.notes.join("; ")})` : ""}`);
     const notes = screenNotes(wd.dir);
     const screens = names.map((n) => ({ name: n, shows: notes.find((x) => x.name === n)?.shows ?? "" }));
@@ -236,7 +236,7 @@ export async function makeScreenshots(app: AppEntry, d: StorePassDeps): Promise<
       const id = `SS-${Date.now().toString(36)}-${locale.replace(/[^\w]/g, "")}`;
       const pick = (p: "ios" | "android") => cap.shots[p]?.[locale] ?? cap.shots[p === "ios" ? "android" : "ios"]?.[locale] ?? [];
       const shotsFor = (p: "ios" | "android") => pick(p).map((raw) => {
-        const name = raw.split("/").pop()!.replace(/\.png$/i, "");
+        const name = raw.split("/").pop()!.replace(/\.png$/i, "").replace(/^day2-shot-/, "");
         return { name, caption: captions[locale]?.[name] ?? "", raw };
       });
       const dir = shotsDir(app.id, id);

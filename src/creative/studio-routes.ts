@@ -19,6 +19,10 @@ import { isTemplateId } from "./templates/types";
 import { profileOf, languageOf } from "../social/runtime";
 import { refreshAppLinks } from "../ads/app-links";
 import { appKind } from "../field-work";
+import { approveCast, realScreensView, startBackend, startCapture, startCast } from "./real-screens";
+import { loadUploadSet, removeUploadSet, saveUploadSet, uploadFile, UploadError, UPLOAD } from "./upload";
+import { appVersion } from "./capture";
+import { CAST_PURPOSE } from "./demo-cast/images";
 
 /**
  * Growth → Formats (/api/apps/:id/creative/*): the app's brand kit (read
@@ -44,7 +48,7 @@ const FIGMA_FILE = (appId: string) => join(dataDir(), "creative-figma", `${appId
 const MAX_BROLL_BYTES = 60 * 1024 * 1024;
 const BROLL_MIME: Record<string, "video" | "image"> = { "video/mp4": "video", "video/quicktime": "video", "image/jpeg": "image", "image/png": "image" };
 
-async function creativeView(app: AppEntry) {
+async function creativeView(app: AppEntry, t: Tenant) {
   const stored = ensureBrandKit(app.repoPath);
   const profile = profileOf(app);
   const language = languageOf(app, profile);
@@ -72,7 +76,8 @@ async function creativeView(app: AppEntry) {
       overrides: stored.overrides,
       figma: figma ? { fileKey: figma.fileKey, fetchedAt: stored.figma?.fetchedAt ?? null, colors: stored.figma?.colors.length ?? 0, fonts: stored.figma?.fonts.length ?? 0 } : null,
     },
-    screens: screens ? { source: screens.source, count: screens.screens.length, warning: screens.warning, plan: { locale: plan.locale, flow: plan.flow, moments: plan.moments, version: plan.version } } : null,
+    screens: screens ? { source: screens.source, count: screens.screens.length, warning: screens.warning, stale: Boolean(screens.stale), aiContent: screens.aiContent ?? null, plan: { locale: plan.locale, flow: plan.flow, moments: plan.moments, version: plan.version } } : null,
+    real: await realScreensView(t, app),
     templates: TEMPLATE_LIST().map((t) => ({ id: t.id, label: t.label, description: t.description, bestFor: t.bestFor, outputs: t.outputs, liking: Math.round(liking[t.id] * 100) / 100, sample: samples.includes(`${t.id}.jpg`) ? `/api/apps/${encodeURIComponent(app.id)}/creative/samples/${t.id}.jpg?v=${Math.round(statSync(join(samplesDir(app.id), `${t.id}.jpg`)).mtimeMs)}` : null, tally: state.templates[t.id] ?? null })),
     broll: broll.map((a) => ({ id: a.id, kind: a.kind, label: a.label, durationSec: a.durationSec ?? null, url: `/api/apps/${encodeURIComponent(app.id)}/social/media/${encodeURIComponent(a.id)}` })),
     taste: { rubricVersion: CURRENT_RUBRIC, preferences: preferenceLines(state), howItWorksAt: state.howItWorksAt, log: state.log.slice(0, 10) },
@@ -99,7 +104,7 @@ export async function renderSamples(app: AppEntry): Promise<string[]> {
   kit.language = language;
   const links = appKind(app.repoPath) === "react-native" ? await refreshAppLinks(app.repoPath, new Date()).catch(() => null) : null;
   const screens = await screensFor(app, language, { links });
-  if (!screens.screens.length) throw new Error("day2 has no screens of the app yet — capture them first (Store → Screenshots).");
+  if (!screens.screens.length) throw new Error("day2 has no screens of the app yet — capture or upload them first (Screens, above).");
   const broll = await brollFor(app.id, assetStore());
   const dir = samplesDir(app.id);
   mkdirSync(dir, { recursive: true });
@@ -129,7 +134,91 @@ export async function renderSamples(app: AppEntry): Promise<string[]> {
 export function registerCreativeRoutes(route: (method: string, pathname: string, handler: Handler) => void, h: CreativeRouteHelpers): void {
   const fail = h.httpError;
 
-  route("GET", "/api/apps/:id/creative", async (_req, p, t) => h.json(await creativeView(await h.requireApp(t, p.id!))));
+  route("GET", "/api/apps/:id/creative", async (_req, p, t) => h.json(await creativeView(await h.requireApp(t, p.id!), t)));
+
+  // ---- Real screens (docs/creative-quality.md): demo cast, demo backend, captures, uploads ----
+
+  /** Write a (new) demo cast with pictures — in the background; the view shows the job. */
+  route("POST", "/api/apps/:id/creative/demo-cast", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    startCast(t, app);
+    return h.json(await creativeView(app, t), { status: 202 });
+  });
+
+  /** The owner approves the cast; only an approved cast goes into the demo backend. */
+  route("POST", "/api/apps/:id/creative/demo-cast/approve", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    try {
+      await approveCast(app, (await h.actorName(t)) ?? null);
+    } catch (err) {
+      throw fail(409, (err as Error).message);
+    }
+    return h.json(await creativeView(app, t));
+  });
+
+  /** A demo cast picture — only this app's "demo-cast" assets, signed in. */
+  route("GET", "/api/apps/:id/creative/demo-cast/images/:asset", async (req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    const a = await assetStore().get(p.asset ?? "").catch(() => null);
+    if (!a || a.appId !== app.id || a.purpose !== CAST_PURPOSE || !existsSync(a.path)) throw fail(404, "Not found.");
+    return h.serveFile(req, a.path, a.mime, "private, max-age=600");
+  });
+
+  /** Create (once) and fill the separate demo backend, then ask for the flow — in the background. */
+  route("POST", "/api/apps/:id/creative/demo-backend", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    startBackend(t, app);
+    return h.json(await creativeView(app, t), { status: 202 });
+  });
+
+  /** Capture screens now (on this Mac's simulator or on EAS) — in the background. */
+  route("POST", "/api/apps/:id/creative/capture", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    startCapture(t, app, "button");
+    return h.json(await creativeView(app, t), { status: 202 });
+  });
+
+  /** The owner's screenshots for one language (multipart: language + 3–8 files). */
+  route("POST", "/api/apps/:id/creative/screens", async (req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    const len = Number(req.headers.get("content-length") ?? 0);
+    if (len > UPLOAD.maxTotal + 1024 * 1024) throw fail(413, "Together the screenshots are over 60 MB.");
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      throw fail(400, "Send the screenshots as a form (language and files).");
+    }
+    const files: Array<{ name: string; bytes: Uint8Array }> = [];
+    for (const v of form.getAll("files")) if (typeof v !== "string") files.push({ name: (v as File).name ?? "screenshot", bytes: new Uint8Array(await (v as Blob).arrayBuffer()) });
+    try {
+      saveUploadSet(app.id, String(form.get("language") ?? "").trim().toLowerCase(), files, { version: appVersion(app.repoPath), by: (await h.actorName(t)) ?? null });
+    } catch (err) {
+      if (err instanceof UploadError) throw fail(err.status, err.message);
+      throw err;
+    }
+    return h.json(await creativeView(app, t));
+  });
+
+  route("DELETE", "/api/apps/:id/creative/screens/:locale", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    if (!loadUploadSet(app.id, p.locale ?? "")) throw fail(404, "No screenshots for that language.");
+    removeUploadSet(app.id, p.locale!);
+    return h.json(await creativeView(app, t));
+  });
+
+  route("GET", "/api/apps/:id/creative/screens/:locale/:file", async (req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    const f = uploadFile(app.id, p.locale ?? "", p.file ?? "");
+    if (!f) throw fail(404, "Not found.");
+    return h.serveFile(req, f, "image/png", "private, max-age=600");
+  });
 
   /** The owner's edits to the brand kit (colours, fonts, language, tone, notes). */
   route("PUT", "/api/apps/:id/creative/brand-kit", async (req, p, t) => {
@@ -138,7 +227,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const cur = ensureBrandKit(app.repoPath);
     saveBrandKit(app.repoPath, { ...cur, overrides: cleanOverrides(b.overrides ?? b), updatedAt: new Date().toISOString(), updatedBy: (await h.actorName(t)) ?? null });
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 
   /** Read the design language from the repo again (after a redesign). Owner edits stay. */
@@ -147,7 +236,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     h.requireManager(t);
     const cur = loadBrandKit(app.repoPath);
     saveBrandKit(app.repoPath, { extracted: extractBrandKit(app.repoPath), overrides: cur?.overrides ?? {}, figma: cur?.figma ?? null, updatedAt: new Date().toISOString(), updatedBy: (await h.actorName(t)) ?? null });
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 
   /** The app icon (end cards), for the console. */
@@ -167,7 +256,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     } catch (err) {
       throw fail(409, (err as Error).message.slice(0, 200));
     }
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 
   route("GET", "/api/apps/:id/creative/samples/:file", async (req, p, t) => {
@@ -196,7 +285,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     const outMime = mime === "video/quicktime" ? "video/mp4" : mime;
     await assetStore().put(tmp, { appId: app.id, purpose: BROLL_PURPOSE, label: name, kind, ratio: "9:16", width: 1080, height: 1920, mime: outMime, source: "upload", aiGenerated: false, aiPerson: false });
     rmSync(tmp, { force: true });
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 
   /** Connect a Figma file (optional): its colour and text styles join the brand kit. The token is stored encrypted, never shown again. */
@@ -218,7 +307,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     writeFileSync(FIGMA_FILE(app.id), JSON.stringify({ fileKey: key, sealed: encryptSecret(token, `figma:${app.id}`) }), { mode: 0o600 });
     const cur = ensureBrandKit(app.repoPath);
     saveBrandKit(app.repoPath, { ...cur, figma: tokens, updatedAt: new Date().toISOString(), updatedBy: (await h.actorName(t)) ?? null });
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 
   route("DELETE", "/api/apps/:id/creative/figma", async (_req, p, t) => {
@@ -227,7 +316,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     rmSync(FIGMA_FILE(app.id), { force: true });
     const cur = ensureBrandKit(app.repoPath);
     saveBrandKit(app.repoPath, { ...cur, figma: null, updatedAt: new Date().toISOString() });
-    return h.json(await creativeView(app));
+    return h.json(await creativeView(app, t));
   });
 }
 

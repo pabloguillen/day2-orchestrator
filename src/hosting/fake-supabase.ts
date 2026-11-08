@@ -9,7 +9,7 @@ import { SupabaseError } from "./supabase";
 
 export type FakeCall = { token: string; op: string; args: unknown[] };
 
-export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?: { security?: Lint[]; performance?: Lint[] }; failSql?: RegExp; sqlOutage?: boolean; claimFails?: boolean } = {}) {
+export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?: { security?: Lint[]; performance?: Lint[] }; failSql?: RegExp; sqlOutage?: boolean; claimFails?: boolean; createFails?: { status: number; message: string } } = {}) {
   const calls: FakeCall[] = [];
   const projects = new Map<string, { ref: string; name: string; region: string; org: string; polls: number; status: string; paused: boolean }>();
   const migrations = new Map<string, Set<string>>();
@@ -18,6 +18,7 @@ export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?:
   const secrets = new Map<string, Map<string, string>>();
   const branches = new Map<string, { id: string; ref: string; parent: string; name: string; polls: number }>();
   const claims = new Map<string, string>();
+  const postgrest = new Map<string, string>();
   let n = 0;
 
   const api = (token: string): SupabaseApi => {
@@ -33,6 +34,7 @@ export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?:
       orgProjects: async (slug, search) => (rec("orgProjects", slug, search), [...projects.values()].filter((p) => p.org === slug && p.name.includes(search)).map((p) => ({ ref: p.ref, name: p.name, region: p.region, status: p.status as never, is_branch: false, inserted_at: "" }))),
       createProject: async (b) => {
         rec("createProject", { ...b, db_pass: b.db_pass ? "[set]" : "" });
+        if (o.createFails) throw new SupabaseError(o.createFails.status, `Supabase POST /v1/projects: ${o.createFails.status} ${o.createFails.message}`);
         const ref = `ref${String(++n).padStart(17, "0")}`.slice(0, 20);
         projects.set(ref, { ref, name: b.name, region: b.region, org: b.organization_slug, polls: 0, status: "COMING_UP", paused: false });
         return { ref, name: b.name, region: b.region, status: "COMING_UP", organization_slug: b.organization_slug, created_at: new Date().toISOString() };
@@ -77,6 +79,12 @@ export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?:
       backups: async (ref) => (rec("backups", ref), { region: "eu-central-1", pitr_enabled: false, walg_enabled: true, backups: [{ id: 1, status: "COMPLETED", inserted_at: "2026-11-02T03:00:00Z", is_physical_backup: true }] }),
       diskUtil: async () => ({ timestamp: "", metrics: { fs_size_bytes: 8 * 1024 ** 3, fs_avail_bytes: 4 * 1024 ** 3, fs_used_bytes: 4 * 1024 ** 3 } }),
       buckets: async () => [],
+      postgrestConfig: async (ref) => (rec("postgrestConfig", ref), { db_schema: postgrest.get(ref) ?? "public, graphql_public" }),
+      updatePostgrest: async (ref, patch) => {
+        rec("updatePostgrest", ref, patch.db_schema);
+        if (patch.db_schema) postgrest.set(ref, patch.db_schema);
+        return { db_schema: postgrest.get(ref) ?? "" };
+      },
       functions: async () => [],
       deployFunction: async (ref, slug, files, metadata) => (rec("deployFunction", ref, slug, files.map((f) => f.path), metadata), { id: "f1", slug, version: 3, status: "ACTIVE" }),
       secretNames: async (ref) => [...(secrets.get(ref)?.keys() ?? [])],
@@ -130,7 +138,7 @@ export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?:
     };
     return impl as SupabaseApi;
   };
-  return { api, calls, projects, migrations, sql, auth, secrets, branches };
+  return { api, calls, projects, migrations, sql, auth, secrets, branches, postgrest };
 }
 
 export const lint = (name: string, table: string, kind: "security" | "performance" = "security", level: Lint["level"] = "ERROR"): Lint => ({

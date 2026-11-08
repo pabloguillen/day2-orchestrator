@@ -31,8 +31,13 @@ export type CreativeRatio = "9:16" | "1:1" | "16:9" | "4:5";
 export type PresenterJob = { capability: "presenter_video"; script: string; ratio: CreativeRatio; language?: string; appName: string };
 /** A short clip from a prompt, usually starting from the app's real screen (`imageUrl`: https or data:image). */
 export type GeneratedVideoJob = { capability: "generated_video"; prompt: string; ratio: CreativeRatio; durationSec: number; imageUrl?: string; appName: string };
-/** A still image (background scene, thumbnail) — never text, logos or people. */
-export type ImageJob = { capability: "image"; prompt: string; ratio: CreativeRatio; appName: string };
+/**
+ * A still image (background scene, thumbnail) — never text, logos or people.
+ * `fictional_person`: a profile photo of an invented adult for an app's demo
+ * cast (creative/demo-cast) — the only kind of person day2 ever asks for;
+ * always marked as an AI-generated person.
+ */
+export type ImageJob = { capability: "image"; prompt: string; ratio: CreativeRatio; appName: string; subject?: "scene" | "fictional_person" };
 export type VoiceJob = { capability: "voice"; text: string; language?: string };
 export type MusicJob = { capability: "music"; prompt: string; durationSec: number };
 export type CreativeJob = PresenterJob | GeneratedVideoJob | ImageJob | VoiceJob | MusicJob;

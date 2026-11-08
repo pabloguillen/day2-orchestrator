@@ -209,9 +209,29 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       route).
 - [ ] Vision runs (art director + critic, ~$0.40 + ~$0.35 per post) are
       metered as content generation like the writer.
-- [ ] First real post with captures: run the Store screenshot flow on the
-      Mac for Dotty in de-DE so posts use German captures instead of the
-      App Store screenshots (the card warns until then).
+- [ ] First real post with captures: Growth → Formats for Dotty → Write a
+      demo cast → Approve → Set up demo backend → merge the "Real screens"
+      ticket's pull request → Capture screens (on the Mac) so posts use
+      German captures instead of the App Store screenshots.
+- [ ] **Demo backends count against Supabase's plan**: one extra project per
+      app in day2's organization (Free: 2 active projects in total; Pro: each
+      demo project is billed compute while it runs — day2 pauses it after a
+      capture). Decide whether that cost is in the plan price or charged.
+- [ ] **EAS capture workflow** (`DAY2_CAPTURE=eas`): run it once against
+      Dotty and confirm (a) `environment: preview` on the maestro job loads
+      the secret `MAESTRO_DAY2_DEMO_*` variables, (b) the `after_maestro_tests`
+      hook's `eas/upload_artifact` finds the `day2-shot-*.png` files, (c)
+      `eas workflow:view --json` returns a download link day2 finds
+      (`artifactLinks`), from a host in `DAY2_CREATOR_HOSTS_EAS` / the
+      built-in list. Each capture uses the owner's EAS build minutes.
+- [ ] Image tool for demo casts: OpenAI Images connected (day2's account or
+      the owner's) — otherwise casts use the app's bundled demo pictures or
+      placeholders. Its content policy allows fictional adult portraits;
+      re-check after model changes.
+- [ ] Meta "AI info": images from the demo cast carry IPTC
+      `compositeWithTrainedAlgorithmicMedia` XMP; check Instagram/Facebook
+      actually show the label on a test post (videos aren't marked — no
+      documented field); TikTok gets `is_aigc`.
 
 ## 7. For each app in the stores: the Setup tab
 
