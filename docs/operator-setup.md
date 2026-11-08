@@ -397,11 +397,21 @@ Done: day2 connects to the "gora8" organization. It's on the Free plan, which
 is fine until go-live.
 
 Demo backends for real screens (creative-quality.md §2b) are created in the
-same organization (`<app>-<id>-demo`). The Free plan allows **2 active
-projects**: with the hosting projects that's quickly full — day2 then shows
-"no room for another project" on Growth → Formats and creates nothing. day2
-pauses a demo project after each capture (`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off`
-keeps it running); paused projects don't count against the 2.
+same organization (`<app>-<id>-demo`) — by day2 itself, for every app with
+growth on (the automatic pipeline: cast → approval → demo backend → flow PR
+→ capture). The Free plan allows **2 active projects**: with the hosting
+projects that's quickly full — the pipeline's "Demo backend" step then
+needs attention ("no room for another project") on Growth → Formats,
+creates nothing, and tries again once a day. On the Free plan day2 pauses a
+demo project after each capture (`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off` keeps
+it running); paused projects don't count against the 2. **On a paid plan
+Supabase can't pause projects** — demo projects keep running and are billed
+compute (see go-live-checklist.md).
+
+Demo projects are deleted when an app is removed, or after its growth has
+been off for 30 days. Switches: `DAY2_REAL_SCREENS=off` stops the automatic
+pipeline (buttons still work), `DAY2_REAL_SCREENS_WAIT_MINUTES` (default 45)
+is how long the first How it works post waits for real screens.
 
 ## 5b. Capturing real screens on your Mac (Xcode, Maestro, EAS)
 
@@ -419,12 +429,16 @@ Posts show your apps' real screens, captured on the iPhone Simulator.
    `off` stops it).
 4. Optional, Android: Android Studio with one virtual device (Device
    Manager); used when an app has no iOS build.
-5. **EAS instead of the Mac** (deployed day2): `DAY2_CAPTURE=eas` and the
-   app's Expo account connected (Connect your stores). day2 runs an EAS
-   Workflow (simulator build with its `day2-demo` profile + a Maestro job)
-   and downloads the screenshots artifact. That download isn't verified
-   against a real run yet; if it fails the card says so and the Mac path is
-   the way.
+5. **EAS instead of the Mac** (deployed day2): a server without Xcode
+   captures on EAS by default (`DAY2_CAPTURE=eas` forces it, `off` stops
+   captures); the app's Expo account must be connected (Connect your
+   stores). day2 runs an EAS Workflow (simulator build with its `day2-demo`
+   profile + a Maestro job) and downloads the screenshots artifact. That
+   download isn't verified against a real run yet; if it fails day2 tries
+   the Android emulator when the server has one (adb, emulator, Maestro,
+   `ANDROID_HOME`, an AVD, `/dev/kvm`; `DAY2_ANDROID_FALLBACK=off` skips
+   it), else the "Capture screens" step needs attention and asks for
+   uploads.
 
 ---
 

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleRequest } from "../api-server";
@@ -139,13 +139,46 @@ describe("Real screens API", () => {
     const img = await call("GET", cast.people[0].avatar, { cookie: alice });
     expect(img.status).toBe(200);
     expect(img.type).toBe("image/png");
-    // Setting up the backend before approval is refused (the job fails with the reason).
+    // Placeholder pictures don't pass the automatic check: the pipeline waits for the owner's OK.
+    const pipe = v.body!.real.pipeline;
+    expect(pipe).toMatchObject({ policy: "auto", current: "approve" });
+    expect(pipe.steps.map((x: { id: string; status: string }) => `${x.id}:${x.status}`)).toEqual(["cast:done", "approve:waiting", "backend:pending", "flow:pending", "flow_merged:pending", "capture:pending"]);
+    expect(pipe.steps[1].note).toContain("placeholders");
+    // Setting up the backend before approval doesn't happen: the pipeline still waits at the approval.
     await call("POST", `/api/apps/${appId}/creative/demo-backend`, { cookie: alice });
     await settleRealScreens(appId);
-    expect((await call("GET", `/api/apps/${appId}/creative`, { cookie: alice })).body!.real.demo.backendJob).toMatchObject({ state: "failed", note: expect.stringContaining("Approve the demo cast") });
+    const w = (await call("GET", `/api/apps/${appId}/creative`, { cookie: alice })).body!.real;
+    expect(w.pipeline.current).toBe("approve");
+    expect(w.demo.backend).toBeNull();
     const a = await call("POST", `/api/apps/${appId}/creative/demo-cast/approve`, { cookie: alice });
     expect(a.status).toBe(200);
     expect(a.body!.real.demo.cast).toMatchObject({ status: "approved", approvedBy: "alice" });
+    await settleRealScreens(appId);
+  });
+
+  test("approved: the pipeline sets up the demo backend, asks for the flow, then waits for its PR (demo paused meanwhile)", async () => {
+    const v = (await call("GET", `/api/apps/${appId}/creative`, { cookie: alice })).body!.real;
+    expect(v.pipeline.steps.map((x: { id: string; status: string }) => `${x.id}:${x.status}`)).toEqual(["cast:done", "approve:done", "backend:done", "flow:done", "flow_merged:waiting", "capture:pending"]);
+    expect(v.pipeline.steps[4].note).toContain("Waiting for the flow PR");
+    expect(v.demo.backend).toMatchObject({ state: "paused", name: expect.stringMatching(/-demo$/) });
+    expect(fake.calls.some((c) => c.op === "pause")).toBe(true);
+  });
+
+  test("the policy setting and retry: validated, owner-only, tenant-scoped", async () => {
+    expect((await call("PUT", `/api/apps/${appId}/creative/real-screens/settings`, { cookie: alice, body: { demoCast: "sometimes" } })).status).toBe(400);
+    const r = await call("PUT", `/api/apps/${appId}/creative/real-screens/settings`, { cookie: alice, body: { demoCast: "owner" } });
+    expect(r.status).toBe(200);
+    expect(r.body!.real.pipeline.policy).toBe("owner");
+    expect((await call("POST", `/api/apps/${appId}/creative/real-screens/retry`, { cookie: alice, body: { step: "nope" } })).status).toBe(400);
+    expect((await call("POST", `/api/apps/${appId}/creative/real-screens/retry`, { cookie: alice, body: { step: "flow_merged" } })).status).toBe(202);
+    await settleRealScreens(appId);
+    expect((await call("PUT", `/api/apps/${appId}/creative/real-screens/settings`, { cookie: bob, body: { demoCast: "auto" } })).status).toBe(404);
+    expect((await call("POST", `/api/apps/${appId}/creative/real-screens/retry`, { cookie: bob, body: {} })).status).toBe(404);
+    expect((await call("POST", `/api/apps/${appId}/creative/demo-cast/decline`, { cookie: bob })).status).toBe(404);
+    expect((await call("POST", `/api/apps/${appId}/creative/real-screens/retry`, { body: {} })).status).toBe(401);
+    // Bob's own app has no cast to decline.
+    expect((await call("POST", `/api/apps/${bobApp}/creative/demo-cast/decline`, { cookie: bob })).status).toBe(409);
+    expect((await call("GET", `/api/apps/${appId}/creative`, { cookie: alice })).body!.real.pipeline.policy).toBe("owner");
   });
 
   test("another account can't see, change or fetch anything of it", async () => {
@@ -168,7 +201,7 @@ describe("Real screens API", () => {
     await settleRealScreens(appId);
     const v = await call("GET", `/api/apps/${appId}/creative`, { cookie: alice });
     expect(v.body!.real.demo.backendJob).toMatchObject({ state: "done" });
-    expect(v.body!.real.demo.backend).toMatchObject({ state: "ready", name: expect.stringMatching(/-demo$/), rows: expect.any(Number) });
+    expect(v.body!.real.demo.backend).toMatchObject({ state: "paused", name: expect.stringMatching(/-demo$/), rows: expect.any(Number) });
     expect(demoCalls).toContain("insert dotty.moments");
     expect(demoCalls.filter((c) => c.startsWith("upload")).length).toBeGreaterThan(0);
     expect(v.text).not.toContain("TOPSECRET");
@@ -197,10 +230,22 @@ describe("Real screens API", () => {
     expect((await call("DELETE", `/api/apps/${appId}/creative/screens/de-DE`, { cookie: alice })).body!.real.uploads).toEqual([]);
   });
 
+  test("removing the app deletes its demo project and demo cast (and only the owner's own app)", async () => {
+    expect((await call("DELETE", `/api/apps/${appId}`, { cookie: bob })).status).toBe(200); // not Bob's app: nothing happens to it
+    expect(fake.calls.some((c) => c.op === "deleteProject")).toBe(false);
+    expect((await call("GET", `/api/apps/${appId}/creative`, { cookie: alice })).status).toBe(200);
+  });
+
   test("capture on a server without a simulator: the status says why", async () => {
     await call("POST", `/api/apps/${appId}/creative/capture`, { cookie: alice });
     await settleRealScreens(appId);
     const v = await call("GET", `/api/apps/${appId}/creative`, { cookie: alice });
     expect(v.body!.real.capture).toMatchObject({ state: "failed", note: expect.stringContaining("can't run on this server") });
+  });
+
+  test("removing the app deletes its demo project and demo cast", async () => {
+    expect((await call("DELETE", `/api/apps/${appId}`, { cookie: alice })).status).toBe(200);
+    expect(fake.calls.filter((c) => c.op === "deleteProject")).toHaveLength(1);
+    expect(existsSync(join(data, "demo-cast", appId))).toBe(false);
   });
 });

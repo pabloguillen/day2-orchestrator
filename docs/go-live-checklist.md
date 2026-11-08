@@ -209,15 +209,34 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       route).
 - [ ] Vision runs (art director + critic, ~$0.40 + ~$0.35 per post) are
       metered as content generation like the writer.
-- [ ] First real post with captures: Growth → Formats for Dotty → Write a
-      demo cast → Approve → Set up demo backend → merge the "Real screens"
-      ticket's pull request → Capture screens (on the Mac) so posts use
-      German captures instead of the App Store screenshots.
-- [ ] **Demo backends count against Supabase's plan**: one extra project per
-      app in day2's organization (Free: 2 active projects in total; Pro: each
-      demo project is billed compute while it runs — day2 pauses it after a
-      capture). Decide whether that cost is in the plan price or charged.
-- [ ] **EAS capture workflow** (`DAY2_CAPTURE=eas`): run it once against
+- [ ] First real post with captures: with growth on for Dotty, day2 runs
+      the real-screens pipeline by itself (Growth → Formats → Real screens:
+      cast → approval → demo backend → flow PR → capture). Check each step
+      gets to Done; merge the "Real screens" ticket's pull request in
+      Approvals (day2 never merges it itself); posts then use German
+      captures instead of the App Store screenshots.
+- [ ] **day2's Supabase organization (`DAY2_SUPABASE_ORG_ID`) needs a paid
+      plan for production.** Free allows 2 active projects in total (hosting
+      + demo projects) — the third app's demo backend needs attention ("no
+      room for another project"). Pro: $25/month per organization, which
+      includes $10 of compute credits; every project is billed compute
+      hourly, and **projects on a paid plan can't be paused**, so each demo
+      project runs all the time: Micro ≈ $0.01344/h ≈ $10/month per app
+      (the default size, `DAY2_HOSTING_INSTANCE_SIZE=micro`). Estimate: $25 + ~$10 × (demo
+      projects + hosted projects) − $10 credits per month; e.g. 10 apps with
+      growth on ≈ $115/month for the demo projects. Check the current prices
+      on supabase.com/pricing, and decide whether that cost is in the plan
+      price or charged (today the pipeline only checks the account's
+      credits before each step; nothing charges for demo compute).
+- [ ] Cleanup works: remove a test app → its `-demo` project disappears
+      from the organization (or is retried by the timer); growth off for 30
+      days deletes it too.
+- [ ] Demo cast approval: the default is automatic when the cast passes
+      day2's checks (schema, every picture, and a vision check of AI-made
+      pictures: no text/logos, adults only). Look at the first few
+      automatically approved casts yourself; switch an app to "Only with my
+      OK" on Growth → Formats if in doubt.
+- [ ] **EAS capture workflow** (the default on a server without Xcode): run it once against
       Dotty and confirm (a) `environment: preview` on the maestro job loads
       the secret `MAESTRO_DAY2_DEMO_*` variables, (b) the `after_maestro_tests`
       hook's `eas/upload_artifact` finds the `day2-shot-*.png` files, (c)

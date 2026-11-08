@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeCastDraft } from "../creative/demo-cast/generate";
 import { CAST_VERSION, type DemoCast } from "../creative/demo-cast/schema";
-import { assertDemoTarget, demoClient, demoPreamble, demoSupport, demoView, ensureDemoBackend, pauseDemo, productionRefs, type DemoClient, type DemoDeps } from "./demo";
+import { assertDemoTarget, deleteDemoBackend, demoClient, demoPreamble, demoSupport, demoView, ensureDemoBackend, isLimitError, markMigrationsChanged, migrationsFingerprint, pauseDemo, productionRefs, type DemoClient, type DemoDeps } from "./demo";
 import { readMigrations } from "./migrations";
 import { introspectMigrations, parseColumn, statements } from "./schema-introspect";
 import { expandSeedPlan, heuristicSeedPlan, validateSeedPlan } from "./seed-plan";
@@ -270,6 +270,48 @@ describe("ensureDemoBackend", () => {
   test("without day2's Supabase organization it says what's missing", async () => {
     const k = demoKit({ operator: null });
     await expect(ensureDemoBackend(k.app, cast(), k.deps)).rejects.toThrow(/SUPABASE_ACCESS_TOKEN/);
+  });
+
+  test("changed migrations: only the new one is applied (the paused project woken first by the caller); a failing one says which", async () => {
+    const k = demoKit();
+    const fp = migrationsFingerprint(k.app.repoPath);
+    await ensureDemoBackend(k.app, cast(), k.deps);
+    expect(await markMigrationsChanged(k.app, k.deps)).toBe(true);
+    writeFileSync(join(k.app.repoPath, "supabase/migrations/29990101000000_badges.sql"), "create table dotty.badges (id uuid primary key);\n");
+    expect(migrationsFingerprint(k.app.repoPath)).not.toBe(fp);
+    const before = k.fake.sql.filter((x) => x.query.includes("INSERT INTO supabase_migrations.schema_migrations")).length;
+    const d = await ensureDemoBackend(k.app, cast(), k.deps);
+    expect(k.fake.sql.filter((x) => x.query.includes("INSERT INTO supabase_migrations.schema_migrations")).length).toBe(before + 1);
+    expect(d.migrations).toMatchObject({ applied: readdirSync(FIX).length + 1, failed: null });
+    const k2 = demoKit({ fake: { failSql: /boom_table/ } });
+    await ensureDemoBackend(k2.app, cast(), k2.deps);
+    writeFileSync(join(k2.app.repoPath, "supabase/migrations/29990102000000_boom.sql"), "create table dotty.boom_table (id uuid);\n");
+    await markMigrationsChanged(k2.app, k2.deps);
+    await expect(ensureDemoBackend(k2.app, cast(), k2.deps)).rejects.toMatchObject({ code: "migration" });
+    expect((await k2.deps.store.state(k2.app.id)).demo!.migrations.failed).toMatchObject({ file: "29990102000000_boom.sql" });
+  });
+
+  test("deleting the demo project: only day2's own (guard + Supabase asked first); the demo secrets go; already gone is fine", async () => {
+    const k = demoKit();
+    expect(await deleteDemoBackend(k.app, k.deps)).toEqual({ deleted: null });
+    await ensureDemoBackend(k.app, cast(), k.deps);
+    const ref = (await k.deps.store.state(k.app.id)).demo!.ref;
+    k.fake.projects.get(ref)!.name = "someone-elses-project";
+    await expect(deleteDemoBackend(k.app, k.deps)).rejects.toThrow(/name or organization changed/);
+    expect(k.fake.calls.some((x) => x.op === "deleteProject")).toBe(false);
+    k.fake.projects.get(ref)!.name = (await k.deps.store.state(k.app.id)).demo!.name;
+    expect(await deleteDemoBackend(k.app, k.deps)).toEqual({ deleted: ref });
+    expect(k.fake.projects.has(ref)).toBe(false);
+    expect(await k.deps.secrets.get(k.app.id, "secret_key:demo")).toBeNull();
+    expect(await k.deps.secrets.get(k.app.id, "demo_login")).toBeNull();
+    expect((await k.deps.store.state(k.app.id)).demo).toBeNull();
+    // Gone on Supabase already: the record is dropped all the same.
+    const k2 = demoKit();
+    await ensureDemoBackend(k2.app, cast(), k2.deps);
+    k2.fake.projects.clear();
+    expect((await deleteDemoBackend(k2.app, k2.deps)).deleted).toBeTruthy();
+    expect(isLimitError(new Error("The maximum limit of free projects has been reached"))).toBe(true);
+    expect(isLimitError(new Error("syntax error"))).toBe(false);
   });
 
   test("pausing after a capture goes through the guard too", async () => {

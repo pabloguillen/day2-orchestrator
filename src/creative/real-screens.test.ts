@@ -214,9 +214,10 @@ describe("captures", () => {
     expect(shotName("/x/day2-shot-03-moment.png")).toBe("03-moment");
   });
 
-  test("capture mode: a Mac with Xcode runs locally (Maestro hint when missing); Linux without EAS can't", () => {
+  test("capture mode: a Mac with Xcode runs locally (Maestro hint when missing); a server without a simulator uses EAS; off when told", () => {
     expect(captureMode({ env: {}, platform: "darwin", has: (b) => b === "xcrun" })).toMatchObject({ mode: "local", maestro: false, why: expect.stringContaining('curl -fsSL "https://get.maestro.mobile.dev" | bash') });
-    expect(captureMode({ env: {}, platform: "linux", has: () => false })).toMatchObject({ mode: "off" });
+    expect(captureMode({ env: {}, platform: "linux", has: () => false })).toMatchObject({ mode: "eas", why: null });
+    expect(captureMode({ env: { DAY2_CAPTURE: "off" }, platform: "linux", has: () => false })).toMatchObject({ mode: "off" });
     expect(captureMode({ env: { DAY2_CAPTURE: "eas" }, platform: "linux", has: () => false }).mode).toBe("eas");
   });
 

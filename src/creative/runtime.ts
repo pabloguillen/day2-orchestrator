@@ -65,12 +65,13 @@ export type StudioCall = (o: { idea: SocialIdea; forced: TemplateId | null; vari
 export function socialStudio(app: AppEntry, profile: AppProfile, o: { language: string; assets: AssetStore; links: AppLinks | null; posts: number; music?: () => Promise<string | null>; log?: (t: string) => void }): StudioCall {
   return async ({ idea, forced, variants, want, tag }) => {
     const kit = ensureBrandKit(app.repoPath);
-    // Real screens first: a new app version, or the first How it works post, starts a capture (the first one waits for it).
+    // Real screens first: the real-screens pipeline (cast → demo backend → flow → capture) is kicked;
+    // before the first How it works post it waits for it (bounded) — otherwise posts use the best screens there are.
     const tenant = currentTenant();
     if (tenant && process.env.DAY2_CAPTURE !== "off") {
       const { maybeAutoCapture } = await import("./real-screens");
       const firstHow = !loadCreativeState(app.repoPath).howItWorksAt && (forced === "how-it-works" || o.posts < 3);
-      const r = await maybeAutoCapture(tenant, app, { making: firstHow ? "how-it-works" : null, wait: firstHow }).catch(() => null);
+      const r = await maybeAutoCapture(tenant, app, { making: firstHow ? "how-it-works" : null, wait: firstHow, log: o.log }).catch(() => null);
       if (r) o.log?.(r === "new_version" ? "New app version: capturing its screens again for the next posts." : "Captured real screens for the first How it works post.");
     }
     const state = loadCreativeState(app.repoPath);

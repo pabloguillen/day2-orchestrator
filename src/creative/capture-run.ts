@@ -23,13 +23,17 @@ import { safeDownload } from "./download";
  *    undocumented; when no link comes back day2 says so and the Mac path
  *    stays the way to capture.
  *
- * Triggers: the Capture screens button, a new app version (the capture
- * goes stale), and before the first How it works post.
+ * Triggers: the Capture screens button and the real-screens pipeline
+ * (real-screens-auto.ts: a new app version, the first How it works post,
+ * daily maintenance). A server without a simulator captures on EAS by
+ * default; `code` on a failed status says what to try next.
  */
 
 export type CaptureMode = "local" | "eas" | "off";
-export type CaptureStatus = { state: "idle" | "running" | "done" | "failed"; mode: CaptureMode | null; reason: CaptureReason | null; startedAt: string | null; finishedAt: string | null; note: string | null; screens: number; log: Array<{ at: string; text: string }> };
-export type CaptureReason = "button" | "new_version" | "first_how_it_works";
+/** Why a capture failed, for the real-screens pipeline (what to try next). */
+export type CaptureFailure = "off" | "no_flow" | "no_token" | "no_demo" | "artifact" | "device" | "other";
+export type CaptureStatus = { state: "idle" | "running" | "done" | "failed"; mode: CaptureMode | null; reason: CaptureReason | null; startedAt: string | null; finishedAt: string | null; note: string | null; screens: number; log: Array<{ at: string; text: string }>; code?: CaptureFailure | null };
+export type CaptureReason = "button" | "new_version" | "first_how_it_works" | "pipeline" | "fallback_android";
 
 const statusFile = (appId: string) => join(dataDir(), "creative-screens", appId.replace(/[^\w-]/g, "_"), "status.json");
 const idle = (): CaptureStatus => ({ state: "idle", mode: null, reason: null, startedAt: null, finishedAt: null, note: null, screens: 0, log: [] });
@@ -59,7 +63,24 @@ export function captureMode(o: { env?: Record<string, string | undefined>; platf
   if (want === "eas") return { mode: "eas", why: null, maestro };
   const mac = (o.platform ?? process.platform) === "darwin" && o.has("xcrun");
   if (mac || want === "local") return { mode: "local", why: maestro ? null : `Maestro isn't installed on this Mac — run ${'curl -fsSL "https://get.maestro.mobile.dev" | bash'} in Terminal, then press Capture screens again.`, maestro };
-  return { mode: "off", why: "This server has no iPhone Simulator. Run day2 on your Mac (with Xcode and Maestro), or set DAY2_CAPTURE=eas to capture on EAS.", maestro };
+  // A server without a simulator (production): EAS builds and runs the flow.
+  return { mode: "eas", why: null, maestro };
+}
+
+/**
+ * Can this server run the Android emulator for a capture (the fallback when
+ * EAS's screenshots can't be downloaded)? adb, emulator and Maestro on PATH,
+ * an Android SDK, an AVD named in DAY2_ANDROID_AVD or found, and on Linux
+ * /dev/kvm. Pure apart from what's passed in.
+ */
+export function androidEmulatorAvailable(o: { env?: Record<string, string | undefined>; platform?: string; has: (bin: string) => boolean; exists: (path: string) => boolean }): { ok: boolean; why: string | null } {
+  const env = o.env ?? process.env;
+  if (env.DAY2_ANDROID_FALLBACK === "off") return { ok: false, why: "the Android fallback is off (DAY2_ANDROID_FALLBACK=off)" };
+  if (!o.has("adb") || !o.has("emulator")) return { ok: false, why: "this server has no Android emulator (adb and emulator aren't installed)" };
+  if (!o.has("maestro")) return { ok: false, why: "Maestro isn't installed on this server" };
+  if (!env.ANDROID_HOME && !env.ANDROID_SDK_ROOT) return { ok: false, why: "no Android SDK (ANDROID_HOME) on this server" };
+  if ((o.platform ?? process.platform) === "linux" && !o.exists("/dev/kvm")) return { ok: false, why: "this server can't run emulators fast enough (no /dev/kvm)" };
+  return { ok: true, why: null };
 }
 
 /** Pure. Why a capture should start on its own now, or null. */
@@ -100,10 +121,11 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
     status.log.unshift({ at: now().toISOString(), text });
     saveStatus(i.appId, status);
   };
-  const finish = (ok: boolean, note: string, screens = 0) => {
+  const finish = (ok: boolean, note: string, screens = 0, code: CaptureFailure | null = ok ? null : "other") => {
     status.state = ok ? "done" : "failed";
     status.note = note;
     status.screens = screens;
+    status.code = code;
     status.finishedAt = now().toISOString();
     log(note);
     return status;
@@ -111,28 +133,28 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
   saveStatus(i.appId, status);
   let wd: { dir: string; done: () => Promise<void> } | null = null;
   try {
-    if (d.mode === "off") return finish(false, "Captures can't run on this server.");
+    if (d.mode === "off") return finish(false, "Captures can't run on this server.", 0, "off");
     log(i.reason === "new_version" ? "The app has a new version — capturing its screens again." : i.reason === "first_how_it_works" ? "Capturing real screens before the first How it works post." : "Capturing screens.");
     wd = await d.checkout();
     const plan = capturePlan({ repoPath: wd.dir, language: i.language, features: i.features });
-    if (!plan.flow) return finish(false, "The app has no Maestro flow yet — day2 asked its build agent for one (Real screens ticket). Capture runs once that pull request is merged.");
+    if (!plan.flow) return finish(false, "The app has no Maestro flow yet — day2 asked its build agent for one (Real screens ticket). Capture runs once that pull request is merged.", 0, "no_flow");
     const demo = await d.demo();
     if (!demo) log("No demo backend: the flow runs against whatever the build points at — use a demo account, never real friends.");
     const secretEnv: Record<string, string> = demo?.login ? { [LOGIN_ENV.email]: demo.login.email, [LOGIN_ENV.password]: demo.login.password } : {};
     const buildEnv: Record<string, string> = demo ? { EXPO_PUBLIC_DAY2_DEMO: "1", EXPO_PUBLIC_SUPABASE_URL: demo.url, EXPO_PUBLIC_SUPABASE_KEY: demo.key } : { EXPO_PUBLIC_DAY2_DEMO: "1" };
-    let result: { set: CaptureSet | null; note: string };
+    let result: { set: CaptureSet | null; note: string; code?: CaptureFailure };
     if (d.mode === "local") {
-      if (!d.local) return finish(false, "No simulator runner here.");
+      if (!d.local) return finish(false, "No simulator runner here.", 0, "device");
       let target: Target | { skip: string } = i.bundleId ? await d.local.target("ios") : { skip: "the app has no iOS bundle id" };
       if ("skip" in target && i.packageName) {
         log(`iPhone Simulator: ${target.skip} — trying the Android emulator.`);
         target = await d.local.target("android");
       }
-      if ("skip" in target) return finish(false, target.skip);
+      if ("skip" in target) return finish(false, target.skip, 0, "device");
       const t = target;
       log(`${t.device}: building the demo version of the app (this takes a while the first time)…`);
       const built = await t.build(wd.dir, buildEnv);
-      if ("error" in built) return finish(false, built.error);
+      if ("error" in built) return finish(false, built.error, 0, "device");
       await t.uninstall();
       await t.install(built.app);
       log(`${t.device}: running the flow in ${plan.locale}…`);
@@ -141,7 +163,7 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
     } else {
       result = await easCapture({ appId: i.appId, dir: wd.dir, plan, demo, secretEnv, log, now: now() }, d);
     }
-    if (!result.set) return finish(false, result.note);
+    if (!result.set) return finish(false, result.note, 0, result.code ?? "other");
     return finish(true, `Captured ${result.set.screens.length} screens in ${plan.locale}. Posts use them from now on.`, result.set.screens.length);
   } catch (err) {
     return finish(false, `The capture stopped: ${(err as Error).message.slice(0, 200)}`);
@@ -152,11 +174,11 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
   }
 }
 
-async function easCapture(o: { appId: string; dir: string; plan: ReturnType<typeof capturePlan>; demo: Awaited<ReturnType<CaptureRunDeps["demo"]>>; secretEnv: Record<string, string>; log: (t: string) => void; now: Date }, d: CaptureRunDeps): Promise<{ set: CaptureSet | null; note: string }> {
-  if (!d.eas) return { set: null, note: "EAS isn't set up here." };
+async function easCapture(o: { appId: string; dir: string; plan: ReturnType<typeof capturePlan>; demo: Awaited<ReturnType<CaptureRunDeps["demo"]>>; secretEnv: Record<string, string>; log: (t: string) => void; now: Date }, d: CaptureRunDeps): Promise<{ set: CaptureSet | null; note: string; code?: CaptureFailure }> {
+  if (!d.eas) return { set: null, note: "EAS isn't set up here.", code: "off" };
   const token = await d.eas.expoToken();
-  if (!token) return { set: null, note: "Connect the app's Expo account (Connect your stores) to capture on EAS." };
-  if (!o.demo) return { set: null, note: "Set up the demo backend first — an EAS capture always uses it." };
+  if (!token) return { set: null, note: "Connect the app's Expo account (Connect your stores) to capture on EAS.", code: "no_token" };
+  if (!o.demo) return { set: null, note: "Set up the demo backend first — an EAS capture always uses it.", code: "no_demo" };
   const cli = `eas-cli@${EAS_CLI_VERSION}`;
   const env = childEnv(token);
   const redact = (s: string) => [token, ...Object.values(o.secretEnv)].reduce((t, v) => (v ? t.split(v).join("[hidden]") : t), s);
@@ -186,16 +208,21 @@ async function easCapture(o: { appId: string; dir: string; plan: ReturnType<type
   } catch {
     links = [];
   }
-  if (!links.length) return { set: null, note: `EAS ran the flow${run.url ? ` (${run.url})` : ""}, but day2 couldn't fetch its screenshots (the "${ARTIFACT}" artifact). Capture on your Mac instead, or upload screenshots.` };
+  if (!links.length) return { set: null, note: `EAS ran the flow${run.url ? ` (${run.url})` : ""}, but day2 couldn't fetch its screenshots (the "${ARTIFACT}" artifact). Capture on your Mac instead, or upload screenshots.`, code: "artifact" };
   const tmp = mkdtempSync(join(tmpdir(), "day2-eas-shots-"));
   try {
     const download = d.eas.download ?? safeDownload;
-    for (const [k, url] of links.entries()) {
-      const file = join(tmp, `a${k}${/\.png(\?|$)/i.test(url) ? ".png" : /\.zip(\?|$)/i.test(url) ? ".zip" : ".tgz"}`);
-      await download(url, file, { tool: "eas", kind: "image", maxBytes: 100 * 1024 * 1024 });
-      if (!file.endsWith(".png")) await unpack(file, join(tmp, `x${k}`), d.eas.run);
+    try {
+      for (const [k, url] of links.entries()) {
+        const file = join(tmp, `a${k}${/\.png(\?|$)/i.test(url) ? ".png" : /\.zip(\?|$)/i.test(url) ? ".zip" : ".tgz"}`);
+        await download(url, file, { tool: "eas", kind: "image", maxBytes: 100 * 1024 * 1024 });
+        if (!file.endsWith(".png")) await unpack(file, join(tmp, `x${k}`), d.eas.run);
+      }
+    } catch (err) {
+      return { set: null, note: `EAS ran the flow, but downloading its screenshots failed (${(err as Error).message.slice(0, 160)}).`, code: "artifact" };
     }
-    return importScreens({ appId: o.appId, plan: o.plan, dir: tmp, device: "EAS iOS Simulator", at: o.now, aiContent: o.demo.ai ?? null, mode: "eas" });
+    const r = importScreens({ appId: o.appId, plan: o.plan, dir: tmp, device: "EAS iOS Simulator", at: o.now, aiContent: o.demo.ai ?? null, mode: "eas" });
+    return r.set ? r : { ...r, code: "artifact" };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

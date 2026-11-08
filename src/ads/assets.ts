@@ -1,6 +1,6 @@
 import type { SQL } from "bun";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import type { Asset, AssetSource, Ratio } from "./types";
 
@@ -20,6 +20,8 @@ export interface AssetStore {
   list(appId: string, purpose?: string): Promise<StoredAsset[]>;
   /** Absolute path of an asset's file, or null. */
   file(id: string): Promise<string | null>;
+  /** Deletes an asset's record and file (e.g. a removed app's demo-cast pictures). */
+  remove?(id: string): Promise<void>;
 }
 
 export type NewAsset = {
@@ -103,6 +105,15 @@ export function fileAssetStore(root: string, publicUrl: string): AssetStore {
       const a = await this.get(id);
       return a && existsSync(a.path) ? a.path : null;
     },
+    async remove(id) {
+      const all = load();
+      const r = all[id];
+      if (!r) return;
+      const a = view(all, r);
+      delete all[id];
+      save(all);
+      rmSync(a.path, { force: true });
+    },
   };
 }
 
@@ -140,6 +151,12 @@ export function dbAssetStore(sql: SQL, root: string, publicUrl: string): AssetSt
     async file(id) {
       const a = await this.get(id);
       return a && existsSync(a.path) ? a.path : null;
+    },
+    async remove(id) {
+      const a = await this.get(id);
+      if (!a) return;
+      await sql`DELETE FROM ad_assets WHERE id = ${id} AND app_id = ${a.appId}`;
+      rmSync(a.path, { force: true });
     },
   };
 }

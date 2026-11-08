@@ -93,6 +93,8 @@ export function supabaseApi(token: string, deps: SupabaseDeps = {}) {
     health: (ref: string, services = ["auth", "db", "rest", "realtime", "storage"]) => call<ServiceHealth[]>("GET", `${p(ref)}/health`, { query: { services: services.join(",") } }),
     pause: (ref: string) => call<void>("POST", `${p(ref)}/pause`),
     restore: (ref: string) => call<void>("POST", `${p(ref)}/restore`),
+    /** Deletes a project for good (only ever day2's own demo project — hosting/demo.ts guards it). */
+    deleteProject: (ref: string) => call<{ id?: number; ref?: string; name?: string }>("DELETE", p(ref)),
 
     // ---- Keys ----
     apiKeys: (ref: string) => call<ApiKey[]>("GET", `${p(ref)}/api-keys`, { query: { reveal: "true" } }),

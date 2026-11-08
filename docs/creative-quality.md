@@ -74,7 +74,8 @@ zooms to / lifts off the region that matters.
 
 Until this, `captureMoments` was never called, Dotty had no Maestro flow
 and no demo data — posts fell back to English App Store screenshots. The
-pipeline now (Growth → Formats):
+pipeline now — run by day2 itself, see "The automatic pipeline" below; the
+owner only steps in when a step needs attention:
 
 ```
 profile + brand kit + language ─► demo cast (JSON, checked) ─► owner approves
@@ -84,6 +85,91 @@ day2's Supabase org ─► separate "-demo" project ◄── migrations ◄─�
 build agent ticket ─► .maestro/day2/store-screens.yaml (+ .json, demo sign-in, day2-demo profile) as a PR
 capture (Mac simulator or EAS) ─► capture set (marked AI content) ─► chooseScreens "capture"
 ```
+
+**The automatic pipeline** (`creative/real-screens-auto.ts`): one
+resumable state machine per app, persisted in
+`<data>/real-screens/<app>/pipeline.json`:
+
+```
+cast → approve → backend → flow → flow_merged → capture → done   (+ daily maintenance)
+```
+
+Each step first checks the world (is there a cast; is it approved; is the
+demo backend filled with *this* cast and all migrations; is the flow ticket
+there; is the flow in the app's checkout or its ticket done; is there a
+capture for the current version, newer than the last seeding) and only
+does what's missing — calling it again is a no-op, and a run picks up where
+the last one stopped (also after a restart). Per step: status (`pending`,
+`running`, `done`, `waiting`, `needs_attention`, `skipped`), attempts, last
+error, next retry. A failure is retried with exponential backoff (base 10
+min for the cast, 15 min backend, 60 min capture; doubling, capped at a
+day) up to 5 attempts, then "needs attention" with the reason. Problems day2
+can't fix by itself need attention at once: Supabase's plan limit ("no room
+for another project … upgrade"), a migration that doesn't apply on the demo
+project (old captures stay in use), no Expo account, not enough credits
+(`authorize` for the cast's model + image runs, the vision check and
+`infra` for the backend — the account's balance, app cap and daily cap), a
+flow PR closed without merging. Once a day what needs attention gets one
+more try. One run per app at a time (single-flight; the second caller gets
+the same promise). The demo project is paused whenever the pipeline stops
+before a capture (a paid organization refuses — then day2 notes it and
+doesn't ask again for a day).
+
+*Triggers* (`realScreensAll` on the backlog timer, every
+`DAY2_BACKLOG_TICK_MINUTES`): an app with growth on (the autopilot, or a
+connected social account) and real screens missing or stale; daily
+maintenance (re-arm, check the demo project still exists on Supabase — gone
+→ created again); a new app version (`app.json` version differs → the
+capture step runs again); changed `supabase/migrations` (a fingerprint of
+names and contents → only the new migrations are applied to the demo
+project, after waking it); a post being made — `maybeAutoCapture` kicks
+the pipeline, and before the first How it works post waits for it (at most
+`DAY2_REAL_SCREENS_WAIT_MINUTES`, default 45). A post never waits for good:
+it goes ahead with the best screens there are (`chooseScreens` order) and
+the reason is stored (`posts.why`, shown on Formats, logged on the post
+run). The pipeline only runs where it can: a Supabase app with migrations
+and day2's Supabase organization configured (else the old manual path and
+uploads); `DAY2_REAL_SCREENS=off` turns it off.
+
+*Approval policy* (`demoCast: "auto" | "owner"`, per app, default
+`auto`, Growth → Formats): in `auto`, day2 approves a cast itself only if
+`validateCast` passes, every person and moment has a picture (no
+placeholders), and — for AI-made pictures — a vision run (`runVision`,
+metered as content generation, ≤ $0.30) finds no text or logos and faces
+that clearly look adult. Otherwise (or with `owner`) the step waits with the
+reason on Formats. The owner can always Regenerate, Approve or Decline; the
+first decline makes a new cast automatically, the second waits for
+Regenerate, and a declined cast is never auto-approved. There is no owner
+inbox/notification service in day2 today, so "waiting for you" shows only
+on Formats (and in the server log).
+
+*The flow PR* follows day2's code rules: the build agent opens it and the
+owner merges it (Approvals) — day2 never merges code by itself
+(`autonomy.ts` defaults to L2, `pr.ts` never merges). Meanwhile the step
+says "Waiting for the flow PR #N to be merged — it's in Approvals".
+
+*Capture in production*: a server without a simulator now uses EAS by
+default (`DAY2_CAPTURE=eas` no longer needed; `off` still turns captures
+off). When EAS ran but its screenshots can't be fetched, the Android
+emulator is tried if the server has one (`androidEmulatorAvailable`: adb,
+emulator, Maestro, `ANDROID_HOME`, `/dev/kvm` on Linux;
+`DAY2_ANDROID_FALLBACK=off`), else the step needs attention and asks for
+uploads.
+
+*Cleanup*: removing an app deletes its demo project (guarded like every
+write: only the recorded `-demo` project, confirmed with Supabase first),
+the demo secrets, the cast and its pictures, its captures and pipeline
+state; growth off for 30 days deletes the demo project and the cast (captures
+stay usable; it's set up again when growth is back). A project Supabase
+won't delete at that moment is remembered and retried on the timer.
+
+Console (Growth → Formats → Real screens): the steps as a timeline (done /
+running / waiting / needs attention, the reason, attempts, Retry or Try
+now), the approval setting, the last post's fallback reason. Routes:
+`PUT /api/apps/:id/creative/real-screens/settings`, `POST …/real-screens/retry`,
+`POST …/demo-cast/decline` (scoped to the signed-in account's app, owner or
+admin); `POST …/demo-cast` is Regenerate and `POST …/demo-backend` a retry
+from the backend step.
 
 **Demo cast** (`creative/demo-cast/`): ~8 fictional friends (first names
 for the audience's locale, age 18–40 checked — the prompt asks 18–30 —
@@ -104,7 +190,8 @@ connected for video only. No tool → the app's bundled demo pictures (e.g.
 Dotty's `src/assets/welcome/*.jpg`), else coloured placeholders, and the
 card says so. Stored in the asset store (purpose `demo-cast`) with
 `aiGenerated`/`aiPerson`; the cast JSON in `<data>/demo-cast/<app>/`.
-Regenerate makes a new draft; only an **approved** cast is seeded.
+Regenerate makes a new draft; only an **approved** cast is seeded
+(approved automatically or by the owner — see the approval policy above).
 
 **Demo backend** (`hosting/demo.ts`, Supabase apps with migrations only —
 others: "not supported yet" + upload): a project `<app>-<id>-demo` in
@@ -167,8 +254,8 @@ checkout (build → `type: maestro` job with `environment: preview`,
 artifacts from the CLI — **unverified**; if no link comes back the card
 says so and the Mac path stays. One capture per app at a time, status +
 log polled by the console, the demo project paused afterwards. Triggers:
-**Capture screens** (Formats), a new app version (stale capture, on the
-next post), and before the first How it works post (waits for it).
+**Capture screens** (Formats) and the automatic pipeline above (a new app
+version, the first How it works post, daily maintenance).
 
 **AI label**: a capture of the demo cast is marked `aiContent`; the studio
 stores its assets with `aiGenerated/aiPerson`, writes IPTC

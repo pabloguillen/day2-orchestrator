@@ -35,7 +35,7 @@ import { DEMO_STEPS, type DemoBackend, type DemoStep, type HostingState, type Re
 export class DemoError extends Error {
   constructor(
     message: string,
-    public code: "unsupported" | "not_configured" | "limit" | "not_approved" | "guard" | "starting" | "failed" = "failed",
+    public code: "unsupported" | "not_configured" | "limit" | "not_approved" | "guard" | "starting" | "migration" | "failed" = "failed",
   ) {
     super(message);
   }
@@ -197,7 +197,7 @@ export const FREE_PROJECT_LIMIT = 2;
 
 /** The owner-facing message when the organization can't take another project. */
 export function limitMessage(orgSlug: string, plan: string | null): string {
-  return `day2's Supabase organization has no room for another project${plan === "free" ? ` (the Free plan allows ${FREE_PROJECT_LIMIT} active projects)` : ""}. Pause or delete a project at supabase.com/dashboard/org/${orgSlug}, or upgrade the organization, then press "Set up demo backend" again. Your live app isn't affected.`;
+  return `day2's Supabase organization has no room for another project${plan === "free" ? ` (the Free plan allows ${FREE_PROJECT_LIMIT} active projects)` : ""}. Pause or delete a project at supabase.com/dashboard/org/${orgSlug}, or upgrade the organization (Pro has no project limit) — day2 tries again by itself every day, or press Retry on Growth → Formats. Your live app isn't affected.`;
 }
 
 /** Pure. Extensions the migrations use without creating them (PostGIS types in public). Prepended on the demo project only. */
@@ -379,7 +379,7 @@ export async function ensureDemoBackend(app: AppEntry, cast: DemoCast, deps: Dem
         await update((d) => {
           d.migrations = { applied: n, total: files.length, failed: { file: m.file, error: e } };
         });
-        throw new DemoError(`The app's migration ${m.file} didn't apply on the demo project: ${e}`);
+        throw new DemoError(`The app's migration ${m.file} didn't apply on the demo project: ${e}`, "migration");
       }
     }
     await update((d) => {
@@ -496,6 +496,70 @@ export async function ensureDemoBackend(app: AppEntry, cast: DemoCast, deps: Dem
     });
   });
   return (await deps.store.state(app.id)).demo!;
+}
+
+/** Is a plan-limit refusal from Supabase (402, "limit", "maximum", …). Pure. */
+export const isLimitError = (err: unknown) => (err instanceof SupabaseError && err.status === 402) || /limit|maximum|exceed|too many|quota|free projects/i.test((err as Error)?.message ?? "");
+
+/** Pure. A short fingerprint of the app's migrations (names and contents) — a change means new ones to apply. */
+export function migrationsFingerprint(repoPath: string): string | null {
+  const files = readMigrations(repoPath);
+  if (!files.length) return null;
+  let h = 0x811c9dc5;
+  for (const f of files)
+    for (const ch of `${f.file}\n${f.sql}\n`) {
+      h ^= ch.charCodeAt(0);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  return `${files.length}:${h.toString(16)}`;
+}
+
+/** The app's migrations changed: the next ensureDemoBackend applies the new ones (only those not yet applied). */
+export async function markMigrationsChanged(app: AppEntry, deps: DemoDeps): Promise<boolean> {
+  const s = await deps.store.state(app.id);
+  if (!s.demo?.done.includes("migrations")) return false;
+  await deps.store.update(app.id, (st) => {
+    if (!st.demo) return;
+    st.demo.done = st.demo.done.filter((x) => x !== "migrations");
+    appendLog(st.demo, nowOf(deps), "The app's migrations changed — the new ones go onto the demo project next.");
+  });
+  return true;
+}
+
+/**
+ * Deletes the app's demo project in day2's organization (the app was
+ * removed, or growth has been off for 30 days) — only the project recorded
+ * as day2's demo, after Supabase confirms its name and organization — and
+ * the demo secrets. A project that's already gone counts as deleted.
+ */
+export async function deleteDemoBackend(app: AppEntry, deps: DemoDeps): Promise<{ deleted: string | null }> {
+  const state = await deps.store.state(app.id);
+  const d = state.demo;
+  if (!d) return { deleted: null };
+  if (!deps.operator) throw new DemoError("Demo backends need day2's Supabase organization (SUPABASE_ACCESS_TOKEN, DAY2_SUPABASE_ORG_ID).", "not_configured");
+  const demo = assertDemoTarget(state, d.ref, productionRefs(app.repoPath));
+  const api = deps.api(deps.operator.token);
+  let gone = false;
+  try {
+    await confirmRemote(api, demo);
+  } catch (err) {
+    if (err instanceof SupabaseError && err.status === 404) gone = true;
+    else throw err;
+  }
+  if (!gone) {
+    try {
+      await api.deleteProject(demo.ref);
+    } catch (err) {
+      if (!(err instanceof SupabaseError && err.status === 404)) throw err;
+    }
+  }
+  for (const k of ["secret_key:demo", "demo_login", "db_password:demo"] as const) await deps.secrets.remove(app.id, k).catch(() => undefined);
+  const at = nowOf(deps);
+  await deps.store.update(app.id, (s) => {
+    s.demo = null;
+    hostingLog(s, at, `Deleted the demo backend ${demo.name}.`);
+  });
+  return { deleted: demo.ref };
 }
 
 /** Pauses the demo project (between captures; a paused project doesn't count against the Free plan's 2). */

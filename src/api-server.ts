@@ -235,6 +235,7 @@ import { autopilotAll } from "./growth-autopilot-run";
 import { messagesRoutes } from "./messages/routes";
 import { hostingRoutes } from "./hosting/routes";
 import { hostingAll, hostingStore } from "./hosting/runtime";
+import { realScreensAll } from "./creative/real-screens-auto";
 import { hostingPrivacy } from "./hosting/privacy";
 import { ingestPushTokens } from "./messages/runtime";
 import { simulateAll } from "./simulation-run";
@@ -612,6 +613,11 @@ route("PATCH", "/api/apps/:id", async (req, params, t) => {
 route("DELETE", "/api/apps/:id", async (_req, params, t) => {
   requireManager(t);
   const app = await t.apps.find(params.id!);
+  // Its demo backend (day2's Supabase organization) and demo cast go first (creative/real-screens-auto.ts).
+  if (app) {
+    const { cleanupRealScreens } = await import("./creative/real-screens-auto");
+    await Promise.race([cleanupRealScreens(t, app, "removed"), Bun.sleep(30_000)]).catch((err: Error) => console.error(`[day2-real-screens] ${app.name}: cleanup failed: ${err.message}`));
+  }
   await t.apps.remove(params.id!);
   // Its results leave the shared library of what works.
   await forgetApp(params.id!);
@@ -3354,6 +3360,7 @@ function startBacklogTimer(): void {
             await tickAll({ startWork: true });
             await simulateAll();
             await hostingAll();
+            await realScreensAll();
           }
         });
       } else {
@@ -3361,6 +3368,7 @@ function startBacklogTimer(): void {
         await tickAll({ startWork: true });
         await simulateAll();
         await hostingAll();
+        await realScreensAll();
       }
     } catch (err) {
       console.error("[day2-backlog] tick failed:", (err as Error).message);

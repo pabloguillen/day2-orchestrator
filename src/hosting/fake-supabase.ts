@@ -9,7 +9,7 @@ import { SupabaseError } from "./supabase";
 
 export type FakeCall = { token: string; op: string; args: unknown[] };
 
-export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?: { security?: Lint[]; performance?: Lint[] }; failSql?: RegExp; sqlOutage?: boolean; claimFails?: boolean; createFails?: { status: number; message: string } } = {}) {
+export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?: { security?: Lint[]; performance?: Lint[] }; failSql?: RegExp; sqlOutage?: boolean; claimFails?: boolean; createFails?: { status: number; message: string }; pauseRefused?: boolean } = {}) {
   const calls: FakeCall[] = [];
   const projects = new Map<string, { ref: string; name: string; region: string; org: string; polls: number; status: string; paused: boolean }>();
   const migrations = new Map<string, Set<string>>();
@@ -100,8 +100,15 @@ export function fakeSupabase(o: { orgPlan?: string; branching?: boolean; lints?:
       addons: async () => ({ selected_addons: [{ type: "compute_instance", variant: { id: "ci_micro", name: "Micro", price: { description: "", type: "usage", interval: "hourly", amount: 0.01344 } } }] }),
       pause: async (ref) => {
         rec("pause", ref);
+        if (o.pauseRefused) throw new SupabaseError(400, `Supabase POST /v1/projects/${ref}/pause: 400 Projects on a paid plan cannot be paused`);
         projects.get(ref)!.paused = true;
         projects.get(ref)!.status = "INACTIVE";
+      },
+      deleteProject: async (ref) => {
+        rec("deleteProject", ref);
+        if (!projects.has(ref)) throw new SupabaseError(404, `Supabase DELETE /v1/projects/${ref}: 404 not found`);
+        projects.delete(ref);
+        return { ref };
       },
       restore: async (ref) => {
         rec("restore", ref);

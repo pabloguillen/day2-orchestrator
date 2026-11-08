@@ -19,7 +19,8 @@ import { isTemplateId } from "./templates/types";
 import { profileOf, languageOf } from "../social/runtime";
 import { refreshAppLinks } from "../ads/app-links";
 import { appKind } from "../field-work";
-import { approveCast, realScreensView, startBackend, startCapture, startCast } from "./real-screens";
+import { realScreensView, startCapture } from "./real-screens";
+import { declineCast, ownerApproved, PIPELINE_STEPS, regenerateCast, retryRealScreens, setDemoCastPolicy, type PipelineStep } from "./real-screens-auto";
 import { loadUploadSet, removeUploadSet, saveUploadSet, uploadFile, UploadError, UPLOAD } from "./upload";
 import { appVersion } from "./capture";
 import { CAST_PURPOSE } from "./demo-cast/images";
@@ -138,24 +139,58 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
 
   // ---- Real screens (docs/creative-quality.md): demo cast, demo backend, captures, uploads ----
 
-  /** Write a (new) demo cast with pictures — in the background; the view shows the job. */
+  /** Write a (new) demo cast with pictures (Regenerate) — the pipeline runs on in the background. */
   route("POST", "/api/apps/:id/creative/demo-cast", async (_req, p, t) => {
     const app = await h.requireApp(t, p.id!);
     h.requireManager(t);
-    startCast(t, app);
+    void regenerateCast(t, app);
     return h.json(await creativeView(app, t), { status: 202 });
   });
 
-  /** The owner approves the cast; only an approved cast goes into the demo backend. */
+  /** The owner approves the cast; only an approved cast goes into the demo backend. Then the pipeline carries on. */
   route("POST", "/api/apps/:id/creative/demo-cast/approve", async (_req, p, t) => {
     const app = await h.requireApp(t, p.id!);
     h.requireManager(t);
     try {
-      await approveCast(app, (await h.actorName(t)) ?? null);
+      await ownerApproved(t, app, (await h.actorName(t)) ?? null);
     } catch (err) {
       throw fail(409, (err as Error).message);
     }
     return h.json(await creativeView(app, t));
+  });
+
+  /** The owner declines the cast: day2 writes a new one once by itself, then waits for Regenerate. */
+  route("POST", "/api/apps/:id/creative/demo-cast/decline", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    try {
+      await declineCast(t, app);
+    } catch (err) {
+      throw fail(409, (err as Error).message);
+    }
+    return h.json(await creativeView(app, t), { status: 202 });
+  });
+
+  /** Real screens settings: who approves demo casts ("auto": day2 when its checks pass; "owner": always the owner). */
+  route("PUT", "/api/apps/:id/creative/real-screens/settings", async (req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    const body = (await req.json().catch(() => null)) as { demoCast?: unknown } | null;
+    if (body?.demoCast !== "auto" && body?.demoCast !== "owner") throw fail(400, 'demoCast is "auto" or "owner".');
+    setDemoCastPolicy(app.id, body.demoCast);
+    if (body.demoCast === "auto") void retryRealScreens(t, app, "approve");
+    return h.json(await creativeView(app, t));
+  });
+
+  /** Retry the real-screens pipeline (from one step, or every step that needs attention) — in the background. */
+  route("POST", "/api/apps/:id/creative/real-screens/retry", async (req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    const body = (await req.json().catch(() => null)) as { step?: unknown } | null;
+    const step = body?.step;
+    if (step !== undefined && step !== null && !PIPELINE_STEPS.includes(step as PipelineStep)) throw fail(400, "Unknown step.");
+    void retryRealScreens(t, app, (step as PipelineStep | undefined) ?? undefined);
+    return h.json(await creativeView(app, t), { status: 202 });
   });
 
   /** A demo cast picture — only this app's "demo-cast" assets, signed in. */
@@ -170,7 +205,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
   route("POST", "/api/apps/:id/creative/demo-backend", async (_req, p, t) => {
     const app = await h.requireApp(t, p.id!);
     h.requireManager(t);
-    startBackend(t, app);
+    void retryRealScreens(t, app, "backend");
     return h.json(await creativeView(app, t), { status: 202 });
   });
 

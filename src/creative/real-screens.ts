@@ -15,6 +15,8 @@ import { paidFor, ticketOnce } from "../store-listing/deps";
 import { afterMarker, runText } from "../store-listing/research";
 import { runMaestro } from "../store-listing/screenshots";
 import { assetStore, releaseCredentials, type Tenant } from "../tenant";
+import type { CreditCheck, CreditService } from "../credits";
+import type { VisionRun } from "./vision";
 import { ensureBrandKit, resolveKit } from "./brand-kit";
 import { appVersion, capturePlan, loadCaptureSet, localeFor, type CaptureSet } from "./capture";
 import { autoCaptureReason, captureMode, captureRunning, loadCaptureStatus, runCapture, type CaptureReason, type CaptureRunDeps } from "./capture-run";
@@ -53,6 +55,26 @@ function setJob(appId: string, kind: JobKind, s: JobStatus) {
   mkdirSync(join(jobFile(appId, kind), ".."), { recursive: true });
   writeFileSync(jobFile(appId, kind), JSON.stringify(s));
 }
+/** Runs `fn` now (awaited), recording it as the app's job of that kind (the pipeline's steps). */
+export async function runJob<T>(appId: string, kind: JobKind, fn: () => Promise<{ note: string; value: T }>): Promise<T> {
+  setJob(appId, kind, { state: "running", startedAt: new Date().toISOString(), finishedAt: null, note: null });
+  try {
+    const r = await fn();
+    setJob(appId, kind, { ...jobStatus(appId, kind), state: "done", finishedAt: new Date().toISOString(), note: r.note });
+    return r.value;
+  } catch (err) {
+    setJob(appId, kind, { ...jobStatus(appId, kind), state: "failed", finishedAt: new Date().toISOString(), note: (err as Error).message.slice(0, 300) });
+    throw err;
+  }
+}
+/** Tests and the pipeline: track a promise so settleRealScreens waits for it. */
+export function trackJob(appId: string, kind: string, p: Promise<unknown>): void {
+  const k = `${appId}:${kind}`;
+  jobs.set(k, p);
+  void p.catch(() => undefined).finally(() => {
+    if (jobs.get(k) === p) jobs.delete(k);
+  });
+}
 /** Starts `fn` in the background unless one of the same kind runs for the app. */
 function background(appId: string, kind: JobKind, fn: () => Promise<string>): boolean {
   const k = `${appId}:${kind}`;
@@ -67,18 +89,40 @@ function background(appId: string, kind: JobKind, fn: () => Promise<string>): bo
 }
 /** Tests: wait for an app's background work. */
 export async function settleRealScreens(appId: string): Promise<void> {
-  await Promise.all([...jobs.entries()].filter(([k]) => k.startsWith(`${appId}:`)).map(([, p]) => p.catch(() => undefined)));
-  while (captureRunning(appId)) await Bun.sleep(5);
+  for (let i = 0; i < 50; i++) {
+    const open = [...jobs.entries()].filter(([k]) => k.startsWith(`${appId}:`));
+    if (!open.length && !captureRunning(appId)) return;
+    await Promise.all(open.map(([, p]) => p.catch(() => undefined)));
+    while (captureRunning(appId)) await Bun.sleep(5);
+  }
 }
 
 // ---------------------------------------------------------------- test hooks
 
-type Hooks = { castModel?: CastModel | null; planner?: DemoDeps["planner"]; demoDeps?: (app: AppEntry) => DemoDeps; capture?: (app: AppEntry) => CaptureRunDeps; noImageKit?: boolean };
+type Hooks = {
+  castModel?: CastModel | null;
+  planner?: DemoDeps["planner"];
+  demoDeps?: (app: AppEntry) => DemoDeps;
+  /** A fake capture runner; `android` is the emulator fallback after a failed EAS download. */
+  capture?: (app: AppEntry, o?: { android?: boolean }) => CaptureRunDeps;
+  noImageKit?: boolean;
+  /** The vision run for the automatic cast check (null: none available). */
+  vision?: VisionRun | null;
+  /** Credit checks (instead of the account's credits). */
+  credits?: (service: CreditService, usd: number) => CreditCheck;
+  /** Is growth/social on for the app. */
+  growthOn?: (app: AppEntry) => boolean;
+  /** Can this server run the Android emulator fallback. */
+  android?: { ok: boolean; why: string | null };
+  /** How long the first How it works post waits for the pipeline (ms). */
+  postWaitMs?: number;
+};
 let hooks: Hooks = {};
 /** Tests: fake models, a fake Supabase and fake capture runners. */
 export function setRealScreensTestHooks(h: Hooks): void {
   hooks = h;
 }
+export const realScreensHooks = (): Hooks => hooks;
 
 // ---------------------------------------------------------------- the real dependencies
 
@@ -89,7 +133,7 @@ const castModel = (t: Tenant, app: AppEntry): CastModel | null => {
   return async (prompt) => (await paid("content_generation", "Demo cast", 0.4, () => runText(prompt, { service: "content_generation", label: "Demo cast", maxUsd: 0.4 }))).result;
 };
 
-function demoDeps(t: Tenant, app: AppEntry): DemoDeps {
+export function demoDeps(t: Tenant, app: AppEntry): DemoDeps {
   if (hooks.demoDeps) return hooks.demoDeps(app);
   const paid = paidFor(t, app);
   return {
@@ -104,10 +148,10 @@ function demoDeps(t: Tenant, app: AppEntry): DemoDeps {
   };
 }
 
-function captureDeps(t: Tenant, app: AppEntry): CaptureRunDeps {
-  if (hooks.capture) return hooks.capture(app);
+export function captureDeps(t: Tenant, app: AppEntry, o: { android?: boolean } = {}): CaptureRunDeps {
+  if (hooks.capture) return hooks.capture(app, o);
   const ids = storeIdsFromRepo(app.repoPath);
-  const mode = captureMode({ has }).mode;
+  const mode = o.android ? "local" : captureMode({ has }).mode;
   const d = demoDeps(t, app);
   const git = gitWorkdirs(app.id, app.repoPath);
   return {
@@ -125,7 +169,7 @@ function captureDeps(t: Tenant, app: AppEntry): CaptureRunDeps {
       const login = await d.secrets.get<{ email: string; password: string }>(app.id, "demo_login");
       return { url: demo.url, key: demo.publishableKey, login, ai: castAiFlags(await loadCast(app.id, assetStore())) };
     },
-    local: { target: (p) => (p === "ios" ? iosTarget(ids.bundleId!, app.name) : androidTarget(ids.packageName!)), flow: runMaestro, run: (cmd) => runCmd(cmd, { timeoutMs: 120_000 }) },
+    local: { target: async (p) => (p === "ios" ? (o.android || !ids.bundleId ? { skip: "the Android emulator is used here" } : iosTarget(ids.bundleId, app.name)) : ids.packageName ? androidTarget(ids.packageName) : { skip: "the app has no Android package name" }), flow: runMaestro, run: (cmd) => runCmd(cmd, { timeoutMs: 120_000 }) },
     eas: { expoToken: async () => (await releaseCredentials().get(app.id, "expo"))?.value.token ?? null, run: (cmd, o) => bunRunner(cmd, o) },
     after: async () => {
       if (process.env.DAY2_DEMO_PAUSE_AFTER_CAPTURE === "off") return;
@@ -138,7 +182,12 @@ function captureDeps(t: Tenant, app: AppEntry): CaptureRunDeps {
 
 /** Writes a new demo cast (draft) with pictures, in the background. */
 export function startCast(t: Tenant, app: AppEntry): boolean {
-  return background(app.id, "cast", async () => {
+  return background(app.id, "cast", async () => (await writeCast(t, app)).note);
+}
+
+/** Writes a new demo cast (draft) with pictures and saves it. */
+export async function writeCast(t: Tenant, app: AppEntry): Promise<{ cast: DemoCast; note: string }> {
+  {
     const profile = profileOf(app);
     const language = languageOf(app, profile);
     const kit = resolveKit(ensureBrandKit(app.repoPath), { repoPath: app.repoPath, appName: app.name, dna: profile?.brand ?? null });
@@ -147,8 +196,8 @@ export function startCast(t: Tenant, app: AppEntry): boolean {
     const imageKit = hooks.noImageKit ? null : await creatorKitFor(t.accountId, app, "posts", { billing: { credits: t.credits, appId: app.id, appName: app.name } }).catch(() => null);
     const withImages = await addCastImages(cast, { kit: imageKit, store: assetStore(), repoPath: app.repoPath, appName: app.name, colors: [kit.primary, kit.accent ?? kit.primary, kit.surface] });
     saveCast(withImages);
-    return `${note}. ${withImages.images.note}`;
-  });
+    return { cast: withImages, note: `${note}. ${withImages.images.note}` };
+  }
 }
 
 export async function approveCast(app: AppEntry, by: string | null): Promise<DemoCast> {
@@ -159,16 +208,12 @@ export async function approveCast(app: AppEntry, by: string | null): Promise<Dem
   return next;
 }
 
-/** Creates/fills the demo backend, then asks the build agent for the flow, in the background. */
-export function startBackend(t: Tenant, app: AppEntry): boolean {
-  return background(app.id, "backend", async () => {
-    const cast = await loadCast(app.id, assetStore());
-    if (!cast) throw new DemoError("Write and approve a demo cast first.", "not_approved");
-    const d = demoDeps(t, app);
-    const demo = await ensureDemoBackend(app, cast, d);
-    const t2 = await ensureFlowTicket(app, cast);
-    return `The demo backend is ready (${demo.rows} rows, ${demo.uploads} pictures).${t2 ? ` The flow is ticket ${t2.id}.` : ""}`;
-  });
+/** Is the demo flow (signing in with the demo account) in the app's checkout already? */
+export function demoFlowInRepo(app: AppEntry): boolean {
+  const profile = profileOf(app);
+  const plan = capturePlan({ repoPath: app.repoPath, language: languageOf(app, profile), features: profile?.featureMap ?? [] });
+  const f = join(app.repoPath, ".maestro/day2/store-screens.yaml");
+  return Boolean(plan.flow && plan.moments.length && existsSync(f) && readFileSync(f, "utf-8").includes("MAESTRO_DAY2_DEMO"));
 }
 
 /** The Maestro flow ticket (once per app). */
@@ -176,7 +221,7 @@ export async function ensureFlowTicket(app: AppEntry, cast: DemoCast | null) {
   const profile = profileOf(app);
   const language = languageOf(app, profile);
   const plan = capturePlan({ repoPath: app.repoPath, language, features: profile?.featureMap ?? [] });
-  if (plan.flow && plan.moments.length && existsSync(join(app.repoPath, ".maestro/day2/store-screens.yaml")) && readFileSync(join(app.repoPath, ".maestro/day2/store-screens.yaml"), "utf-8").includes("MAESTRO_DAY2_DEMO")) return null;
+  if (demoFlowInRepo(app)) return null;
   return ticketOnce(app, demoFlowTicket({ appName: app.name, features: profile?.featureMap ?? [], locale: localeFor(language), cast, hasStoreFlow: Boolean(plan.flow), existingNotes: plan.flow ? plan.moments : [], record: true }));
 }
 
@@ -189,14 +234,41 @@ export function startCapture(t: Tenant, app: AppEntry, reason: CaptureReason): b
 }
 
 /**
- * Before a post: start a capture on its own when the app has a new version
- * or before its first How it works post (waits for that one — up to the
- * capture's own time limits — so the first post has real screens).
+ * Before a post: real screens should be there. For an app the real-screens
+ * pipeline can serve (real-screens-auto.ts: a Supabase app with migrations
+ * and day2's Supabase organization), this kicks `ensureRealScreens` — cast,
+ * approval, demo backend, flow, capture — and before the first How it works
+ * post waits for it (at most DAY2_REAL_SCREENS_WAIT_MINUTES, default 45).
+ * Otherwise the old path: a capture on its own for a new version or the
+ * first How it works post when a flow exists. Never blocks a post for
+ * good: the post goes ahead with the best screens there are (chooseScreens)
+ * and the reason is recorded.
  */
-export async function maybeAutoCapture(t: Tenant, app: AppEntry, o: { making: "how-it-works" | null; wait: boolean }): Promise<CaptureReason | null> {
+export async function maybeAutoCapture(t: Tenant, app: AppEntry, o: { making: "how-it-works" | null; wait: boolean; log?: (text: string) => void }): Promise<CaptureReason | null> {
   const profile = profileOf(app);
   const language = languageOf(app, profile);
   const plan = capturePlan({ repoPath: app.repoPath, language, features: profile?.featureMap ?? [] });
+  const auto = await import("./real-screens-auto");
+  if (auto.pipelineApplies(t, app)) {
+    const before = loadCaptureSet(app.id, plan.locale)?.capturedAt ?? null;
+    const run = auto.ensureRealScreens(t, app, { trigger: o.making ? "first_post" : "post" });
+    if (o.wait && o.making) {
+      const limit = hooks.postWaitMs ?? Number(process.env.DAY2_REAL_SCREENS_WAIT_MINUTES ?? 45) * 60_000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([run.catch(() => null), new Promise((r) => (timer = setTimeout(r, limit)))]);
+      clearTimeout(timer);
+    }
+    const after = loadCaptureSet(app.id, plan.locale)?.capturedAt ?? null;
+    const captured = Boolean(after && after !== before);
+    if (!captured) {
+      const why = auto.pipelineWhy(app.id);
+      if (why) {
+        auto.recordPostScreens(app.id, why);
+        o.log?.(`Real screens aren't ready (${why}) — this post uses the best screens day2 has.`);
+      }
+    }
+    return captured ? (o.making ? "first_how_it_works" : "new_version") : null;
+  }
   const mode = hooks.capture ? hooks.capture(app).mode : captureMode({ has }).mode;
   const reason = autoCaptureReason({ set: loadCaptureSet(app.id, plan.locale), version: appVersion(app.repoPath), howItWorksAt: loadCreativeState(app.repoPath).howItWorksAt, making: o.making, status: loadCaptureStatus(app.id), now: new Date(), ready: Boolean(plan.flow) && mode !== "off" });
   if (!reason) return null;
@@ -234,6 +306,7 @@ export async function realScreensView(t: Tenant, app: AppEntry) {
       const u = loadUploadSet(app.id, l);
       return { locale: l, language: u?.language ?? l.slice(0, 2), at: u?.capturedAt ?? null, files: (u?.screens ?? []).map((s) => `/api/apps/${encodeURIComponent(app.id)}/creative/screens/${l}/${s.file.split("/").pop()}`) };
     }),
+    pipeline: (await import("./real-screens-auto")).pipelineView(app.id),
     demo: {
       support: demoSupport(app.repoPath),
       castJob: jobStatus(app.id, "cast"),
@@ -261,7 +334,7 @@ export async function realScreensView(t: Tenant, app: AppEntry) {
   };
 }
 
-async function ticketsOf(app: AppEntry) {
+export async function ticketsOf(app: AppEntry) {
   const { withBacklog } = await import("../backlog");
   const { backlogFile } = await import("../backlog-work");
   return (await withBacklog(backlogFile(app), (b) => ({ backlog: b, result: b })).catch(() => ({ tickets: [] as Array<{ id: string; state: string; source: { key: string } }> }))).tickets;
