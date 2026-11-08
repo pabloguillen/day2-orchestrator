@@ -123,9 +123,23 @@ const captionOf = (t: Target) => [t.caption.trim(), t.hashtags.length ? t.hashta
 export { captionOf };
 
 /** One step of publishing an Instagram target. `urls.media` is the public link to its image or video. */
-export async function instagramStep(c: MetaPublishCtx, t: Target, urls: { media: string; cover?: string | null }, kind: "image" | "video"): Promise<StepResult> {
+export async function instagramStep(c: MetaPublishCtx, t: Target, urls: { media: string; cover?: string | null; slides?: string[] }, kind: "image" | "video"): Promise<StepResult> {
   if (!c.igUserId) throw new PlatformError("meta", "no Instagram account is linked to the Page");
   const g = graphOf(c);
+  if (!t.stepId && t.format === "ig_carousel") {
+    // Carousel: one item container per slide (unpublished, harmless if a retry makes them again), then the carousel container.
+    const slides = urls.slides ?? [];
+    if (slides.length < 2 || slides.length > 10) throw new PlatformError("meta", `an Instagram carousel needs 2–10 slides (this one has ${slides.length})`);
+    const children: string[] = [];
+    for (const u of slides) {
+      const r = await g<{ id?: string }>("create a carousel item", "POST", `${c.igUserId}/media`, { form: { image_url: u, is_carousel_item: "true" }, retries: ONCE });
+      if (!r.id) throw new PlatformError("meta", "Instagram returned no carousel item id");
+      children.push(r.id);
+    }
+    const p = await g<{ id?: string }>("create the carousel", "POST", `${c.igUserId}/media`, { form: { media_type: "CAROUSEL", children: children.join(","), caption: captionOf(t) }, retries: ONCE });
+    if (!p.id) throw new PlatformError("meta", "Instagram returned no carousel container id");
+    return { kind: "waiting", stepId: p.id, retryInMs: 5_000 };
+  }
   if (!t.stepId) {
     const caption = t.format === "story" ? undefined : captionOf(t);
     const form: Record<string, unknown> =
@@ -193,8 +207,29 @@ async function findRecentPagePost(c: MetaPublishCtx, t: Target): Promise<{ id: s
  * claimed photo post has no id (the outcome of the last try is unknown),
  * the Page's recent posts are checked first, so it never goes out twice.
  */
-export async function facebookStep(c: MetaPublishCtx, t: Target, urls: { media: string }, opts: { resuming: boolean }): Promise<StepResult> {
+export async function facebookStep(c: MetaPublishCtx, t: Target, urls: { media: string; slides?: string[] }, opts: { resuming: boolean }): Promise<StepResult> {
   const g = graphOf(c);
+  if (t.format === "fb_album") {
+    // Multi-photo post: each photo uploaded unpublished, then one Page post with all of them attached.
+    if (opts.resuming) {
+      const found = await findRecentPagePost(c, t);
+      if (found) return { kind: "published", externalId: found.id, permalink: found.permalink };
+    }
+    const slides = urls.slides ?? [];
+    if (!slides.length) throw new PlatformError("meta", "no photos for the Facebook post");
+    const ids: string[] = [];
+    for (const u of slides) {
+      const r = await g<{ id?: string }>("upload a photo", "POST", `${c.pageId}/photos`, { form: { url: u, published: "false" }, retries: ONCE });
+      if (!r.id) throw new PlatformError("meta", "Facebook returned no photo id");
+      ids.push(r.id);
+    }
+    const form: Record<string, unknown> = { message: captionOf(t), published: "true" };
+    ids.forEach((id, k) => (form[`attached_media[${k}]`] = JSON.stringify({ media_fbid: id })));
+    const r = await g<{ id?: string }>("post the photos on the Page", "POST", `${c.pageId}/feed`, { form, retries: ONCE });
+    if (!r.id) throw new PlatformError("meta", "Facebook returned no post id");
+    const info = await g<{ permalink_url?: string }>("post link", "GET", r.id, { query: { fields: "permalink_url" } }).catch(() => ({}) as { permalink_url?: string });
+    return { kind: "published", externalId: r.id, permalink: info.permalink_url ?? null };
+  }
   if (t.format === "fb_post") {
     if (opts.resuming) {
       const found = await findRecentPagePost(c, t);
@@ -234,7 +269,8 @@ export async function facebookStep(c: MetaPublishCtx, t: Target, urls: { media: 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 export const emptyMetrics = (): Metrics => ({ reach: null, views: null, likes: null, comments: null, shares: null, saves: null, follows: null });
 
-const IG_METRICS: Record<"feed" | "reel" | "story", string[]> = {
+const IG_METRICS: Record<"feed" | "reel" | "story" | "ig_carousel", string[]> = {
+  ig_carousel: ["reach", "views", "likes", "comments", "shares", "saved", "follows"],
   feed: ["reach", "views", "likes", "comments", "shares", "saved", "follows"],
   reel: ["reach", "views", "likes", "comments", "shares", "saved"],
   story: ["reach", "views", "shares", "follows", "replies"],
@@ -242,7 +278,7 @@ const IG_METRICS: Record<"feed" | "reel" | "story", string[]> = {
 
 /** An Instagram post's results (insights; needs instagram_manage_insights). */
 export async function instagramMetrics(c: MetaPublishCtx, mediaId: string, format: PostFormat): Promise<Metrics> {
-  const list = IG_METRICS[format === "feed" ? "feed" : format === "story" ? "story" : "reel"];
+  const list = IG_METRICS[format === "feed" ? "feed" : format === "story" ? "story" : format === "ig_carousel" ? "ig_carousel" : "reel"];
   const r = await graphOf(c)<{ data?: Array<{ name: string; values?: Array<{ value?: number }>; total_value?: { value?: number } }> }>("Instagram results", "GET", `${mediaId}/insights`, { query: { metric: list.join(",") } });
   const v = (name: string) => {
     const d = r.data?.find((x) => x.name === name);
@@ -255,7 +291,7 @@ export async function instagramMetrics(c: MetaPublishCtx, mediaId: string, forma
 export async function facebookMetrics(c: MetaPublishCtx, id: string, format: PostFormat): Promise<Metrics> {
   const g = graphOf(c);
   const m = emptyMetrics();
-  if (format === "fb_post") {
+  if (format === "fb_post" || format === "fb_album") {
     const r = await g<{ shares?: { count?: number }; reactions?: { summary?: { total_count?: number } }; comments?: { summary?: { total_count?: number } } }>("Facebook results", "GET", id, { query: { fields: "shares,reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0)" } });
     m.likes = num(r.reactions?.summary?.total_count);
     m.comments = num(r.comments?.summary?.total_count);

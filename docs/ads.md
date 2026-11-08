@@ -66,6 +66,7 @@ The ad pass runs on the growth autopilot's timer. The code is in `src/ads/autopi
 4. **Content** (`ads/produce.ts`, `ads/content.ts`), made once per experiment in every format the chosen platforms need:
    - **Images.** The app's real landing page, as a phone screenshot, in a frame with the brand colour, headline and button. One image per ratio per variant.
    - **Walkthrough videos.** A real screen recording of the page, composed into the same frame with ffmpeg. It only scrolls: nothing is tapped or typed on the live app. Each video gets a cover image and an audio track.
+   - **Design** ([creative-quality.md](creative-quality.md)): the app's brand kit (colours, fonts, icon, stickers read from its repo) and the same template engine posts use are shared; ad Motion videos still use `ads/motion.ts` until the ad pass is moved onto the studio (planned: How it works / Feature spotlight cuts per ratio).
    - **Motion videos** (`ads/motion.ts`). Animated product ads made in-house: kinetic headline, the app's real screenshots moving in a phone frame, benefit lines, end card with the button. Rendered frame by frame in Chromium and encoded with ffmpeg — no vendor, nothing generated: every screen is a real screenshot and every word is checked copy.
    - **AI presenter videos** (Creatify or HeyGen). Made when a presenter tool may be used for the app's ads and the script passed both checks.
    - **Generated motion shots** (Runway, Luma or Google) of the 9:16 image, when a video tool may be used for the app's ads.

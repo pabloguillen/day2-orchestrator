@@ -29,9 +29,12 @@ import { loadSpendLedger } from "../spend-governance";
 import { assetStore, fieldStore, serverMode, type Tenant } from "../tenant";
 import { tmpdir } from "node:os";
 import { draftPosts, runSocialWriter, WRITE_MAX_USD } from "./make";
+import { socialStudio } from "../creative/runtime";
+import { loadCreativeState } from "../creative/taste";
+import type { TemplateId } from "../creative/templates/types";
 import { listPublishPages, NEEDED_SCOPES } from "./meta";
 import { socialPass, type PassReport } from "./pass";
-import { guessLanguage, loadSocialState, SOCIAL_FILENAME, updateSocialState } from "./state";
+import { guessLanguage, loadSocialState, logLine, SOCIAL_FILENAME, updateSocialState } from "./state";
 import { dbMediaLinks, dbSocialAccounts, dbSocialPosts, fileMediaLinks, fileSocialAccounts, fileSocialPosts, type MediaLinkStore, type SocialAccount, type SocialAccountStore, type SocialPostStore } from "./store";
 import { tiktokContentApp } from "./tiktok";
 import type { Post, SocialPlatform, Target } from "./types";
@@ -132,7 +135,7 @@ const TRENDS_EVERY_MS = 7 * 86_400_000;
 const TRENDS_MAX_USD = 0.8;
 
 /** The deps of one social pass for an app, with day2's real tools. */
-export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditRunner = chargedRunner(tenant, app)) {
+export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditRunner = chargedRunner(tenant, app), opts: { forced?: TemplateId | null } = {}) {
   const profile = profileOf(app);
   const statePath = statePathOf(app);
   const posts = socialPosts();
@@ -173,7 +176,16 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
         const autonomy = loadAutonomyConfig(resolve(app.repoPath, AUTONOMY_CONFIG_FILENAME));
         // Each day2-account tool job is charged by the kit right after it runs (a later failure can't lose the charge).
         const creator = await creatorKitFor(tenant.accountId, app, "posts", { billing: { credits: tenant.credits, appId: app.id, appName: app.name } }).catch(() => null);
-        const { result, credits } = await run("content_generation", "Social post (autopilot)", WRITE_MAX_USD * 3, () =>
+        const existingPosts = (await posts.list(app.id, { limit: 50 })).filter((p) => p.status !== "declined").length;
+        // A music bed from the app's music tool (ElevenLabs) when Posts may use one; else day2's quiet built-in beat.
+        const music = async () => {
+          const job = { capability: "music" as const, prompt: "Light, modern, upbeat instrumental bed for a short app explainer; no vocals.", durationSec: 22 };
+          const c = creator?.pick(job) ?? null;
+          if (!c) return null;
+          return creator!.run(c, job, join(tmpdir(), `day2-music-${app.id}`)).then((r) => r.file).catch(() => null);
+        };
+        const studio = socialStudio(app, profile, { language, assets: assetStore(), links: appLinks, posts: existingPosts, music, log: (t) => updateSocialState(statePath, (s) => logLine(s, t)) });
+        const { result, credits } = await run("content_generation", "Social post (autopilot)", WRITE_MAX_USD * 3 + 2, () =>
           draftPosts(app, profile, {
             posts,
             assets: assetStore(),
@@ -196,6 +208,10 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
             link: link ? `${link}${link.includes("?") ? "&" : "?"}d2=social.fb` : null,
             autoPublish: socialAutoPublish(autonomy),
             now: new Date(),
+            studio: process.env.DAY2_CREATIVE_STUDIO === "off" ? null : studio,
+            // A new app's first post explains how it works (and on first connect).
+            forced: opts.forced ?? (existingPosts === 0 && !loadCreativeState(app.repoPath).howItWorksAt ? "how-it-works" : null),
+            variants: process.env.DAY2_CREATIVE_VARIANTS === "1" || socialAutoPublish(autonomy) ? 1 : 2,
           }),
         );
         if (result.costUsd > 0) await recordCharge(tenant.credits, { id: `socialgen:${app.id}:${result.posts[0]?.group ?? Date.now()}`, appId: app.id, service: "content_generation", costUsd: result.costUsd, description: `Social post media${result.posts[0]?.source.tools?.length ? ` (${[...new Set(result.posts[0].source.tools.filter((x) => x.account === "day2").map((x) => x.name))].join(", ")})` : ""}` }).catch(() => null);
@@ -237,7 +253,7 @@ export async function socialPassDeps(tenant: Tenant, app: AppEntry, run: CreditR
 
 function feedRecord(auditFile: string, app: AppEntry, post: Post, t: Target): void {
   try {
-    const creative = { arm: { channel: "social_content" as const, assetType: post.kind, formatTag: post.source.arm }, segment: "", headline: post.idea.title, body: t.caption, claimsCheckedAgainst: [], costUsd: 0 };
+    const creative = { arm: { channel: "social_content" as const, assetType: post.kind === "video" ? ("video" as const) : ("image" as const), formatTag: post.source.arm }, segment: "", headline: post.idea.title, body: t.caption, claimsCheckedAgainst: [], costUsd: 0 };
     recordGrowthAction(auditFile, {
       timestamp: new Date().toISOString(),
       creativeId: `${post.id}:${t.format}`,

@@ -56,6 +56,14 @@ apply on top; a clip a tool refuses is dropped and the built-in format is
 used. Captions and scripts still go through day2's content safety check and
 its claims and authenticity checks before anything is generated.
 
+## In designed posts (creative-quality.md)
+
+The studio's templates use creator tools as inputs, not as the design:
+ElevenLabs makes the **music bed** under motion videos (when Posts may use
+it; else day2's built-in beat), and generated clips (Runway, Luma, Google)
+or the owner's uploaded clips are the **b-roll** of POV posts. The real
+screens, type and layout always come from day2's templates.
+
 ## How day2 picks a tool
 
 1. **The format** is picked first, as before, by the growth allocator from

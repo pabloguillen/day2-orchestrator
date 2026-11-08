@@ -35,6 +35,14 @@ switch on Autonomy, and server setup on Platform.
 
 - How many: the growth strategy's `social_content` frequency (launch: 3 a
   week). At most one new post a day, and none while 3 are waiting for the owner.
+- **Design** ([creative-quality.md](creative-quality.md)): motion videos,
+  carousels and stills come from the studio — the app's brand kit (read from
+  its repo), its real screens in the audience's language, an art director
+  that picks one of six templates and writes the shot list, and a design
+  critique (≤ 2 re-renders, else dropped). Two variants per idea when the
+  owner approves posts (Use this one); the first post for a new app is a
+  How it works carousel + video. Each card shows the template, the design
+  score and "why this works".
 - Format: the growth allocator's social_content arms (Thompson sampling on this
   app's own results): Motion video from the app's real screens, a walkthrough
   recording (web apps), an AI presenter video (with a presenter tool), a
@@ -147,10 +155,11 @@ switch on Autonomy, and server setup on Platform.
   apps are also limited to 5 posting creators per 24 h.
 - Direct Post with `FILE_UPLOAD` (chunked: whole under 5 MB or up to one
   10 MB chunk, else floor(size/10 MB) chunks with the remainder in the last),
-  so no domain verification is needed. **Photo posts** need `PULL_FROM_URL`
-  and a verified domain or URL prefix in the TikTok developer portal; day2
-  doesn't make TikTok photo posts yet (the `tiktok_photo` format exists in the
-  store for later).
+  so no domain verification is needed. **Photo posts** (`tiktok_photo`,
+  carousels without a video) use `/v2/post/publish/content/init/` with
+  `PULL_FROM_URL` from day2's expiring public media links on app.gora8.com —
+  the domain is verified for day2's TikTok app; unverified → TikTok's
+  `url_ownership_unverified`, shown on the post.
 
 ## Why Facebook Login (and not "Instagram API with Instagram Login")
 
@@ -237,8 +246,10 @@ changes need an owner or admin. Tokens are never returned.
   login configuration id instead of a scope list for these permissions. Story
   publishing on Creator accounts. TikTok's exact behaviour for unaudited
   clients beyond `SELF_ONLY`.
-- **Not built:** TikTok photo posts (needs domain verification), Instagram
-  carousels, per-post links on Instagram/TikTok (APIs don't allow them),
+- **Carousels** (creative-quality.md §5): Instagram carousels (item
+  containers → CAROUSEL → publish), Facebook multi-photo posts, TikTok photo
+  mode — tested against fakes (`src/social/carousel.test.ts`).
+- **Not built:** per-post links on Instagram/TikTok (APIs don't allow them),
   boosting (only flagged), Instagram Login for accounts without a Page.
 
 ## First run with Dotty

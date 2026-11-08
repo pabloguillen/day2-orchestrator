@@ -7,8 +7,8 @@ import type { Creative } from "../growth-creative";
 import type { BudgetConfig, SpendLedgerEntry } from "../spend-governance";
 import { facebookStep, instagramStep, type MetaPublishCtx, type StepResult } from "./meta";
 import type { MediaLinkStore, SocialAccount, SocialAccountStore, SocialPostStore } from "./store";
-import { tiktokAccessToken, tiktokStep, type TikTokApp } from "./tiktok";
-import { contentHash, DAILY_LIMIT, MAX_ATTEMPTS, type Post, type PostStatus, type SocialPlatform, type Target } from "./types";
+import { tiktokAccessToken, tiktokPhotoStep, tiktokStep, type TikTokApp } from "./tiktok";
+import { contentHash, DAILY_LIMIT, MAX_ATTEMPTS, SLIDE_FORMATS, type Post, type PostStatus, type SocialPlatform, type Target } from "./types";
 import { socialArm } from "./make";
 
 /**
@@ -183,6 +183,14 @@ export async function publishTarget(appId: string, postId: string, index: number
   const asset = await d.assets.get(t0.assetId);
   const file = asset ? await d.assets.file(asset.id) : null;
   if (!asset || !file) return fail("the post's media is missing", false);
+  // Slide formats: every slide must still be there (same app).
+  const slideIds = SLIDE_FORMATS.has(t0.format) ? (t0.assetIds?.length ? t0.assetIds : [t0.assetId]) : [];
+  const slideAssets: Array<NonNullable<Awaited<ReturnType<AssetStore["get"]>>>> = [];
+  for (const id of slideIds) {
+    const a = await d.assets.get(id);
+    if (!a || a.appId !== appId || !(await d.assets.file(a.id))) return fail("one of the post's slides is missing", false);
+    slideAssets.push(a);
+  }
 
   // The public link platforms fetch from: new for every fresh start, ends 24 h after the post (48 h until then).
   const mediaUrl = async (assetId: string, mime: string) => {
@@ -194,27 +202,31 @@ export async function publishTarget(appId: string, postId: string, index: number
     let t = t0;
     const max = d.maxSteps ?? 8;
     const sleep = d.platformDeps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    let urls: { media: string; cover?: string | null } | null = null;
+    let urls: { media: string; cover?: string | null; slides?: string[] } | null = null;
     for (let step = 0; step < max; step++) {
       let r: StepResult;
       if (t.platform === "tiktok") {
         if (account.network !== "tiktok") throw new PlatformError("tiktok", "wrong account");
         const token = await tiktokAccessToken(appId, d.accounts, d.tiktok!, d.platformDeps ?? {});
-        r = await tiktokStep(d.tiktok!, token, t, {
-          bytes: async () => new Uint8Array(await readFile(file)),
-          durationSec: asset.durationSec ?? 0,
-          choices: post.tiktok!,
-          onStepId: async (id) => {
-            await save((x) => (x.stepId = id));
-          },
-        }, d.platformDeps);
+        const onStepId = async (id: string) => {
+          await save((x) => (x.stepId = id));
+        };
+        r =
+          t.format === "tiktok_photo"
+            ? await tiktokPhotoStep(d.tiktok!, token, t, { slides: async () => Promise.all(slideAssets.map((a) => mediaUrl(a.id, a.mime))), choices: post.tiktok!, onStepId }, d.platformDeps)
+            : await tiktokStep(d.tiktok!, token, t, {
+                bytes: async () => new Uint8Array(await readFile(file)),
+                durationSec: asset.durationSec ?? 0,
+                choices: post.tiktok!,
+                onStepId,
+              }, d.platformDeps);
       } else {
         if (account.network !== "meta") throw new PlatformError("meta", "wrong account");
         const ctx: MetaPublishCtx = { pageId: account.meta.pageId, pageToken: account.tokens.pageToken, igUserId: account.meta.igUserId, appSecret: d.meta!.appSecret, apiVersion: d.meta!.apiVersion, deps: d.platformDeps ?? {} };
         const needsUrl = !t.stepId || t.stepId.endsWith(":started");
         if (needsUrl && !urls) {
           const cover = t.coverAssetId && asset.kind === "video" ? await d.assets.get(t.coverAssetId) : null;
-          urls = { media: await mediaUrl(asset.id, asset.mime), cover: cover ? await mediaUrl(cover.id, cover.mime) : null };
+          urls = { media: await mediaUrl(asset.id, asset.mime), cover: cover ? await mediaUrl(cover.id, cover.mime) : null, ...(slideAssets.length ? { slides: await Promise.all(slideAssets.map((a) => mediaUrl(a.id, a.mime))) } : {}) };
         }
         r = t.platform === "instagram" ? await instagramStep(ctx, t, urls ?? { media: "" }, asset.kind) : await facebookStep(ctx, t, urls ?? { media: "" }, { resuming: resuming && step === 0 });
       }
@@ -231,6 +243,7 @@ export async function publishTarget(appId: string, postId: string, index: number
         }, true);
         await d.links.expireAsset(appId, asset.id, new Date(at.getTime() + 24 * 3_600_000)).catch(() => {});
         if (t.coverAssetId) await d.links.expireAsset(appId, t.coverAssetId, new Date(at.getTime() + 24 * 3_600_000)).catch(() => {});
+        for (const a of slideAssets) if (a.id !== asset.id) await d.links.expireAsset(appId, a.id, new Date(at.getTime() + 24 * 3_600_000)).catch(() => {});
         return { outcome: "published", ref: r.externalId };
       }
       if (r.kind === "restart") {

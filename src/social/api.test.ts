@@ -306,3 +306,59 @@ describe("Social API", () => {
     expect(r.body!.connections.meta).toBeNull();
   });
 });
+
+describe("Creative API (Growth → Formats) and variants", () => {
+  test("brand kit view, owner edits, scoping; another account can't read or change it", async () => {
+    writeFileSync(join(work, "app.json"), JSON.stringify({ expo: { name: "Dotty", android: { adaptiveIcon: { backgroundColor: "#F5D84A" } } } }));
+    const r = await call("GET", `/api/apps/${appId}/creative`, { cookie: alice });
+    expect(r.status).toBe(200);
+    expect(r.body!.brandKit.colors.primary).toBe("#f5d84a");
+    expect(r.body!.templates.map((x: { id: string }) => x.id)).toContain("how-it-works");
+    expect(r.body!.brandKit.icon).toBeNull();
+    const e = await call("PUT", `/api/apps/${appId}/creative/brand-kit`, { cookie: alice, body: { overrides: { primary: "#FFC800", tone: "locker" } } });
+    expect(e.status).toBe(200);
+    expect(e.body!.brandKit.colors.primary).toBe("#ffc800");
+    for (const [m, path, body] of [
+      ["GET", `/api/apps/${appId}/creative`, undefined],
+      ["PUT", `/api/apps/${appId}/creative/brand-kit`, { overrides: { primary: "#000000" } }],
+      ["POST", `/api/apps/${appId}/creative/samples`, {}],
+      ["PUT", `/api/apps/${appId}/creative/figma`, { fileUrl: "https://www.figma.com/design/AbCdEf1234567890/x", token: "x".repeat(30) }],
+      ["POST", `/api/apps/${appId}/social/posts/sp_v1/pick`, {}],
+    ] as const) expect((await call(m, path, { cookie: bob, body })).status).toBe(404);
+  });
+
+  test("a b-roll upload is typed and size-checked; the Figma token never comes back", async () => {
+    const bad = await handleRequest(new Request(`${ORIGIN}/api/apps/${appId}/creative/broll`, { method: "POST", headers: { cookie: alice, origin: ORIGIN, "content-type": "application/zip" }, body: new Uint8Array(10) }));
+    expect(bad.status).toBe(415);
+    const ok = await handleRequest(new Request(`${ORIGIN}/api/apps/${appId}/creative/broll`, { method: "POST", headers: { cookie: alice, origin: ORIGIN, "content-type": "image/jpeg", "x-file-name": "park.jpg" }, body: new Uint8Array(100).fill(2) }));
+    expect(ok.status).toBe(200);
+    const view = (await ok.json()) as { broll: Array<{ label: string; url: string }> };
+    expect(view.broll[0]!.label).toBe("park.jpg");
+    expect(view.broll[0]!.url).toContain(`/api/apps/${appId}/social/media/`);
+    const fig = await call("PUT", `/api/apps/${appId}/creative/figma`, { cookie: alice, body: { fileUrl: "https://evil.com/x", token: "y".repeat(30) } });
+    expect(fig.status).toBe(400);
+    expect(fig.text).not.toContain("yyyy");
+  });
+
+  test("variants: approve waits for a pick; Use this one keeps it and sets the other aside (taste learning)", async () => {
+    const creative = (index: number, template: "how-it-works" | "problem-solution") => ({ template, templateLabel: template, templateWhy: "x", shots: { template, hook: "So geht Dotty", kicker: null, steps: [], problem: [], pov: null, cta: "Link in Bio", endLine: "", version: null, broll: null }, score: 8, rubricVersion: 1, why: "Real screens.", rounds: 1, bySight: true, scores: {}, issues: [], screensWarning: null, variant: { set: "sv_1", index, of: 2 } });
+    const a = (await assetStore().list(appId))[0]!.id;
+    await dbSocialPosts(t.sql).insert(seedPost({ id: "sp_v1", group: "sg_v1", creative: creative(0, "how-it-works") }, a));
+    await dbSocialPosts(t.sql).insert(seedPost({ id: "sp_v2", group: "sg_v2", creative: creative(1, "problem-solution") }, a));
+    const view = await call("GET", `/api/apps/${appId}/social`, { cookie: alice });
+    expect(view.body!.posts.find((p: { id: string }) => p.id === "sp_v1").creative).toMatchObject({ templateLabel: "how-it-works", score: 8, why: "Real screens.", variant: { of: 2 } });
+    expect((await call("POST", `/api/apps/${appId}/social/posts/sp_v1/approve`, { cookie: alice, body: {} })).status).toBe(409);
+    const pick = await call("POST", `/api/apps/${appId}/social/posts/sp_v1/pick`, { cookie: alice, body: {} });
+    expect(pick.status).toBe(200);
+    const after = pick.body!.posts as Array<{ id: string; status: string; creative: { variant: unknown } | null; declinedReason: string | null }>;
+    expect(after.find((p) => p.id === "sp_v1")).toMatchObject({ status: "waiting_approval", creative: { variant: null } });
+    expect(after.find((p) => p.id === "sp_v2")).toMatchObject({ status: "declined", declinedReason: "You picked the other version." });
+    const taste = JSON.parse(readFileSync(join(work, "day2-creative.json"), "utf-8"));
+    expect(taste.templates["how-it-works"].picked).toBe(1);
+    expect(taste.templates["problem-solution"].passed).toBe(1);
+  });
+
+  test("Make a post with an unknown template is refused", async () => {
+    expect((await call("POST", `/api/apps/${appId}/social/posts/make`, { cookie: alice, body: { template: "rocket" } })).status).toBe(400);
+  });
+});

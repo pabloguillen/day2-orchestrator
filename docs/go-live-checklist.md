@@ -41,6 +41,8 @@ None of these is done. The details are in the sections below.
       Marketing API approval, and TikTok's Content Posting API app review and
       audit (without the audit, TikTok posts stay private)
       ([operator-setup.md](operator-setup.md) steps 1h, 2e–2f, 3, 3d).
+- [ ] **Creative quality checked on real captures** (Dotty, de-DE): a How
+      it works carousel + video approved and published ([creative-quality.md](creative-quality.md)).
 - [ ] **Social posting run once against real accounts** (Dotty): an
       Instagram Reel, a Facebook post and a TikTok video published, results
       read after 24 h ([social.md](social.md), "First run with Dotty").
@@ -191,6 +193,25 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       (TikTok Login Kit). Platform → Ad accounts lists anything missing.
 - [ ] Privacy page says day2 publishes posts and reads post statistics on
       the owner's connected accounts (site/privacy.html, done).
+
+## 6c. Creative quality (creative-quality.md)
+
+- [ ] The server image has ffmpeg (with `libx264`, `aac`, `lavfi`) and
+      Chromium — both already needed for ads (Dockerfile). Rendering a 15 s
+      9:16 video takes ~40–60 s of one CPU; slides ~5 s.
+- [ ] **Remotion is not used**, so no Remotion licence is needed. If that
+      changes: gora8 needs a Remotion Company License "Automators" ($0.01
+      per render, $100/month minimum; free only while gora8 is ≤ 3 people),
+      Remotion 5 telemetry, and customers may never upload Remotion code.
+- [ ] TikTok photo mode: `app.gora8.com` (or the `/api/assets/` prefix)
+      verified as a URL prefix for day2's TikTok Content Posting app
+      (gora8.com is verified; check the subdomain/prefix covers the media
+      route).
+- [ ] Vision runs (art director + critic, ~$0.40 + ~$0.35 per post) are
+      metered as content generation like the writer.
+- [ ] First real post with captures: run the Store screenshot flow on the
+      Mac for Dotty in de-DE so posts use German captures instead of the
+      App Store screenshots (the card warns until then).
 
 ## 7. For each app in the stores: the Setup tab
 

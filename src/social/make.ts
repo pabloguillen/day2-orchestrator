@@ -19,7 +19,10 @@ import { checkPost, cleanHashtags, postHasLink } from "./safety";
 import { audienceTimeZone, dayKeyIn, nextPostTime } from "./schedule";
 import { learnedHints, type SocialLearnings } from "./state";
 import { newPostId, type SocialPostStore } from "./store";
-import { contentHash, HOOK_STYLES, SOCIAL_ARMS, TOPICS, type HookStyle, type Post, type PostFormat, type SocialArm, type SocialPlatform, type Target, type Topic } from "./types";
+import { contentHash, HOOK_STYLES, MAX_SLIDES, SOCIAL_ARMS, TOPICS, type HookStyle, type Post, type PostCreative, type PostFormat, type SocialArm, type SocialPlatform, type Target, type Topic } from "./types";
+import type { StudioOut, StudioVariant } from "../creative/studio";
+import { TEMPLATES } from "../creative/templates";
+import type { TemplateId } from "../creative/templates/types";
 
 /**
  * Making the next post for an app (docs/social.md):
@@ -86,7 +89,7 @@ const VISUAL: Record<SocialArm, string> = {
   "static-image-post": "one still image: the app's real screen on a phone with a short headline (the background may be a generated scene in the app's colours: describe it in \"scene\")",
   "ugc-style-short-video": "an AI presenter (clearly a narrator, never a customer) talking for ~30 s while showing the app",
   "generated-broll-short-video": "a 5–8 second generated shot of the app's real screen on a phone coming alive (describe the camera and light in \"scene\"), with a voiceover of at most 20 words in \"script\"",
-  "motion-graphics-short-video": "a 12-second vertical video of the app's real screens with a short headline, 2–3 short lines and a button",
+  "motion-graphics-short-video": "a designed motion post or carousel from the app's real screens (an art director turns your title and lines into steps: keep the title a specific, native hook of ≤ 6 words and give 3–5 short lines, one per step/feature)",
   "app-walkthrough-short-video": "a 12-second vertical video of the app's real screens with a short headline, 2–3 short lines and a button",
 };
 
@@ -415,6 +418,16 @@ export type DraftDeps = {
   autoPublish: boolean;
   /** Credits the writer run used (filled in by the caller's runner). */
   now: Date;
+  /**
+   * The studio (docs/creative-quality.md): art director + templates + design
+   * critique, with the app's brand kit and real screens. When set, designed
+   * posts (motion videos, carousels, stills) come from it.
+   */
+  studio?: ((o: { idea: SocialIdea; forced: TemplateId | null; variants: 1 | 2; want: { video: boolean; carousel: boolean }; tag: string }) => Promise<StudioOut>) | null;
+  /** The owner asked for this template ("Make a How it works post"). */
+  forced?: TemplateId | null;
+  /** 2 when the budget allows: the owner picks one. */
+  variants?: 1 | 2;
   rng?: () => number;
 };
 
@@ -460,6 +473,8 @@ export async function draftPosts(app: { id: string; name: string }, profile: App
     if (t.fabricatesTestimonialIdentity) issues.push("Claims check: presents itself as a real customer");
     if (a.readsAsGeneric) return { posts: [], dropped: `it read as generic${a.matchedPatterns.length ? ` (${a.matchedPatterns.join(", ")})` : ""}`, arm, costUsd: 0 };
   }
+
+  if (d.studio && (d.forced || arm === "motion-graphics-short-video" || arm === "static-image-post")) return draftWithStudio(app, d, idea, arm, issues);
 
   const group = newPostId().replace("sp_", "sg_");
   const media = await (d.produce ?? produceSocialMedia)({ appId: app.id, purpose: `social:${group}`, arm, idea, brand: brandOf(app.name, profile), language: d.language, screens: await d.screens(), pageUrl: d.pageUrl, creator: d.creator, store: d.assets, allocator: d.allocator, rng });
@@ -514,6 +529,99 @@ export async function draftPosts(app: { id: string; name: string }, profile: App
     made.push(await d.posts.insert(post));
   }
   return { posts: made, dropped: null, arm, costUsd: media.costUsd, ...(media.prebilledUsd ? { prebilledUsd: media.prebilledUsd } : {}) };
+}
+
+/** Which placement each platform gets for a designed variant: slides where the platform takes them, else the video. Pure. */
+export function studioFormats(platform: SocialPlatform, v: { slides: boolean; video: boolean }): PostFormat | null {
+  if (platform === "instagram") return v.slides ? "ig_carousel" : v.video ? "reel" : null;
+  if (platform === "facebook") return v.slides ? "fb_album" : v.video ? "fb_reel" : null;
+  return v.video ? "tiktok_video" : v.slides ? "tiktok_photo" : null;
+}
+
+/** Posts from the studio's variants: one group per variant (Meta and TikTok separately), all in one variant set. */
+async function draftWithStudio(app: { id: string; name: string }, d: DraftDeps, idea: SocialIdea, arm: SocialArm, issues: string[]): Promise<DraftResult> {
+  const rng = d.rng ?? Math.random;
+  const tag = newPostId().replace("sp_", "sv_");
+  const out = await d.studio!({ idea, forced: d.forced ?? null, variants: d.variants ?? 1, want: { video: true, carousel: d.platforms.some((p) => p !== "tiktok") }, tag: `social:${tag}` });
+  if (!out.variants.length) return { posts: [], dropped: out.dropped.join("; ") || "no variant passed the design critique", arm, costUsd: 0 };
+  const tz = audienceTimeZone(d.language, d.country);
+  const nowIso = d.now.toISOString();
+  const existing = await d.posts.list(app.id, { limit: 100 });
+  const made: Post[] = [];
+  const families: SocialPlatform[][] = [d.platforms.filter((p) => p !== "tiktok"), d.platforms.filter((p) => p === "tiktok")].filter((f) => f.length);
+  const when = new Map<string, ReturnType<typeof nextPostTime>>();
+  for (const [vi, v] of out.variants.entries()) {
+    const group = newPostId().replace("sp_", "sg_");
+    for (const family of families) {
+      const slides = v.slides["4:5"] ?? [];
+      const targets: Target[] = [];
+      for (const platform of family) {
+        const format = studioFormats(platform, { slides: slides.length >= 2, video: Boolean(v.video) });
+        if (!format) continue;
+        const isSlides = format === "ig_carousel" || format === "fb_album" || format === "tiktok_photo";
+        const ids = isSlides ? slides.slice(0, MAX_SLIDES[format] ?? 10).map((a) => a.id) : null;
+        targets.push({ platform, format, assetId: isSlides ? ids![0]! : v.video!.id, ...(ids ? { assetIds: ids } : {}), coverAssetId: isSlides ? null : (v.cover?.id ?? null), caption: idea.captions[platform], hashtags: idea.hashtags[platform], status: "pending", attempts: 0, metrics: [] });
+      }
+      if (!targets.length) continue;
+      const first = family[0]!;
+      const key = first === "tiktok" ? "tiktok" : "meta";
+      if (!when.has(key)) {
+        const busy = new Set(existing.filter((p) => p.status !== "declined" && p.scheduledAt && p.targets.some((t) => family.includes(t.platform))).map((p) => dayKeyIn(new Date(p.scheduledAt!), tz)));
+        when.set(key, nextPostTime({ platform: first, tz, now: d.now, stats: d.learnings.slots[first], busyDays: busy, rng, minLeadMs: d.autoPublish && first !== "tiktok" ? 3_600_000 : 3 * 3_600_000 }));
+      }
+      const w = when.get(key)!;
+      const ideaWords = { topic: idea.topic, hook: idea.hook, title: idea.title, brandAngle: null, trend: null };
+      const safety = [...issues, ...checkPost({ targets, idea: ideaWords }, { appName: app.name, competitors: d.competitors, allowedLinks: d.allowedLinks ?? [] })];
+      // Variants always wait for the owner's pick; a single designed post may go out on its own.
+      const auto = out.variants.length === 1 && d.autoPublish && family.every((p) => p !== "tiktok") && safety.length === 0 && !postHasLink({ targets, idea: ideaWords }) && !out.warning;
+      const kind: Post["kind"] = targets.some((t) => t.assetIds?.length) ? (targets.every((t) => t.assetIds?.length) ? "carousel" : "carousel") : "video";
+      const post: Post = {
+        id: newPostId(),
+        appId: app.id,
+        group,
+        status: safety.length ? "draft" : auto ? "approved" : "waiting_approval",
+        kind,
+        language: d.language,
+        idea: { topic: idea.topic, hook: idea.hook, title: idea.title, brandAngle: idea.brandAngle, trend: idea.trend },
+        creative: creativeOf(v, out, vi, tag),
+        source: { arm, armKey: armKey(socialArm(arm)), experimentId: null, made: "motion_template" },
+        targets,
+        scheduledAt: w.at.toISOString(),
+        timeSlot: w.slot,
+        timeWhy: w.why,
+        safety: { ok: safety.length === 0, issues: safety, checkedAt: nowIso },
+        tiktok: family.includes("tiktok") ? { privacyLevel: null, allowComment: false, allowDuet: false, allowStitch: false, disclose: false, yourBrand: false, brandedContent: false, isAigc: false } : null,
+        ...(auto ? { approvedBy: "day2 (posts go out on their own)", approvedAt: nowIso } : {}),
+        costCredits: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      if (auto) post.approvedHash = contentHash(post);
+      made.push(await d.posts.insert(post));
+    }
+  }
+  return { posts: made, dropped: out.dropped.length ? out.dropped.join("; ") : null, arm, costUsd: 0 };
+}
+
+function creativeOf(v: StudioVariant, out: StudioOut, index: number, set: string): PostCreative {
+  return {
+    template: v.template,
+    templateLabel: TEMPLATES[v.template].label,
+    templateWhy: v.templateWhy,
+    shots: v.shots,
+    score: v.critique.score,
+    rubricVersion: v.critique.rubricVersion,
+    why: v.critique.why,
+    rounds: v.rounds,
+    bySight: v.critique.bySight,
+    scores: Object.fromEntries(Object.entries(v.critique.scores).filter(([, x]) => typeof x === "number")) as Record<string, number>,
+    issues: v.critique.issues.map((i) => i.text).slice(0, 6),
+    screensWarning: out.warning,
+    variant: out.variants.length > 1 ? { set, index, of: out.variants.length } : null,
+    squareIds: (v.slides["1:1"] ?? []).map((a) => a.id),
+    videoId: v.video?.id ?? null,
+    ...(out.screens ? { screens: out.screens } : {}),
+  };
 }
 
 export function brandOf(name: string, profile: AppProfile): Brand {

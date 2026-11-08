@@ -243,7 +243,8 @@ import { features } from "./features";
 import { registerExpoCreateRoutes, resumeExpoCreates } from "./expo-create/routes";
 import { registerMoneyRoutes } from "./money/routes";
 import { purgeGoogleSessions, registerConnectRoutes } from "./connect/routes";
-import { registerSocialRoutes, serveMediaLink, socialServerSetup } from "./social/routes";
+import { registerSocialRoutes, serveFile as serveSocialFile, serveMediaLink, socialServerSetup } from "./social/routes";
+import { registerCreativeRoutes } from "./creative/studio-routes";
 import { creatorToolChecks, registerCreatorToolRoutes } from "./creative/routes";
 import { connectMetaPage } from "./social/runtime";
 import { excludeDay2State } from "./day2-state-files";
@@ -444,6 +445,7 @@ registerNumbersRoutes({ route, json, requireApp, requireManager, httpError: (sta
 registerConnectRoutes({ route, json, requireApp, requireManager, requireOperator, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- Social posts on the owner's Instagram, Facebook Page and TikTok (src/social/routes.ts) — also before the ads callback ----
 registerSocialRoutes(route, { json, requireApp, requireManager, actorName, runWithCredits, httpError: (status, message) => new HttpError(status, message) });
+registerCreativeRoutes(route, { json, requireApp, requireManager, actorName, httpError: (status, message) => new HttpError(status, message), serveFile: serveSocialFile });
 registerCreatorToolRoutes(route, { json, requireApp, requireManager, actorName, httpError: (status, message) => new HttpError(status, message) });
 // ---- What day2 knows: app memory (src/memory/routes.ts) ----
 registerMemoryRoutes(route, { json, requireApp, runWithCredits, actorName, httpError: (status, message) => new HttpError(status, message) });

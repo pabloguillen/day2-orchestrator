@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "examples": [
+    { "verdict": "bad", "template": null, "what": "12 s ad: dark grey gradient, English App Store screenshots in a small centred phone under a German headline, crossfades only, a placeholder letter logo on the end card.", "why": ["language mix", "small product", "no motion design", "placeholder logo", "ignores the brand colour"] },
+    { "verdict": "good", "template": "how-it-works", "what": "Carousel: yellow cover with a huge hook and the first real screen tilted in; one step per slide with a number badge, short headline, the screen bleeding off the bottom and the key row lifted off it; yellow end slide with the real icon.", "why": ["brand colour and font", "one idea per slide", "zoom-to-detail", "real icon"] },
+    { "verdict": "good", "template": "problem-solution", "what": "Video: grey 'before' chat bubbles popping in ('wo seid ihr?', 'hallo???'), a circle wipe in the brand colour to the app's map answering it.", "why": ["relatable first second", "clear contrast before/after", "native chat language"] }
+  ]
+}

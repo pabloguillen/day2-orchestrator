@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { MadeWith } from "../creative/types";
+import type { ShotList, TemplateId } from "../creative/templates/types";
 /**
  * Organic social posts (docs/social.md): day2 makes posts for an app from
  * its real screens and Brand DNA, the owner approves them (by default), and
@@ -14,7 +15,7 @@ export type SocialPlatform = (typeof SOCIAL_PLATFORMS)[number];
 export type SocialNetwork = "meta" | "tiktok";
 export const networkOf = (p: SocialPlatform): SocialNetwork => (p === "tiktok" ? "tiktok" : "meta");
 
-export const POST_FORMATS = ["reel", "feed", "story", "fb_post", "fb_reel", "tiktok_video", "tiktok_photo"] as const;
+export const POST_FORMATS = ["reel", "feed", "story", "fb_post", "fb_reel", "tiktok_video", "tiktok_photo", "ig_carousel", "fb_album"] as const;
 export type PostFormat = (typeof POST_FORMATS)[number];
 
 export const FORMAT_PLATFORM: Record<PostFormat, SocialPlatform> = {
@@ -25,6 +26,8 @@ export const FORMAT_PLATFORM: Record<PostFormat, SocialPlatform> = {
   fb_reel: "facebook",
   tiktok_video: "tiktok",
   tiktok_photo: "tiktok",
+  ig_carousel: "instagram",
+  fb_album: "facebook",
 };
 
 export const FORMAT_LABEL: Record<PostFormat, string> = {
@@ -35,7 +38,14 @@ export const FORMAT_LABEL: Record<PostFormat, string> = {
   fb_reel: "Facebook Reel",
   tiktok_video: "TikTok video",
   tiktok_photo: "TikTok photo post",
+  ig_carousel: "Instagram carousel",
+  fb_album: "Facebook photos",
 };
+
+/** Formats whose media is a list of slides (Target.assetIds, in order). */
+export const SLIDE_FORMATS: ReadonlySet<PostFormat> = new Set(["ig_carousel", "fb_album", "tiktok_photo"]);
+/** Platform limits on slides: Instagram 10, TikTok photo mode 35, Facebook multi-photo (day2 keeps it at 10). */
+export const MAX_SLIDES: Partial<Record<PostFormat, number>> = { ig_carousel: 10, fb_album: 10, tiktok_photo: 35 };
 
 export type PostStatus = "draft" | "waiting_approval" | "approved" | "publishing" | "published" | "failed" | "declined";
 export type TargetStatus = "pending" | "publishing" | "published" | "failed" | "skipped";
@@ -67,8 +77,10 @@ export type MetricsSnapshot = { window: MetricsWindow; at: string; metrics: Metr
 export type Target = {
   platform: SocialPlatform;
   format: PostFormat;
-  /** The image or video this placement shows (ad-assets store). */
+  /** The image or video this placement shows (ad-assets store); for slide formats, the first slide. */
   assetId: string;
+  /** Slide formats (carousel, album, TikTok photo): every slide, in order. */
+  assetIds?: string[] | null;
   coverAssetId?: string | null;
   caption: string;
   hashtags: string[];
@@ -112,8 +124,10 @@ export type Post = {
   /** Posts made together (same idea, Meta and TikTok separately) share a group. */
   group: string;
   status: PostStatus;
-  kind: "video" | "image";
+  kind: "video" | "image" | "carousel";
   language: string;
+  /** How the visual was designed (docs/creative-quality.md): template, the art director's shot list, the critique. */
+  creative?: PostCreative | null;
   idea: { topic: Topic; hook: HookStyle; title: string; brandAngle: string | null; trend: string | null };
   /** `tools`: the creator tools that made the media (docs/creator-tools.md), shown as "Made with …". */
   source: { arm: SocialArm; armKey: string; experimentId: string | null; made: string; tools?: MadeWith[] };
@@ -141,6 +155,32 @@ export type Post = {
   updatedAt: string;
 };
 
+export type PostCreative = {
+  template: TemplateId;
+  templateLabel: string;
+  /** Why day2 picked this template ("a new app's first post explains how it works"). */
+  templateWhy: string;
+  shots: ShotList;
+  /** The critique's weighted score (0–10), the rubric version it used, and its short owner-facing line. */
+  score: number;
+  rubricVersion: number;
+  why: string | null;
+  rounds: number;
+  bySight: boolean;
+  scores: Record<string, number>;
+  issues: string[];
+  /** "Screens are in English" — shown on the card when the screens aren't in the post's language. */
+  screensWarning: string | null;
+  /** Variants made for the same idea: the owner picks one ("Use this one"). */
+  variant: { set: string; index: number; of: number } | null;
+  /** 1:1 slides (the carousel goes out at 4:5; kept for the store pipeline and re-use). */
+  squareIds?: string[];
+  /** The 9:16 video version when the post goes out as slides (and vice versa). */
+  videoId?: string | null;
+  /** The screens it was made from (assets), for re-rendering after an edit. */
+  screens?: Array<{ id: string; width: number; height: number; language: string | null; statusBar: number; name: string; source: string }>;
+};
+
 export type SocialSettings = {
   /** "Posts go out on their own" — off by default. TikTok posts always ask (TikTok requires the creator's OK per post). */
   autoPublish: boolean;
@@ -164,7 +204,7 @@ export const MAX_ATTEMPTS = 5;
 export function contentHash(p: Pick<Post, "targets" | "idea" | "tiktok">): string {
   const body = {
     title: p.idea.title,
-    targets: p.targets.map((t) => [t.platform, t.format, t.assetId, t.coverAssetId ?? null, t.caption, t.hashtags]),
+    targets: p.targets.map((t) => [t.platform, t.format, t.assetId, ...(t.assetIds?.length ? [t.assetIds] : []), t.coverAssetId ?? null, t.caption, t.hashtags]),
     tiktok: p.tiktok ?? null,
   };
   return createHash("sha256").update(JSON.stringify(body)).digest("hex");

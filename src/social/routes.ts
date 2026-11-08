@@ -19,6 +19,9 @@ import { MEDIA_TOKEN_RE, type SocialAccount } from "./store";
 import { creatorInfo, exchangeTikTokCode, TIKTOK_CALLBACK, tiktokAccessToken, TIKTOK_CONTENT_ENV, tiktokAuthorizeUrl, tiktokChoiceProblem, tiktokContentApp, type CreatorInfo } from "./tiktok";
 import { contentHash, FORMAT_LABEL, SOCIAL_PLATFORMS, type Post, type SocialPlatform, type TikTokChoices } from "./types";
 import { socialArm } from "./make";
+import { noteSignal, updateCreativeState, type OwnerSignal } from "../creative/taste";
+import { isTemplateId } from "../creative/templates/types";
+import { applySlideTexts, reorderSlides, rerenderSlides } from "../creative/edit";
 import { checkTruthfulClaims } from "../growth-creative";
 
 const CLAIMS_MAX_USD = 0.3;
@@ -106,11 +109,29 @@ function postView(app: AppEntry, p: Post) {
     boostCandidate: Boolean(p.boostCandidate),
     installEstimate: p.installEstimate ?? null,
     createdAt: p.createdAt,
+    /** How it was designed: template, the critique's score and "why this works", the variant set, a screens warning. */
+    creative: p.creative
+      ? {
+          template: p.creative.template,
+          templateLabel: p.creative.templateLabel,
+          templateWhy: p.creative.templateWhy,
+          score: p.creative.score,
+          why: p.creative.why,
+          rounds: p.creative.rounds,
+          bySight: p.creative.bySight,
+          issues: p.creative.issues,
+          screensWarning: p.creative.screensWarning,
+          variant: p.creative.variant,
+          slideTexts: slideTexts(p),
+          videoUrl: media(p.creative.videoId),
+        }
+      : null,
     targets: p.targets.map((t) => ({
       platform: t.platform,
       format: t.format,
       label: FORMAT_LABEL[t.format],
       mediaUrl: media(t.assetId),
+      slides: (t.assetIds ?? []).map((id) => ({ id, url: media(id)! })),
       coverUrl: media(t.coverAssetId),
       caption: t.caption,
       hashtags: t.hashtags,
@@ -124,6 +145,26 @@ function postView(app: AppEntry, p: Post) {
       metrics: t.metrics,
     })),
   };
+}
+
+/** The words on each slide, in slide order (cover, steps, end), for per-slide editing. Pure. */
+export function slideTexts(p: Post): Array<{ index: number; role: "cover" | "step" | "end"; headline: string; caption: string | null }> | null {
+  const sh = p.creative?.shots;
+  if (!sh || p.kind !== "carousel") return null;
+  if (p.creative!.template === "how-it-works" || p.creative!.template === "whats-new")
+    return [{ index: 0, role: "cover", headline: sh.hook, caption: sh.kicker }, ...sh.steps.map((st, k) => ({ index: k + 1, role: "step" as const, headline: st.headline, caption: st.caption })), { index: sh.steps.length + 1, role: "end", headline: sh.endLine, caption: sh.cta }];
+  if (p.creative!.template === "problem-solution") return [{ index: 0, role: "cover", headline: sh.hook, caption: null }, { index: 1, role: "step", headline: sh.steps[0]?.headline ?? "", caption: sh.steps[0]?.caption ?? null }];
+  return null;
+}
+
+/** An owner decision feeds the taste learning for the post's template. */
+function learnTaste(app: AppEntry, p: Post, signal: OwnerSignal, reason?: string | null): void {
+  if (!p.creative) return;
+  try {
+    updateCreativeState(app.repoPath, (s) => noteSignal(s, p.creative!.template, signal, reason));
+  } catch {
+    /* best effort */
+  }
 }
 
 function accountView(a: SocialAccount | undefined) {
@@ -355,15 +396,18 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
   // ---- Posts
 
   /** Make a post now (instead of waiting for the autopilot). */
-  route("POST", "/api/apps/:id/social/posts/make", async (_req, p, t) => {
+  route("POST", "/api/apps/:id/social/posts/make", async (req, p, t) => {
     const app = await h.requireApp(t, p.id!);
     h.requireManager(t);
-    const { deps, profile } = await socialPassDeps(t, app, (service, description, max, fn) => h.runWithCredits(t, app, service, description, max, fn));
+    const b = await body(req).catch(() => ({}) as Record<string, unknown>);
+    if (b.template !== undefined && !isTemplateId(b.template)) throw fail(400, "Unknown template.");
+    const forced = isTemplateId(b.template) ? b.template : null;
+    const { deps, profile } = await socialPassDeps(t, app, (service, description, max, fn) => h.runWithCredits(t, app, service, description, max, fn), { forced });
     if (!profile) throw fail(409, "day2 needs the app's profile first (finish onboarding).");
     if (!deps.platforms.length) throw fail(409, "Connect Instagram, Facebook or TikTok first.");
     if (deps.killSwitch || loadSocialState(statePathOf(app)).paused) throw fail(409, "Social is paused (or the kill switch is on).");
     const r = await deps.draft();
-    updateSocialState(statePathOf(app), (s) => logLine({ ...s, lastMadeAt: new Date().toISOString() }, r.posts.length ? "Made a new post on request." : `No post this time: ${r.dropped ?? "nothing usable"}.`));
+    updateSocialState(statePathOf(app), (s) => logLine({ ...s, lastMadeAt: new Date().toISOString() }, r.posts.length ? `Made a new ${forced ? `${forced.replace(/-/g, " ")} ` : ""}post on request.` : `No post this time: ${r.dropped ?? "nothing usable"}.`));
     return h.json({ made: r.posts.length, dropped: r.dropped, social: await socialView(app) });
   });
 
@@ -400,6 +444,40 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
       next.timeWhy = "You picked this time.";
     }
     if (b.tiktok !== undefined && next.tiktok) next.tiktok = choicesFrom(b.tiktok, next.tiktok);
+    // Carousel: a new slide order and/or new words on slides (re-rendered in the template).
+    let slideEdit = false;
+    if (Array.isArray(b.slideOrder) && next.kind === "carousel") {
+      const slideTarget = next.targets.find((x) => x.assetIds?.length);
+      const r = slideTarget ? reorderSlides(slideTarget.assetIds!, (b.slideOrder as unknown[]).filter((x): x is string => typeof x === "string"), next.creative?.shots ?? null) : null;
+      if (!r) throw fail(400, "That isn't an order of this post's slides.");
+      const prev = slideTarget!.assetIds!;
+      for (const tg of next.targets) if (tg.assetIds?.length) tg.assetIds = r.ids.map((id) => tg.assetIds![prev.indexOf(id)] ?? id);
+      for (const tg of next.targets) if (tg.assetIds?.length) tg.assetId = tg.assetIds[0]!;
+      if (next.creative && r.shots) next.creative.shots = r.shots;
+      slideEdit = true;
+    }
+    if (Array.isArray(b.slideTexts) && next.kind === "carousel" && next.creative?.shots) {
+      const shots = applySlideTexts(next.creative.shots, (b.slideTexts as Array<Record<string, unknown>>).map((e) => ({ index: Number(e.index), ...(typeof e.headline === "string" ? { headline: e.headline } : {}), ...(e.caption === null || typeof e.caption === "string" ? { caption: e.caption as string | null } : {}) })));
+      if (JSON.stringify(shots) !== JSON.stringify(next.creative.shots)) {
+        const screens = [];
+        for (const sc of next.creative.screens ?? []) {
+          const a = await assetStore().get(sc.id);
+          if (a && a.appId === app.id) screens.push({ file: a.path, width: sc.width, height: sc.height, language: sc.language, statusBar: sc.statusBar, name: sc.name, source: "capture" as const });
+        }
+        if (!screens.length) throw fail(409, "The screens this post was made from are gone — make a new post instead.");
+        const r = await rerenderSlides(app, { shots, screens, language: next.language, store: assetStore(), tag: `social:${next.group}` });
+        if (!r.ok) throw fail(409, `Those words don't fit: ${r.problem}. Try fewer words.`);
+        const ids = r.slides["4:5"] ?? [];
+        for (const tg of next.targets) if (tg.assetIds?.length) {
+          tg.assetIds = ids.slice(0, tg.assetIds.length);
+          tg.assetId = tg.assetIds[0]!;
+        }
+        next.creative.shots = shots;
+        next.creative.squareIds = r.slides["1:1"] ?? next.creative.squareIds;
+        edits.push({ before: "slide words", after: "edited slide words" });
+        slideEdit = true;
+      }
+    }
     const changed = contentHash(next) !== contentHash(cur);
 
     // Claims: re-checked on new words; until a check passes, its findings stay.
@@ -437,6 +515,7 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
     });
     if (problem) throw fail(409, problem);
     if (!updated) throw fail(404, "No such post.");
+    if (edits.length || slideEdit) learnTaste(app, updated, "edited");
     if (edits.length) {
       await noteOwnerInput(app, { kind: "edit", text: "edited a social post's words", before: edits.map((e) => e.before).join(" | "), after: edits.map((e) => e.after).join(" | "), about: "social post caption", ref: { type: "proposal", id: updated.id, url: `/apps/${app.id}/social`, label: "Social post" }, who: by });
     }
@@ -452,6 +531,7 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
     if (!cur) throw fail(404, "No such post.");
     if (!cur.safety.ok) throw fail(409, `Fix this first: ${cur.safety.issues[0] ?? "the safety check didn't pass"}.`);
     if (cur.status !== "waiting_approval") throw fail(409, "This post isn't waiting for approval.");
+    if (cur.creative?.variant) throw fail(409, "Pick a version first (Use this one).");
     let choices: TikTokChoices | null = null;
     if (cur.targets.some((x) => x.platform === "tiktok")) {
       choices = choicesFrom(b.tiktok, cur.tiktok);
@@ -485,6 +565,7 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
     });
     if (refused) throw fail(409, refused);
     if (done?.status !== "approved") throw fail(409, "This post isn't waiting for approval.");
+    learnTaste(app, done, "approved");
     updateSocialState(statePathOf(app), (s) => logLine(s, `Approved a post for ${new Date(done.scheduledAt!).toISOString().slice(0, 16).replace("T", " ")} UTC.`));
     return h.json(await socialView(app));
   });
@@ -502,8 +583,40 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
       return post;
     });
     if (!done || done.status !== "declined") throw fail(409, "This post can't be turned down any more.");
+    learnTaste(app, done, "declined", reason || null);
     await noteDecline(app, { kind: "social.post", target: `${done.idea.topic}/${done.idea.hook}: ${done.idea.title}`, reason: reason || null, who: await who(t), about: `the social post “${done.idea.title}”`, ref: { type: "proposal", id: done.id, url: `/apps/${app.id}/social`, label: "Social post" } });
     if (reason) captureSoon(app, chargedRunner(t, app));
+    return h.json(await socialView(app));
+  });
+
+  /**
+   * "Use this one": of the variants day2 made for one idea, the owner keeps
+   * this one (its Meta and TikTok posts) — the others are set aside (not
+   * a decline of the idea), and the pick feeds the taste learning.
+   */
+  route("POST", "/api/apps/:id/social/posts/:post/pick", async (_req, p, t) => {
+    const app = await h.requireApp(t, p.id!);
+    h.requireManager(t);
+    const cur = await socialPosts().get(app.id, p.post!);
+    if (!cur?.creative?.variant) throw fail(404, "This post has no variants to pick from.");
+    if (cur.status !== "waiting_approval" && cur.status !== "draft") throw fail(409, "This post isn't waiting any more.");
+    const set = cur.creative.variant.set;
+    const all = (await socialPosts().list(app.id, { limit: 200 })).filter((x) => x.creative?.variant?.set === set);
+    for (const other of all) {
+      if (other.group === cur.group) {
+        await socialPosts().update(app.id, other.id, (x) => (x.creative ? { ...x, creative: { ...x.creative, variant: null } } : x));
+        continue;
+      }
+      const done = await socialPosts().update(app.id, other.id, (x) => {
+        if (x.status !== "waiting_approval" && x.status !== "draft") return null;
+        x.status = "declined";
+        x.declinedReason = "You picked the other version.";
+        return x;
+      });
+      if (done?.status === "declined" && done.targets[0]?.platform === cur.targets[0]?.platform) learnTaste(app, done, "passed");
+    }
+    learnTaste(app, cur, "picked");
+    updateSocialState(statePathOf(app), (s) => logLine(s, `You picked the ${cur.creative!.templateLabel} version.`));
     return h.json(await socialView(app));
   });
 

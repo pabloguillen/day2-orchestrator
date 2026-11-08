@@ -272,6 +272,31 @@ export async function tiktokStep(
   }
 }
 
+/**
+ * One step of a TikTok photo post (photo mode, Content Posting API
+ * /v2/post/publish/content/init/): TikTok pulls the slides from day2's
+ * public media links (PULL_FROM_URL — the domain must be verified for the
+ * TikTok app; gora8.com is), then status checks like a video. Title ≤ 90
+ * characters, description ≤ 4000, up to 35 photos.
+ */
+export async function tiktokPhotoStep(a: TikTokApp, token: string, t: Target, o: { slides: () => Promise<string[]>; choices: TikTokChoices; onStepId: (id: string) => Promise<void> }, deps: PlatformDeps = {}): Promise<StepResult> {
+  if (t.stepId) return tiktokStep(a, token, t, { bytes: async () => new Uint8Array(), durationSec: 0, choices: o.choices, onStepId: o.onStepId }, deps);
+  const info = await creatorInfo(a, token, deps);
+  const base = postInfo(t, o.choices, info);
+  const urls = await o.slides();
+  if (!urls.length || urls.length > 35) throw new TikTokError("photo_count", `a TikTok photo post needs 1–35 photos (this one has ${urls.length})`);
+  const text = String(base.title ?? "");
+  const d = await call<{ publish_id?: string }>(a, token, deps, "/v2/post/publish/content/init/", {
+    media_type: "PHOTO",
+    post_mode: "DIRECT_POST",
+    post_info: { title: [...text].slice(0, 90).join(""), description: text.slice(0, 4000), privacy_level: base.privacy_level, disable_comment: base.disable_comment, auto_add_music: true, brand_organic_toggle: base.brand_organic_toggle, brand_content_toggle: base.brand_content_toggle },
+    source_info: { source: "PULL_FROM_URL", photo_images: urls, photo_cover_index: 0 },
+  }, undefined, 1);
+  if (!d.publish_id) throw new TikTokError("no_publish_id", "TikTok returned no publish id");
+  await o.onStepId(d.publish_id);
+  return { kind: "waiting", stepId: d.publish_id, retryInMs: 60_000 };
+}
+
 /** Results of public TikTok videos (up to 20 ids per call). Private posts have none. */
 export async function tiktokMetrics(a: TikTokApp, token: string, ids: string[], deps: PlatformDeps = {}): Promise<Map<string, Metrics & { shareUrl: string | null }>> {
   const out = new Map<string, Metrics & { shareUrl: string | null }>();
