@@ -41,7 +41,7 @@ if (!plan) throw new Error(problems.join("; "));
 writeFileSync(join(OUT, "seed-plan.json"), JSON.stringify(plan, null, 2));
 const ids = Object.fromEntries(cast.people.map((p, i) => [p.key, `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`]));
 const rows = expandSeedPlan(plan, withImages, ids, schema, new Date("2026-11-08T12:00:00Z"));
-writeFileSync(join(OUT, "seed-rows-preview.json"), JSON.stringify({ note: "What day2 would insert into the DEMO project (user ids are placeholders; real ones come from the demo project's Auth).", inserts: rows.inserts.map((i) => ({ table: i.table, rows: i.rows.length, first: i.rows[0] })), uploads: rows.uploads.map((u) => ({ bucket: u.bucket, path: u.path })), skipped: rows.skipped }, null, 2));
+writeFileSync(join(OUT, "seed-rows-preview.json"), JSON.stringify({ note: "What day2 would insert into a capture's temporary database (user ids are placeholders; real ones come from its Auth).", inserts: rows.inserts.map((i) => ({ table: i.table, rows: i.rows.length, first: i.rows[0] })), uploads: rows.uploads.map((u) => ({ bucket: u.bucket, path: u.path })), skipped: rows.skipped }, null, 2));
 writeFileSync(join(OUT, "demo-flow-ticket.txt"), (({ title, description, doneWhen }) => `${title}\n\n${description}\n\nDone when:\n- ${(doneWhen ?? []).join("\n- ")}\n`)(demoFlowTicket({ appName: "Dotty", features: ["Karte mit Freunden", "Moment teilen", "Feed", "Wochenrangliste"], locale: "de-DE", cast: withImages, hasStoreFlow: false, existingNotes: [], record: true })));
 
 const screens = await renderDottyMocks(DOTTY, join(OUT, "mock-screens-cast-de"), undefined, withImages);
@@ -84,7 +84,7 @@ Rows preview (seed-rows-preview.json): ${rows.inserts.map((i) => `${i.table} ${i
 
 Flow ticket (demo-flow-ticket.txt): what day2's build agent gets for the Maestro flow + demo sign-in + demo build profile.
 
-SCREENS ARE MOCK CAPTURES filled with the cast (mock-screens-cast-de/) — no simulator here. A real run builds Dotty against the demo backend and captures with Maestro (capture-run.ts).
+SCREENS ARE MOCK CAPTURES filled with the cast (mock-screens-cast-de/) — no simulator here. A real run starts a temporary database (Docker), seeds it, builds Dotty against it and captures with Maestro (capture-run.ts).
 How it works (how-it-works/): video ${r.video ? `${r.video.seconds}s` : "—"}, slides ${r.slides.map((s) => `${s.ratio}×${s.files.length}`).join(", ")}; layout check: ${issues.length ? issues.map((i) => i.text).join("; ") : "clean"}.
 `;
 writeFileSync(join(OUT, "README.txt"), summary);

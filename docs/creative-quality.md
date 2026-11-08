@@ -70,7 +70,7 @@ Clean frames: the status bar is cropped off in cards, screens are shown
 large and bleeding off the edge (no device frame), and every template
 zooms to / lifts off the region that matters.
 
-## 2b. Real screens: demo cast, demo backend, flow, capture, upload
+## 2b. Real screens: demo cast, seed plan, flow, capture with a temporary database, upload
 
 Until this, `captureMoments` was never called, Dotty had no Maestro flow
 and no demo data — posts fell back to English App Store screenshots. The
@@ -80,10 +80,12 @@ owner only steps in when a step needs attention:
 ```
 profile + brand kit + language ─► demo cast (JSON, checked) ─► owner approves
                                    + pictures (image tool / bundled / placeholder)
-app's supabase/migrations ─► schema ─► seed plan (data, checked) ─┐
-day2's Supabase org ─► separate "-demo" project ◄── migrations ◄──┘ rows + pictures + users
+app's supabase/migrations ─► schema ─► seed plan (data, checked, cached by migrations hash)
 build agent ticket ─► .maestro/day2/store-screens.yaml (+ .json, demo sign-in, day2-demo profile) as a PR
-capture (Mac simulator or EAS) ─► capture set (marked AI content) ─► chooseScreens "capture"
+capture run:  temporary database (Docker: supabase start, a copy of the migrations)
+              ─► seed (auth users, rows, pictures) ─► demo build + flow (Mac simulator, or EAS via a tunnel)
+              ─► capture set (marked AI content) ─► chooseScreens "capture"
+              └─► finally: supabase stop --no-backup, workdir deleted, tunnel closed
 ```
 
 **The automatic pipeline** (`creative/real-screens-auto.ts`): one
@@ -91,45 +93,48 @@ resumable state machine per app, persisted in
 `<data>/real-screens/<app>/pipeline.json`:
 
 ```
-cast → approve → backend → flow → flow_merged → capture → done   (+ daily maintenance)
+cast → approve → seed_plan → flow → flow_merged → capture → done   (+ daily maintenance)
 ```
 
-Each step first checks the world (is there a cast; is it approved; is the
-demo backend filled with *this* cast and all migrations; is the flow ticket
+Each step first checks the world (is there a cast; is it approved; is there
+a seed plan valid for the app's current migrations; is the flow ticket
 there; is the flow in the app's checkout or its ticket done; is there a
-capture for the current version, newer than the last seeding) and only
+capture for the current version, newer than the cast's approval) and only
 does what's missing — calling it again is a no-op, and a run picks up where
 the last one stopped (also after a restart). Per step: status (`pending`,
 `running`, `done`, `waiting`, `needs_attention`, `skipped`), attempts, last
 error, next retry. A failure is retried with exponential backoff (base 10
-min for the cast, 15 min backend, 60 min capture; doubling, capped at a
+min for the cast, 15 min seed plan, 60 min capture; doubling, capped at a
 day) up to 5 attempts, then "needs attention" with the reason. Problems day2
-can't fix by itself need attention at once: Supabase's plan limit ("no room
-for another project … upgrade"), a migration that doesn't apply on the demo
-project (old captures stay in use), no Expo account, not enough credits
-(`authorize` for the cast's model + image runs, the vision check and
-`infra` for the backend — the account's balance, app cap and daily cap), a
-flow PR closed without merging. Once a day what needs attention gets one
-more try. One run per app at a time (single-flight; the second caller gets
-the same promise). The demo project is paused whenever the pipeline stops
-before a capture (a paid organization refuses — then day2 notes it and
-doesn't ask again for a day).
+can't fix by itself need attention at once: no Docker (or it isn't running)
+or no Supabase CLI — with the install hint; no cloudflared for an EAS
+capture; a migration that doesn't apply on the temporary database (named;
+old captures stay in use); a seed plan that no longer fits the migrations
+(the table/column named); no Expo account; not enough credits (`authorize`
+for the cast's model + image runs, the vision check and `agent_work` for the
+seed plan — the account's balance, app cap and daily cap); a flow PR closed
+without merging. A temporary database that didn't start for another reason
+(images, ports, health) is retried with backoff. Once a day what needs
+attention gets one more try. One run per app at a time (single-flight; the
+second caller gets the same promise).
 
 *Triggers* (`realScreensAll` on the backlog timer, every
 `DAY2_BACKLOG_TICK_MINUTES`): an app with growth on (the autopilot, or a
 connected social account) and real screens missing or stale; daily
-maintenance (re-arm, check the demo project still exists on Supabase — gone
-→ created again); a new app version (`app.json` version differs → the
-capture step runs again); changed `supabase/migrations` (a fingerprint of
-names and contents → only the new migrations are applied to the demo
-project, after waking it); a post being made — `maybeAutoCapture` kicks
+maintenance (re-arm what needs attention); a new app version (`app.json`
+version differs → the capture step runs again); changed
+`supabase/migrations` (a sha256 of names and contents → the cached seed plan
+is checked against the new schema, re-stamped if it still fits, otherwise
+written again; the next capture applies all migrations to a fresh
+database anyway); a post being made — `maybeAutoCapture` kicks
 the pipeline, and before the first How it works post waits for it (at most
 `DAY2_REAL_SCREENS_WAIT_MINUTES`, default 45). A post never waits for good:
 it goes ahead with the best screens there are (`chooseScreens` order) and
 the reason is stored (`posts.why`, shown on Formats, logged on the post
-run). The pipeline only runs where it can: a Supabase app with migrations
-and day2's Supabase organization configured (else the old manual path and
-uploads); `DAY2_REAL_SCREENS=off` turns it off.
+run). The pipeline runs for Supabase apps with migrations (else the old
+manual path and uploads) — no Supabase organization or access token is
+needed; Docker is checked by the capture step; `DAY2_REAL_SCREENS=off`
+turns it off.
 
 *Approval policy* (`demoCast: "auto" | "owner"`, per app, default
 `auto`, Growth → Formats): in `auto`, day2 approves a cast itself only if
@@ -156,20 +161,38 @@ emulator, Maestro, `ANDROID_HOME`, `/dev/kvm` on Linux;
 `DAY2_ANDROID_FALLBACK=off`), else the step needs attention and asks for
 uploads.
 
-*Cleanup*: removing an app deletes its demo project (guarded like every
-write: only the recorded `-demo` project, confirmed with Supabase first),
-the demo secrets, the cast and its pictures, its captures and pipeline
-state; growth off for 30 days deletes the demo project and the cast (captures
-stay usable; it's set up again when growth is back). A project Supabase
-won't delete at that moment is remembered and retried on the timer.
+*Cleanup*: there is no demo database to clean up — each one lives only
+for its capture run. Removing an app deletes the cast and its pictures, its
+captures, the seed plan and pipeline state; growth off for 30 days deletes
+the cast and its pictures (captures and the seed plan stay; a new cast is
+written when growth is back). Temporary databases a crash left behind
+(`day2cap-…`, older than two hours) are removed by a janitor on startup
+and on every backlog tick (`ephemeralJanitor`, per server).
+
+*Migration from standing demo projects* (the earlier design: a Supabase
+project `<app>-<id>-demo` per app in day2's organization — rejected: it
+doesn't scale, and on a paid plan each one runs all the time, ~$10/month):
+on the next tick, an app whose hosting state still records one has it
+deleted through the old guard (`retireLegacyDemo` → `deleteDemoBackend`:
+only the recorded `-demo` project, confirmed with Supabase first), then the
+record and the old demo secrets (`demo_login`, `secret_key:demo`,
+`db_password:demo`) dropped. Without `SUPABASE_ACCESS_TOKEN` /
+`DAY2_SUPABASE_ORG_ID` the record stays and the pipeline log says to delete
+it by hand; a project the guard refuses (renamed or moved) is only
+forgotten, never deleted. One that Supabase won't delete when an app is
+removed is remembered and retried on the timer. Nothing creates demo
+projects any more (`ensureDemoBackend`, pause/resume, the plan-limit
+handling and the 30-day project cleanup are gone).
 
 Console (Growth → Formats → Real screens): the steps as a timeline (done /
 running / waiting / needs attention, the reason, attempts, Retry or Try
 now), the approval setting, the last post's fallback reason. Routes:
 `PUT /api/apps/:id/creative/real-screens/settings`, `POST …/real-screens/retry`,
 `POST …/demo-cast/decline` (scoped to the signed-in account's app, owner or
-admin); `POST …/demo-cast` is Regenerate and `POST …/demo-backend` a retry
-from the backend step.
+admin); `POST …/demo-cast` is Regenerate. The capture card shows the run's
+temporary database (starting / ready / removed / failed, with its log
+lines and the queue) and what this machine lacks (Docker, the Supabase CLI,
+cloudflared for EAS) with install hints.
 
 **Demo cast** (`creative/demo-cast/`): ~8 fictional friends (first names
 for the audience's locale, age 18–40 checked — the prompt asks 18–30 —
@@ -193,15 +216,9 @@ card says so. Stored in the asset store (purpose `demo-cast`) with
 Regenerate makes a new draft; only an **approved** cast is seeded
 (approved automatically or by the owner — see the approval policy above).
 
-**Demo backend** (`hosting/demo.ts`, Supabase apps with migrations only —
-others: "not supported yet" + upload): a project `<app>-<id>-demo` in
-day2's organization (the hosting operator config), Free-plan limit checked
-first and on create ("no room for another project … pause or delete one,
-or upgrade"); sign-ups disabled; the app's own schemas exposed to the REST
-API (`PATCH /v1/projects/{ref}/postgrest`); the app's migrations applied
-with `SET check_function_bodies = off` (+ PostGIS in public when the
-migrations use `public.geography` without creating it). The **seed plan**
-(`hosting/seed-plan.ts`) maps cast entities onto tables as data: per table
+**Seed plan** (`hosting/seed-plan.ts`, cached by `hosting/seed-plan-cache.ts`;
+Supabase apps with migrations only — others: "not supported yet" + upload)
+maps cast entities onto tables as data: per table
 `for: people|friendships|places|moments|reactions|comments|leaderboard`
 and per column a constant, `{field}`, `{id}`, `{ref}`, `{time}` or
 `{image}`, plus upload rules (`{owner}/{id}.jpg`). A model writes it from
@@ -211,24 +228,80 @@ checks, RLS, buckets) or the built-in planner does; `validateSeedPlan`
 refuses unknown tables/columns, reserved schemas (auth, storage, …),
 generated columns, missing required columns, wrong types, references the
 entity doesn't have, tables filled before what they point at, unknown
-buckets and unsafe paths. Then: one auth user per person (Auth admin API;
-the self user's login `{email, password}` kept encrypted as `demo_login`,
-never logged or returned), rows as JSON to the demo project's REST API
-(duplicates ignored, so re-seeding is idempotent; stable ids per cast
-seed), pictures to its buckets. A new cast deletes the old cast's rows and
-users first. **Guard**: only the project recorded as day2's demo (ref,
-"-demo" name, matching URL, not one of the app's hosted environments, not
-any Supabase ref found in the app's repo/config) is written to, and
-Supabase is asked before each step that it still has that name and
-organization. Dotty: 28 migrations → profiles, friendships, places,
-moments, reactions, comments; buckets `dotty-avatars`, `dotty-moments`;
-the leaderboard comes from Dotty's own `user_points()`.
+buckets and unsafe paths. The validated plan is stored in
+`<data>/real-screens/<app>/seed-plan.json` with a sha256 of the migrations
+(the "Seed plan" step); a failure needs attention naming the table/column
+and the newest migration. Dotty: 28 migrations → profiles, friendships,
+places, moments, reactions, comments; buckets `dotty-avatars`,
+`dotty-moments`; the leaderboard comes from Dotty's own `user_points()`.
+
+**Temporary database** (`hosting/ephemeral.ts`, `creative/demo-session.ts`),
+one per capture run, on the machine that runs the capture:
+
+- *Workdir*: `<tmp>/day2-ephemeral/day2cap-<time>-<random>/supabase/` with
+  day2's own `config.toml` and a **copy** of the migrations (each prefixed
+  with `SET check_function_bodies = off;`, plus PostGIS in `public` when the
+  migrations use `public.geography` without creating it) — never run in the
+  app's checkout. Config: a unique `project_id` (`day2cap-…`, its time in
+  the name for the janitor), a free block of 10 ports (from
+  `DAY2_EPHEMERAL_PORT_BASE`, default 55400; checked free and reserved
+  in-process, so concurrent runs never collide), the app's schemas in
+  `[api] schemas`, `enable_signup = false` (auth and email), no seed file,
+  Studio/Realtime/Mailpit/Edge Runtime/analytics/pooler off; the app's
+  `[db] major_version` if its config says one (else 17).
+- *Start*: `supabase start --workdir <dir> -x studio,mailpit,edge-runtime,imgproxy,logflare,vector,supavisor,realtime,postgres-meta`
+  (Postgres, GoTrue, PostgREST, Storage, Kong remain) applies the
+  migrations; a failing one is named from the CLI's "Applying migration …"
+  output. Then `supabase status -o json` for the **local** anon and service
+  keys (held in memory for the run, cut out of every error, never stored or
+  logged — they're the CLI's local development keys), and a health wait on
+  `/auth/v1/health`, `/rest/v1/` and `/storage/v1/bucket`. Timeouts on every
+  step (start 12 min, status 1 min, health 2 min, seed 5 min, stop 2 min,
+  queue 45 min). The CLI is pinned (`npx --yes supabase@2.122.1`, or
+  `DAY2_SUPABASE_CLI`), and gets day2's environment without tokens, keys
+  or passwords.
+- *Seed*: one auth user per person through the local Auth admin API (the
+  self user gets a fresh random password — this run's demo login, never
+  stored), rows as JSON through PostgREST with the service key (the same
+  `demoClient` and `expandSeedPlan`, so no SQL is built from the plan),
+  pictures into the buckets the migrations create.
+- *Reach*: iPhone Simulator → `http://127.0.0.1:<api>` (it shares the Mac's
+  network); Android emulator → `http://10.0.2.2:<api>`; EAS → a Cloudflare
+  quick tunnel (`hosting/tunnel.ts`: `cloudflared tunnel --url
+  http://127.0.0.1:<api>`, only the API port, a random trycloudflare.com
+  name, waited for until it answers) passed as the build's
+  `EXPO_PUBLIC_SUPABASE_URL`.
+- *Teardown*, always (`finally`, also when the start, the seeding, the
+  build or the flow fails): tunnel closed, `supabase stop --no-backup`
+  (volumes deleted; if it fails, containers/volumes/network are removed by
+  the `com.supabase.cli.project` label), workdir deleted, port block and
+  slot freed.
+- *Limits*: `DAY2_EPHEMERAL_MAX` (default 2) stacks at a time per machine;
+  more wait in a FIFO queue (shown on the card).
+- *Needs*: Docker with a reachable daemon and the Supabase CLI; missing →
+  the capture step needs attention with install hints (Docker Desktop /
+  `brew install supabase/tap/supabase`; Docker Engine + Node on a server);
+  `cloudflared` for EAS captures.
+
+*Rebuilds per run — the trade-off*: the URL (port, or tunnel name) differs
+per run and Expo inlines `EXPO_PUBLIC_*` at build time, so each capture
+builds the demo app with that run's values. Captures built per run before
+too (local build, or the EAS workflow's build job), so this costs nothing
+extra today. A runtime override (a Maestro launch argument or deep link the
+demo build reads) would allow reusing one demo build across runs — not
+asked of the flow ticket yet because Expo has no built-in launch-argument
+API (it would need a native module); worth it only if build minutes become
+the bottleneck.
 
 **Flow ticket** (`creative/demo-flow.ts`, source key `creative:demo-flow`,
-created after the demo backend is ready): the build agent makes the
+created after the seed plan is ready): the build agent makes the
 Supabase URL/key overridable by `EXPO_PUBLIC_SUPABASE_URL/KEY` (current
-values as fallback), adds an email/password sign-in shown only when
-`EXPO_PUBLIC_DAY2_DEMO=1`, an eas.json `day2-demo` profile without secrets,
+values as fallback), allows plain http to the temporary database **in demo
+builds only** (iOS `NSAllowsLocalNetworking` / a localhost exception —
+never `NSAllowsArbitraryLoads`; Android cleartext only for `10.0.2.2`,
+`127.0.0.1`, `localhost` via a network security config), adds an
+email/password sign-in shown only when `EXPO_PUBLIC_DAY2_DEMO=1`, an
+eas.json `day2-demo` profile without secrets,
 `store-screens.yaml` signing in with `${MAESTRO_DAY2_DEMO_EMAIL}` /
 `${MAESTRO_DAY2_DEMO_PASSWORD}` (Maestro reads `MAESTRO_*` from its
 environment) and `takeScreenshot: day2-shot-<name>` per moment, the
@@ -236,24 +309,27 @@ environment) and `takeScreenshot: day2-shot-<name>` per moment, the
 secret is committed.
 
 **Capture** (`creative/capture-run.ts`, wired through `real-screens.ts`):
-on the Mac, a clean checkout of main is built for the simulator with the
-demo backend's public URL/key and `EXPO_PUBLIC_DAY2_DEMO=1`, installed, the
+on the Mac, a clean checkout of main; the run's temporary database is
+started from *its* migrations and seeded; the checkout is built for the
+simulator with that database's address and public key and
+`EXPO_PUBLIC_DAY2_DEMO=1`, installed, the
 locale/status bar set (`simctlCommands`; Android: `adbCommands` with
 SystemUI demo mode), and the flow run with the login in Maestro's
 environment only (cut out of error text). Without `maestro` on PATH the
 card shows `curl -fsSL "https://get.maestro.mobile.dev" | bash`. With
-`DAY2_CAPTURE=eas`: eas.json gets the `day2-demo` profile with the demo
-values and `.eas/workflows/day2-capture.yml` is written into the temporary
+EAS (the default on a server without Xcode): eas.json gets the `day2-demo`
+profile with the tunnel address and the local public key, and `.eas/workflows/day2-capture.yml` is written into the temporary
 checkout (build → `type: maestro` job with `environment: preview`,
 `record_screen`, and an `after_maestro_tests` hook running
-`eas/upload_artifact` for `day2-shot-*.png`); the login goes in as
-`secret` EAS variables; after `eas workflow:run --wait`, `eas workflow:view
+`eas/upload_artifact` for `day2-shot-*.png`); the run's login goes in as
+`secret` EAS variables and is deleted after the run (`eas env:delete`, in
+`finally`); after `eas workflow:run --wait`, `eas workflow:view
 --json` is searched for the artifact's link, downloaded with
 `safeDownload` (host list `eas`), archives unpacked (no absolute paths,
 "..", or symlinks followed). The EAS docs don't document how to fetch
 artifacts from the CLI — **unverified**; if no link comes back the card
 says so and the Mac path stays. One capture per app at a time, status +
-log polled by the console, the demo project paused afterwards. Triggers:
+log polled by the console, the temporary database removed afterwards. Triggers:
 **Capture screens** (Formats) and the automatic pipeline above (a new app
 version, the first How it works post, daily maintenance).
 
@@ -435,7 +511,7 @@ screenshot pipeline could use (separate APIs, shared `render.ts`).
 | `POST /social/posts/:post/pick` | Use this one |
 | `PATCH /social/posts/:post` `{slideOrder?, slideTexts?}` | reorder / re-word slides |
 | `POST /creative/demo-cast` · `/demo-cast/approve` · `GET /demo-cast/images/:asset` | write (background) / approve the demo cast; its pictures (app-scoped) |
-| `POST /creative/demo-backend` | create + fill the demo backend, then the flow ticket (background) |
+| `PUT /creative/real-screens/settings` · `POST /creative/real-screens/retry` `{step?}` · `POST /creative/demo-cast/decline` | approval policy · retry a pipeline step (e.g. `seed_plan`, `capture`) · decline the cast |
 | `POST /creative/capture` | capture now (background; status in `GET /creative` → `real.capture`) |
 | `POST /creative/screens` (form: `language`, `files`) · `DELETE /creative/screens/:locale` · `GET /creative/screens/:locale/:file` | the owner's screenshots |
 
@@ -443,7 +519,8 @@ All scoped to an app of the signed-in account; changes need an owner or
 admin. Env: `DAY2_CREATIVE_STUDIO=off` (old built-in media),
 `DAY2_CREATIVE_VISION=off` (layout checks only, no vision runs),
 `DAY2_CREATIVE_VARIANTS=1`, `DAY2_VISION_MODEL`, `DAY2_CAPTURE=local|eas|off`,
-`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off`, `DAY2_DEMO_CAST_MODEL=fake`.
+`DAY2_DEMO_CAST_MODEL=fake`, `DAY2_EPHEMERAL_MAX` (default 2),
+`DAY2_EPHEMERAL_PORT_BASE` (default 55400), `DAY2_SUPABASE_CLI`.
 
 ## 9. What's honest
 
@@ -452,12 +529,20 @@ admin. Env: `DAY2_CREATIVE_STUDIO=off` (old built-in media),
   (`src/creative/fixtures/dotty-mock-screens.ts`, optionally filled with a
   demo cast). The capture path is tested with fake devices and a fake EAS,
   not run on a Mac or EAS yet.
-- The demo backend is tested against a fake Management API and a fake
-  demo project: no real Supabase project was created. Dotty's migrations
-  have never been applied to a fresh project — they reference a legacy
-  table (`public.places_osm`) in function bodies (hence
-  `check_function_bodies = off`) and need PostGIS; a migration that still
-  fails stops the setup with its name on the card.
+- The temporary database is tested with a fake docker and a fake Supabase
+  CLI (lifecycle, teardown on failure, ports, queue, janitor), the tunnel
+  with a fake cloudflared. Run for real in day2's build sandbox (Docker
+  29.9, `supabase@2.122.1`): the CLI accepted day2's generated config.toml
+  and `-x` list for Dotty's 28 migrations and got as far as pulling
+  Supabase's images, which that sandbox's network refuses
+  (public.ecr.aws → 403); day2 reported it as "Docker couldn't download
+  Supabase's images", ran `supabase stop --no-backup` and removed the
+  workdir; the janitor's docker label queries ran against the real daemon.
+  So Dotty's migrations have **not** yet been applied to a fresh local
+  stack — they reference a legacy table (`public.places_osm`) in function
+  bodies (hence `check_function_bodies = off`) and need PostGIS (in the
+  local image); a migration that still fails is named on the capture card.
+  First run on the Mac is the real test.
 - The seed-plan model run and the cast model run are tested with fakes; the
   built-in planner is what's verified against Dotty's real schema.
 - Focus boxes come from the art director looking at screenshots; they can

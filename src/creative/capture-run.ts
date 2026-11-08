@@ -13,12 +13,17 @@ import { safeDownload } from "./download";
  * can run, one at a time per app, with a status and a log the console
  * polls.
  *
- *  - local: this Mac's iPhone Simulator (or Android emulator) — the demo
- *    build (the demo backend's public address in its environment), then
- *    the app's Maestro flow with the demo login in Maestro's environment;
- *  - eas: an EAS workflow — a simulator build with the demo profile and
- *    EAS's Maestro job, its screenshots uploaded as an artifact that day2
- *    downloads (SSRF-checked). The artifact download is built from the
+ *  - local: this Mac's iPhone Simulator (or Android emulator) — a
+ *    temporary database for this run (demo-session.ts: Docker, the app's
+ *    migrations, the approved cast), the demo build pointed at it
+ *    (http://127.0.0.1:<port>, or 10.0.2.2 from the Android emulator),
+ *    then the app's Maestro flow with this run's demo login in Maestro's
+ *    environment;
+ *  - eas: an EAS workflow — a simulator build with the demo profile pointed
+ *    at a short-lived tunnel to the temporary database, and EAS's Maestro
+ *    job, its screenshots uploaded as an artifact that day2 downloads
+ *    (SSRF-checked). The login goes in as secret EAS variables for this run
+ *    and is deleted afterwards. The artifact download is built from the
  *    workflow docs and `eas workflow:view --json`, whose artifact shape is
  *    undocumented; when no link comes back day2 says so and the Mac path
  *    stays the way to capture.
@@ -31,8 +36,10 @@ import { safeDownload } from "./download";
 
 export type CaptureMode = "local" | "eas" | "off";
 /** Why a capture failed, for the real-screens pipeline (what to try next). */
-export type CaptureFailure = "off" | "no_flow" | "no_token" | "no_demo" | "artifact" | "device" | "other";
-export type CaptureStatus = { state: "idle" | "running" | "done" | "failed"; mode: CaptureMode | null; reason: CaptureReason | null; startedAt: string | null; finishedAt: string | null; note: string | null; screens: number; log: Array<{ at: string; text: string }>; code?: CaptureFailure | null };
+export type CaptureFailure = "off" | "no_flow" | "no_token" | "no_demo" | "artifact" | "device" | "no_docker" | "no_tunnel" | "migration" | "database" | "other";
+/** The run's temporary database: starting → ready → removed (or failed); `hints` say what to install. */
+export type DatabaseStatus = { state: "starting" | "ready" | "removed" | "failed"; note: string | null; at: string; hints?: string[] };
+export type CaptureStatus = { state: "idle" | "running" | "done" | "failed"; mode: CaptureMode | null; reason: CaptureReason | null; startedAt: string | null; finishedAt: string | null; note: string | null; screens: number; log: Array<{ at: string; text: string }>; code?: CaptureFailure | null; database?: DatabaseStatus | null };
 export type CaptureReason = "button" | "new_version" | "first_how_it_works" | "pipeline" | "fallback_android";
 
 const statusFile = (appId: string) => join(dataDir(), "creative-screens", appId.replace(/[^\w-]/g, "_"), "status.json");
@@ -93,15 +100,33 @@ export function autoCaptureReason(o: { set: CaptureSet | null; version: string |
   return null;
 }
 
+export type DemoValues = { url: string; key: string; login: { email: string; password: string } | null; ai: CaptureSet["aiContent"]; close?: () => Promise<void> };
+
+/** A failure to open the run's database, as a capture failure code (Docker missing, a migration, the tunnel, or something to retry). */
+export function demoFailure(err: unknown): { code: CaptureFailure; hints: string[] } {
+  const e = err as { code?: string; hints?: string[]; name?: string; problems?: string[] };
+  const hints = Array.isArray(e?.hints) ? e.hints : [];
+  if (e?.code === "no_docker" || e?.code === "no_cli") return { code: "no_docker", hints };
+  if (e?.code === "no_tunnel") return { code: "no_tunnel", hints };
+  if (e?.code === "migration" || Array.isArray(e?.problems)) return { code: "migration", hints };
+  return { code: "database", hints };
+}
+
 export type CaptureRunDeps = {
   mode: CaptureMode;
   /** A clean checkout of the app's main branch (and how to drop it). */
   checkout: () => Promise<{ dir: string; done: () => Promise<void> }>;
-  /** The demo backend's public values and the login, or null (no demo backend: the flow must work without). */
-  demo: () => Promise<{ url: string; key: string; login: { email: string; password: string } | null; ai: CaptureSet["aiContent"] } | null>;
+  /**
+   * This run's demo backend for the device that runs the flow (a temporary
+   * database, demo-session.ts): its address and public key, this run's
+   * login, and close() to remove it — or null (no approved cast: the flow
+   * runs against whatever the build points at). Throws a DemoOpenError-like
+   * error ({ code, hints }) when it can't start.
+   */
+  demo: (o: { where: "ios" | "android" | "eas"; dir: string; log: (text: string) => void }) => Promise<DemoValues | null>;
   local?: { target: (p: "ios" | "android") => Promise<Target | { skip: string }>; flow: Parameters<typeof captureMoments>[1]["flow"]; run: (cmd: string[]) => Promise<{ code: number }> };
   eas?: { expoToken: () => Promise<string | null>; run: (cmd: string[], o: { cwd: string; env: Record<string, string>; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>; download?: typeof safeDownload };
-  /** After a capture: e.g. pause the demo project. */
+  /** After a capture (cleanup that isn't the database's). */
   after?: () => Promise<void>;
   now?: () => Date;
 };
@@ -132,16 +157,36 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
   };
   saveStatus(i.appId, status);
   let wd: { dir: string; done: () => Promise<void> } | null = null;
+  let demo: DemoValues | null = null;
+  const setDb = (state: DatabaseStatus["state"], note: string | null, hints?: string[]) => {
+    status.database = { state, note, at: now().toISOString(), ...(hints?.length ? { hints } : {}) };
+    saveStatus(i.appId, status);
+  };
+  /** Opens this run's temporary database for the device (or says why not). */
+  const openDemo = async (where: "ios" | "android" | "eas", dir: string): Promise<DemoValues | null | { failed: CaptureStatus }> => {
+    setDb("starting", "Starting a temporary database with the demo cast…");
+    try {
+      const v = await d.demo({ where, dir, log });
+      if (!v) {
+        status.database = null;
+        log("No approved demo cast: the flow runs against whatever the build points at — use a demo account, never real friends.");
+        return null;
+      }
+      setDb("ready", where === "eas" ? "Ready, reachable by EAS through a short-lived tunnel." : `Ready on this machine (${where === "android" ? "10.0.2.2 from the emulator" : "127.0.0.1"}).`);
+      return v;
+    } catch (err) {
+      const f = demoFailure(err);
+      const msg = (err as Error).message.slice(0, 400);
+      setDb("failed", msg, f.hints);
+      return { failed: finish(false, `${msg}${f.hints.length ? ` ${f.hints.join(" ")}` : ""}`, 0, f.code) };
+    }
+  };
   try {
     if (d.mode === "off") return finish(false, "Captures can't run on this server.", 0, "off");
     log(i.reason === "new_version" ? "The app has a new version — capturing its screens again." : i.reason === "first_how_it_works" ? "Capturing real screens before the first How it works post." : "Capturing screens.");
     wd = await d.checkout();
     const plan = capturePlan({ repoPath: wd.dir, language: i.language, features: i.features });
     if (!plan.flow) return finish(false, "The app has no Maestro flow yet — day2 asked its build agent for one (Real screens ticket). Capture runs once that pull request is merged.", 0, "no_flow");
-    const demo = await d.demo();
-    if (!demo) log("No demo backend: the flow runs against whatever the build points at — use a demo account, never real friends.");
-    const secretEnv: Record<string, string> = demo?.login ? { [LOGIN_ENV.email]: demo.login.email, [LOGIN_ENV.password]: demo.login.password } : {};
-    const buildEnv: Record<string, string> = demo ? { EXPO_PUBLIC_DAY2_DEMO: "1", EXPO_PUBLIC_SUPABASE_URL: demo.url, EXPO_PUBLIC_SUPABASE_KEY: demo.key } : { EXPO_PUBLIC_DAY2_DEMO: "1" };
     let result: { set: CaptureSet | null; note: string; code?: CaptureFailure };
     if (d.mode === "local") {
       if (!d.local) return finish(false, "No simulator runner here.", 0, "device");
@@ -152,8 +197,12 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
       }
       if ("skip" in target) return finish(false, target.skip, 0, "device");
       const t = target;
+      const opened = await openDemo(t.platform === "ios" ? "ios" : "android", wd.dir);
+      if (opened && "failed" in opened) return opened.failed;
+      demo = opened;
+      const secretEnv: Record<string, string> = demo?.login ? { [LOGIN_ENV.email]: demo.login.email, [LOGIN_ENV.password]: demo.login.password } : {};
       log(`${t.device}: building the demo version of the app (this takes a while the first time)…`);
-      const built = await t.build(wd.dir, buildEnv);
+      const built = await t.build(wd.dir, buildEnvOf(demo));
       if ("error" in built) return finish(false, built.error, 0, "device");
       await t.uninstall();
       await t.install(built.app);
@@ -161,6 +210,12 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
       const id = t.platform === "ios" ? i.bundleId! : i.packageName!;
       result = await captureMoments({ appId: i.appId, repoPath: wd.dir, bundleId: id, plan, secretEnv, aiContent: demo?.ai ?? null, mode: "local" }, { device: async () => ({ id: t.id, name: t.device, platform: t.platform, run: d.local!.run }), flow: d.local.flow, now });
     } else {
+      if (!d.eas) return finish(false, "EAS isn't set up here.", 0, "off");
+      if (!(await d.eas.expoToken())) return finish(false, "Connect the app's Expo account (Connect your stores) to capture on EAS.", 0, "no_token");
+      const opened = await openDemo("eas", wd.dir);
+      if (opened && "failed" in opened) return opened.failed;
+      demo = opened;
+      const secretEnv: Record<string, string> = demo?.login ? { [LOGIN_ENV.email]: demo.login.email, [LOGIN_ENV.password]: demo.login.password } : {};
       result = await easCapture({ appId: i.appId, dir: wd.dir, plan, demo, secretEnv, log, now: now() }, d);
     }
     if (!result.set) return finish(false, result.note, 0, result.code ?? "other");
@@ -168,17 +223,38 @@ export async function runCapture(i: CaptureInput, d: CaptureRunDeps): Promise<Ca
   } catch (err) {
     return finish(false, `The capture stopped: ${(err as Error).message.slice(0, 200)}`);
   } finally {
+    if (demo?.close) {
+      await demo.close().catch((err: Error) => log(`Removing the temporary database failed (${err.message.slice(0, 120)}) — day2's janitor removes it within two hours.`));
+      if (status.database?.state === "ready") setDb("removed", "Stopped and deleted after the run (nothing kept but the screenshots).");
+    }
     await wd?.done().catch(() => {});
     await d.after?.().catch(() => {});
     running.delete(i.appId);
   }
 }
 
-async function easCapture(o: { appId: string; dir: string; plan: ReturnType<typeof capturePlan>; demo: Awaited<ReturnType<CaptureRunDeps["demo"]>>; secretEnv: Record<string, string>; log: (t: string) => void; now: Date }, d: CaptureRunDeps): Promise<{ set: CaptureSet | null; note: string; code?: CaptureFailure }> {
+/** Pure. The demo build's environment: the demo flag, and this run's database address and public key. */
+export function buildEnvOf(demo: Pick<DemoValues, "url" | "key"> | null): Record<string, string> {
+  return demo ? { EXPO_PUBLIC_DAY2_DEMO: "1", EXPO_PUBLIC_SUPABASE_URL: demo.url, EXPO_PUBLIC_SUPABASE_KEY: demo.key } : { EXPO_PUBLIC_DAY2_DEMO: "1" };
+}
+
+async function easCapture(o: { appId: string; dir: string; plan: ReturnType<typeof capturePlan>; demo: DemoValues | null; secretEnv: Record<string, string>; log: (t: string) => void; now: Date }, d: CaptureRunDeps): Promise<{ set: CaptureSet | null; note: string; code?: CaptureFailure }> {
   if (!d.eas) return { set: null, note: "EAS isn't set up here.", code: "off" };
   const token = await d.eas.expoToken();
   if (!token) return { set: null, note: "Connect the app's Expo account (Connect your stores) to capture on EAS.", code: "no_token" };
-  if (!o.demo) return { set: null, note: "Set up the demo backend first — an EAS capture always uses it.", code: "no_demo" };
+  if (!o.demo) return { set: null, note: "An EAS capture needs the approved demo cast in a temporary database — approve the cast first.", code: "no_demo" };
+  const eas = d.eas;
+  const created: string[] = [];
+  try {
+    return await easRun(o, d, token, created);
+  } finally {
+    // The run's login doesn't outlive the run on EAS either.
+    for (const name of created) await eas.run(["npx", "--yes", `eas-cli@${EAS_CLI_VERSION}`, "env:delete", "--variable-name", name, "--variable-environment", "preview", "--scope", "project", "--non-interactive"], { cwd: o.dir, env: childEnv(token) }).catch(() => undefined);
+  }
+}
+
+async function easRun(o: { appId: string; dir: string; plan: ReturnType<typeof capturePlan>; demo: DemoValues | null; secretEnv: Record<string, string>; log: (t: string) => void; now: Date }, d: CaptureRunDeps, token: string, created: string[]): Promise<{ set: CaptureSet | null; note: string; code?: CaptureFailure }> {
+  if (!d.eas || !o.demo) return { set: null, note: "EAS isn't set up here.", code: "off" };
   const cli = `eas-cli@${EAS_CLI_VERSION}`;
   const env = childEnv(token);
   const redact = (s: string) => [token, ...Object.values(o.secretEnv)].reduce((t, v) => (v ? t.split(v).join("[hidden]") : t), s);
@@ -188,6 +264,7 @@ async function easCapture(o: { appId: string; dir: string; plan: ReturnType<type
   writeFileSync(join(o.dir, CAPTURE_WORKFLOW), captureWorkflowYaml({ flow: o.plan.flow!, record: o.plan.record }));
   // The login as secret EAS variables of the job's environment — not in the uploaded files.
   for (const [name, value] of Object.entries(o.secretEnv)) {
+    created.push(name);
     const r = await d.eas.run(["npx", "--yes", cli, "env:create", "--name", name, "--value", value, "--environment", "preview", "--visibility", "secret", "--scope", "project", "--force", "--non-interactive"], { cwd: o.dir, env });
     if (r.code !== 0) return { set: null, note: `EAS didn't take the demo login: ${redact(`${r.stderr}\n${r.stdout}`).trim().split("\n").slice(-3).join(" ").slice(0, 300)}` };
   }

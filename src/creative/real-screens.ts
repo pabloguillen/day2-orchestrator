@@ -5,7 +5,10 @@ import type { AppEntry } from "../apps-registry";
 import { dataDir } from "../day2-paths";
 import { androidTarget, iosTarget } from "../device-checks/targets";
 import { has, runCmd } from "../device-checks/run-cmd";
-import { ensureDemoBackend, pauseDemo, resumeDemo, demoSupport, demoView, DemoError, type DemoDeps } from "../hosting/demo";
+import { demoSupport, DemoError, type DemoClient, type DemoDeps } from "../hosting/demo";
+import { ephemeralQueue, requirements, type EphemeralDeps } from "../hosting/ephemeral";
+import { seedPlanView, type Planner } from "../hosting/seed-plan-cache";
+import type { TunnelDeps } from "../hosting/tunnel";
 import { hostingDeps } from "../hosting/runtime";
 import { buildPlanPrompt, PLAN_MARKER } from "../hosting/seed-plan";
 import { bunRunner } from "../mobile-release/eas";
@@ -23,7 +26,8 @@ import { autoCaptureReason, captureMode, captureRunning, loadCaptureStatus, runC
 import { generateCast, fakeCastModel, type CastModel } from "./demo-cast/generate";
 import { addCastImages } from "./demo-cast/images";
 import type { DemoCast } from "./demo-cast/schema";
-import { castAiFlags, loadCast, saveCast } from "./demo-cast/store";
+import { loadCast, saveCast } from "./demo-cast/store";
+import { openDemoSession } from "./demo-session";
 import { DEMO_FLOW_KEY, demoFlowTicket, demoMoments } from "./demo-flow";
 import { creatorKitFor } from "./kit";
 import { loadCreativeState } from "./taste";
@@ -31,13 +35,15 @@ import { loadUploadSet, uploadLocales } from "./upload";
 
 /**
  * Real screens for one app, wired to day2's stores (docs/creative-quality.md):
- * the demo cast (write → pictures → owner approves), the demo backend
- * (hosting/demo.ts), the Maestro flow ticket, captures (capture-run.ts) and
- * the owner's uploads. Long steps run in the background, one per app and
+ * the demo cast (write → pictures → owner approves), the validated seed
+ * plan (hosting/seed-plan-cache.ts), the Maestro flow ticket, captures
+ * (capture-run.ts) against a temporary database per run
+ * (demo-session.ts → hosting/ephemeral.ts) and the owner's uploads. No demo
+ * database outlives a capture. Long steps run in the background, one per app and
  * kind, with a status the console polls.
  */
 
-type JobKind = "cast" | "backend";
+type JobKind = "cast" | "seed_plan";
 export type JobStatus = { state: "idle" | "running" | "done" | "failed"; startedAt: string | null; finishedAt: string | null; note: string | null };
 const jobFile = (appId: string, kind: JobKind) => join(dataDir(), "real-screens", appId.replace(/[^\w-]/g, "_"), `${kind}.json`);
 const jobs = new Map<string, Promise<unknown>>();
@@ -101,8 +107,14 @@ export async function settleRealScreens(appId: string): Promise<void> {
 
 type Hooks = {
   castModel?: CastModel | null;
-  planner?: DemoDeps["planner"];
+  planner?: Planner | null;
+  /** Hosting deps for the one-time removal of an old demo project (fake Supabase in tests). */
   demoDeps?: (app: AppEntry) => DemoDeps;
+  /** The temporary database's runner (fake docker/CLI) and the tunnel's. */
+  ephemeral?: () => EphemeralDeps;
+  tunnel?: () => TunnelDeps;
+  /** The seeding client for a temporary database (fake in tests). */
+  seedClient?: (url: string, key: string) => DemoClient;
   /** A fake capture runner; `android` is the emulator fallback after a failed EAS download. */
   capture?: (app: AppEntry, o?: { android?: boolean }) => CaptureRunDeps;
   noImageKit?: boolean;
@@ -118,7 +130,7 @@ type Hooks = {
   postWaitMs?: number;
 };
 let hooks: Hooks = {};
-/** Tests: fake models, a fake Supabase and fake capture runners. */
+/** Tests: fake models, a fake docker/CLI, fake capture runners. */
 export function setRealScreensTestHooks(h: Hooks): void {
   hooks = h;
 }
@@ -133,48 +145,50 @@ const castModel = (t: Tenant, app: AppEntry): CastModel | null => {
   return async (prompt) => (await paid("content_generation", "Demo cast", 0.4, () => runText(prompt, { service: "content_generation", label: "Demo cast", maxUsd: 0.4 }))).result;
 };
 
+/** Hosting deps (the operator's Supabase organization): only for removing an old demo project from before temporary databases. */
 export function demoDeps(t: Tenant, app: AppEntry): DemoDeps {
   if (hooks.demoDeps) return hooks.demoDeps(app);
+  return hostingDeps(t, app);
+}
+
+/** Writes the seed plan from the schema (a model run, metered), or null in tests without one. */
+export function seedPlanner(t: Tenant, app: AppEntry): Planner | null {
+  if ("planner" in hooks) return hooks.planner ?? null;
   const paid = paidFor(t, app);
-  return {
-    ...hostingDeps(t, app),
-    planner:
-      "planner" in hooks
-        ? hooks.planner
-        : async (schema, problems) => {
-            const text = (await paid("agent_work", "Demo seed plan", 0.5, () => runText(buildPlanPrompt(schema, app.name, problems), { service: "agent_work", label: "Demo seed plan", maxUsd: 0.5 }))).result;
-            return text ? afterMarker(text, PLAN_MARKER) : null;
-          },
+  return async (schema, problems) => {
+    const text = (await paid("agent_work", "Demo seed plan", 0.5, () => runText(buildPlanPrompt(schema, app.name, problems), { service: "agent_work", label: "Demo seed plan", maxUsd: 0.5 }))).result;
+    return text ? afterMarker(text, PLAN_MARKER) : null;
   };
+}
+
+/** The temporary database's dependencies on this machine (docker, the Supabase CLI). */
+export function ephemeralDeps(): EphemeralDeps {
+  if (hooks.ephemeral) return hooks.ephemeral();
+  return { run: async (cmd, o) => {
+    const r = await runCmd(cmd, { cwd: o.cwd, env: o.env, timeoutMs: o.timeoutMs });
+    return { code: r.timedOut ? 124 : r.code, stdout: r.out, stderr: r.timedOut ? `${r.err}\ntimed out` : r.err };
+  }, has };
+}
+export function tunnelDeps(): TunnelDeps {
+  if (hooks.tunnel) return hooks.tunnel();
+  return { has };
 }
 
 export function captureDeps(t: Tenant, app: AppEntry, o: { android?: boolean } = {}): CaptureRunDeps {
   if (hooks.capture) return hooks.capture(app, o);
   const ids = storeIdsFromRepo(app.repoPath);
   const mode = o.android ? "local" : captureMode({ has }).mode;
-  const d = demoDeps(t, app);
   const git = gitWorkdirs(app.id, app.repoPath);
   return {
     mode,
     checkout: async () => git.checkout((await git.head()).sha),
-    demo: async () => {
-      const state = await d.store.state(app.id);
-      const demo = state.demo;
-      if (!demo?.seededAt || !demo.publishableKey) return null;
-      if (demo.pausedAt) {
-        await resumeDemo(app, d);
-        const cast = await loadCast(app.id, assetStore());
-        if (cast) await ensureDemoBackend(app, cast, d);
-      }
-      const login = await d.secrets.get<{ email: string; password: string }>(app.id, "demo_login");
-      return { url: demo.url, key: demo.publishableKey, login, ai: castAiFlags(await loadCast(app.id, assetStore())) };
+    demo: async ({ where, dir, log }) => {
+      const cast = await loadCast(app.id, assetStore());
+      if (!cast || cast.status !== "approved") return null;
+      return openDemoSession({ appId: app.id, dir, cast, where, log }, { ephemeral: ephemeralDeps(), tunnel: tunnelDeps(), ...(hooks.seedClient ? { client: hooks.seedClient } : {}) });
     },
     local: { target: async (p) => (p === "ios" ? (o.android || !ids.bundleId ? { skip: "the Android emulator is used here" } : iosTarget(ids.bundleId, app.name)) : ids.packageName ? androidTarget(ids.packageName) : { skip: "the app has no Android package name" }), flow: runMaestro, run: (cmd) => runCmd(cmd, { timeoutMs: 120_000 }) },
     eas: { expoToken: async () => (await releaseCredentials().get(app.id, "expo"))?.value.token ?? null, run: (cmd, o) => bunRunner(cmd, o) },
-    after: async () => {
-      if (process.env.DAY2_DEMO_PAUSE_AFTER_CAPTURE === "off") return;
-      if ((await d.store.state(app.id)).demo?.seededAt) await pauseDemo(app, d).catch(() => undefined);
-    },
   };
 }
 
@@ -235,9 +249,9 @@ export function startCapture(t: Tenant, app: AppEntry, reason: CaptureReason): b
 
 /**
  * Before a post: real screens should be there. For an app the real-screens
- * pipeline can serve (real-screens-auto.ts: a Supabase app with migrations
- * and day2's Supabase organization), this kicks `ensureRealScreens` — cast,
- * approval, demo backend, flow, capture — and before the first How it works
+ * pipeline can serve (real-screens-auto.ts: a Supabase app with migrations),
+ * this kicks `ensureRealScreens` — cast, approval, seed plan, flow, capture
+ * with a temporary database — and before the first How it works
  * post waits for it (at most DAY2_REAL_SCREENS_WAIT_MINUTES, default 45).
  * Otherwise the old path: a capture on its own for a new version or the
  * first How it works post when a flow exists. Never blocks a post for
@@ -281,14 +295,22 @@ export async function maybeAutoCapture(t: Tenant, app: AppEntry, o: { making: "h
 
 const mediaUrl = (appId: string, assetId: string | null | undefined) => (assetId ? `/api/apps/${encodeURIComponent(appId)}/creative/demo-cast/images/${encodeURIComponent(assetId)}` : null);
 
+let reqCache: { at: number; eas: boolean; value: Awaited<ReturnType<typeof requirements>> } | null = null;
+/** Docker/CLI/cloudflared on this machine, checked at most once a minute (the console polls). */
+async function cachedRequirements(eas: boolean) {
+  if (reqCache && reqCache.eas === eas && Date.now() - reqCache.at < 60_000) return reqCache.value;
+  const value = await requirements(ephemeralDeps(), { eas }).catch(() => []);
+  reqCache = { at: Date.now(), eas, value };
+  return value;
+}
+
 export async function realScreensView(t: Tenant, app: AppEntry) {
   const profile = profileOf(app);
   const language = languageOf(app, profile);
   const locale = localeFor(language);
   const cast = await loadCast(app.id, assetStore()).catch(() => null);
-  const hosting = demoDeps(t, app);
-  const state = await hosting.store.state(app.id).catch(() => null);
   const mode = hooks.capture ? { mode: hooks.capture(app).mode, why: null, maestro: true } : captureMode({ has });
+  const reqs = await cachedRequirements(mode.mode === "eas");
   const set: CaptureSet | null = loadCaptureSet(app.id, locale);
   const tickets = await ticketsOf(app);
   const flowTicket = tickets.find((x) => x.source.key === DEMO_FLOW_KEY);
@@ -300,6 +322,9 @@ export async function realScreensView(t: Tenant, app: AppEntry) {
       why: mode.why,
       maestro: mode.maestro,
       installHint: 'curl -fsSL "https://get.maestro.mobile.dev" | bash',
+      /** What captures need on this machine: Docker and the Supabase CLI (temporary databases), cloudflared for EAS. */
+      requirements: reqs,
+      database: { ...(loadCaptureStatus(app.id).database ?? { state: null, note: null, at: null }), queue: ephemeralQueue() },
       last: set ? { capturedAt: set.capturedAt, version: set.version, screens: set.screens.length, device: set.device, aiContent: set.aiContent ?? null } : null,
     },
     uploads: uploadLocales(app.id).map((l) => {
@@ -310,7 +335,7 @@ export async function realScreensView(t: Tenant, app: AppEntry) {
     demo: {
       support: demoSupport(app.repoPath),
       castJob: jobStatus(app.id, "cast"),
-      backendJob: jobStatus(app.id, "backend"),
+      seedPlanJob: jobStatus(app.id, "seed_plan"),
       cast: cast
         ? {
             status: cast.status,
@@ -327,7 +352,7 @@ export async function realScreensView(t: Tenant, app: AppEntry) {
             leaderboard: cast.leaderboard.slice(0, 5),
           }
         : null,
-      backend: demoView(state?.demo),
+      seedPlan: seedPlanView(app.id, app.repoPath),
       flowTicket: flowTicket ? { id: flowTicket.id, state: flowTicket.state } : null,
       moments: demoMoments(profile?.featureMap ?? [], []),
     },

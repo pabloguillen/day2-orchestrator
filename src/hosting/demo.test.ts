@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeCastDraft } from "../creative/demo-cast/generate";
 import { CAST_VERSION, type DemoCast } from "../creative/demo-cast/schema";
-import { assertDemoTarget, deleteDemoBackend, demoClient, demoPreamble, demoSupport, demoView, ensureDemoBackend, isLimitError, markMigrationsChanged, migrationsFingerprint, pauseDemo, productionRefs, type DemoClient, type DemoDeps } from "./demo";
+import { assertDemoTarget, deleteDemoBackend, demoClient, demoSupport, productionRefs, retireLegacyDemo } from "./demo";
+import { migrationPreamble } from "./ephemeral";
 import { readMigrations } from "./migrations";
 import { introspectMigrations, parseColumn, statements } from "./schema-introspect";
 import { expandSeedPlan, heuristicSeedPlan, validateSeedPlan } from "./seed-plan";
@@ -13,11 +14,11 @@ import { makeKit } from "./test-kit";
 import { emptyState } from "./types";
 
 /**
- * The demo backend (hosting/demo.ts) and its seed plan, against Dotty's
- * real migrations (fixtures/dotty-migrations, copied from the test app):
- * the schema read from the migrations, the plan checked against it, the
- * guard that refuses anything but the demo project day2 created, and the
- * whole setup against a fake Supabase and a fake demo project.
+ * Demo data (hosting/demo.ts) and its seed plan, against Dotty's real
+ * migrations (fixtures/dotty-migrations, copied from the test app): the
+ * schema read from the migrations, the plan checked against it, the client
+ * a temporary database is seeded through, and the one-time removal of an
+ * old standing demo project through the guard (fake Supabase).
  */
 
 const FIX = join(import.meta.dir, "fixtures", "dotty-migrations");
@@ -52,47 +53,15 @@ function cast(seed = 7, status: DemoCast["status"] = "approved"): DemoCast {
   return { version: CAST_VERSION, appId: "app_h", language: "de", locale: "de-DE", createdAt: "2026-11-08T10:00:00Z", generator: "fake", seed, status, approvedAt: null, approvedBy: null, images: { source: "generated", note: "" }, ...d, people: d.people.map((p) => ({ ...p, avatar: img(pic) })), moments: d.moments.map((m) => ({ ...m, photo: img(pic) })) };
 }
 
-type Call = { op: string; args: unknown[] };
-function fakeDemo(): { client: DemoClient; calls: Call[]; keys: string[] } {
-  const calls: Call[] = [];
-  const keys: string[] = [];
-  const users = new Map<string, string>();
-  let n = 0;
-  return {
-    calls,
-    keys,
-    client: {
-      async createUser(o) {
-        calls.push({ op: "createUser", args: [o.email] });
-        const id = `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
-        users.set(o.email, id);
-        return { id };
-      },
-      async findUser(email) {
-        return users.has(email) ? { id: users.get(email)! } : null;
-      },
-      async deleteUser(id) {
-        calls.push({ op: "deleteUser", args: [id] });
-        for (const [e, v] of users) if (v === id) users.delete(e);
-      },
-      async insert(table, rows) {
-        calls.push({ op: "insert", args: [table, rows.length, rows] });
-      },
-      async remove(table, column, values) {
-        calls.push({ op: "remove", args: [table, column, values.length] });
-      },
-      async upload(bucket, path) {
-        calls.push({ op: "upload", args: [bucket, path] });
-      },
-    },
-  };
-}
-
-function demoKit(o: Parameters<typeof makeKit>[0] = {}) {
-  const k = makeKit({ repo: dottyRepo(), ...o });
-  const demo = fakeDemo();
-  const deps: DemoDeps = { ...k.deps, demoClient: (_url, key) => (demo.keys.push(key), demo.client), planner: null };
-  return { ...k, demo, deps };
+/** An old-design demo project: created on the fake Supabase and recorded in the app's hosting state, as ensureDemoBackend used to. */
+async function legacyDemo(k: ReturnType<typeof makeKit>) {
+  const name = "habit-loop-apph-demo";
+  const p = await k.fake.api("x").createProject({ name, organization_slug: "day2-apps", db_pass: "x", region: "eu-central-1" });
+  await k.deps.secrets.set(k.app.id, "demo_login", { email: "demo-x@example.com", password: ["old", "pass", "word"].join("-") }, "Demo account (screens)");
+  await k.deps.store.update(k.app.id, (s) => {
+    s.demo = { createdBy: "day2-demo", ref: p.ref, name, orgSlug: "day2-apps", region: "eu-central-1", url: `https://${p.ref}.supabase.co`, publishableKey: null, createdAt: "2026-11-01T00:00:00Z", status: "ACTIVE_HEALTHY", done: ["project"], working: null, migrations: { applied: 28, total: 28, failed: null }, plan: null, seededAt: null, castSeed: null, rows: 0, uploads: 0, seeded: { users: [], rows: [] }, pausedAt: null, problem: null, log: [] };
+  });
+  return p.ref;
 }
 
 describe("the schema, read from Dotty's migrations", () => {
@@ -163,8 +132,8 @@ describe("the schema, read from Dotty's migrations", () => {
     expect(expandSeedPlan(plan!, c, ids, schema, new Date()).inserts.find((i) => i.table === "dotty.moments")!.rows[0]!.id).toBe(moments[0]!.id);
   });
 
-  test("the demo preamble turns off function body checks and adds PostGIS when public.geography is used without it", () => {
-    const pre = demoPreamble(readdirSync(FIX).map((f) => ({ version: "1", name: f, file: f, sql: readFileSync(join(FIX, f), "utf-8") })));
+  test("the migration preamble turns off function body checks and adds PostGIS when public.geography is used without it", () => {
+    const pre = migrationPreamble(readdirSync(FIX).map((f) => ({ version: "1", name: f, file: f, sql: readFileSync(join(FIX, f), "utf-8") })));
     expect(pre).toContain("SET check_function_bodies = off;");
     expect(pre).toContain("CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public;");
   });
@@ -201,129 +170,53 @@ describe("the guard: day2 never seeds anything but its own demo project", () => 
   });
 });
 
-describe("ensureDemoBackend", () => {
-  test("creates a separate demo project in day2's organization, applies the migrations, exposes the app schema, creates users and seeds the approved cast", async () => {
-    const k = demoKit();
-    const c = cast();
-    const d = await ensureDemoBackend(k.app, c, k.deps);
-    expect(d.name).toBe("habit-loop-apph-demo");
-    expect(d.ref).not.toBe(LIVE_REF);
-    const create = k.fake.calls.find((x) => x.op === "createProject")!;
-    expect(create.args[0]).toMatchObject({ name: "habit-loop-apph-demo", organization_slug: "day2-apps", db_pass: "[set]" });
-    expect(k.fake.calls.find((x) => x.op === "updateAuthConfig")!.args[1]).toEqual(["disable_signup", "mailer_autoconfirm"]);
-    expect(k.fake.postgrest.get(d.ref)).toContain("dotty");
-    const migs = k.fake.sql.filter((x) => x.ref === d.ref && x.query.includes("INSERT INTO supabase_migrations.schema_migrations"));
-    expect(migs).toHaveLength(readdirSync(FIX).length);
-    expect(migs[0]!.query.startsWith("SET check_function_bodies = off;")).toBe(true);
-    // Users: one per person; the demo login is stored encrypted.
-    expect(k.demo.calls.filter((x) => x.op === "createUser")).toHaveLength(c.people.length);
-    const login = await k.deps.secrets.get<{ email: string; password: string }>(k.app.id, "demo_login");
-    expect(login!.email).toMatch(/^demo-.*@example\.com$/);
-    expect(login!.password.length).toBeGreaterThan(20);
-    // Rows go to the demo project with the demo project's own secret key.
-    expect(k.demo.keys.every((x) => x === `sb_secret_${d.ref}_TOPSECRET`)).toBe(true);
-    expect(k.demo.calls.filter((x) => x.op === "insert").map((x) => x.args[0])).toEqual(["dotty.profiles", "dotty.friendships", "dotty.places", "dotty.moments", "dotty.reactions", "dotty.comments"]);
-    expect(k.demo.calls.filter((x) => x.op === "upload")).toHaveLength(c.people.length + c.moments.length);
-    expect(d.seededAt).not.toBeNull();
-    // Nothing secret in the state the console reads.
-    const view = JSON.stringify(demoView((await k.deps.store.state(k.app.id)).demo));
-    expect(view).not.toContain("TOPSECRET");
-    expect(view).not.toContain(login!.password);
-    expect(JSON.stringify(await k.deps.store.state(k.app.id))).not.toContain(login!.password);
-    // Calling again does nothing new.
-    const before = k.demo.calls.length;
-    await ensureDemoBackend(k.app, c, k.deps);
-    expect(k.demo.calls.length).toBe(before);
-  });
-
-  test("a new cast replaces the old demo rows and users", async () => {
-    const k = demoKit();
-    await ensureDemoBackend(k.app, cast(7), k.deps);
-    await ensureDemoBackend(k.app, cast(8), k.deps);
-    expect(k.demo.calls.filter((x) => x.op === "remove").length).toBeGreaterThan(0);
-    expect(k.demo.calls.filter((x) => x.op === "deleteUser").length).toBeGreaterThanOrEqual(8);
-    expect((await k.deps.store.state(k.app.id)).demo!.castSeed).toBe(8);
-  });
-
-  test("refuses a cast that isn't approved, an unsupported app, and stops before writing when the project was renamed on Supabase", async () => {
-    const k = demoKit();
-    await expect(ensureDemoBackend(k.app, cast(7, "draft"), k.deps)).rejects.toThrow(/Approve the demo cast/);
-    const fb = mkdtempSync(join(tmpdir(), "day2-fb-"));
-    writeFileSync(join(fb, "package.json"), "{}");
-    await expect(ensureDemoBackend({ ...k.app, repoPath: fb }, cast(), k.deps)).rejects.toThrow(/Demo backends work for Supabase apps/);
-    await ensureDemoBackend(k.app, cast(), k.deps);
-    const ref = (await k.deps.store.state(k.app.id)).demo!.ref;
-    k.fake.projects.get(ref)!.name = "someone-elses-project";
-    await expect(ensureDemoBackend(k.app, cast(9), k.deps)).rejects.toThrow(/name or organization changed/);
-  });
-
-  test("a full Free organization: a clear message, no project created", async () => {
-    const k = demoKit({ fake: { orgPlan: "free" } });
-    k.fake.projects.set("a", { ref: "a", name: "x", region: "eu-central-1", org: "day2-apps", polls: 9, status: "ACTIVE_HEALTHY", paused: false });
-    k.fake.projects.set("b", { ref: "b", name: "y", region: "eu-central-1", org: "day2-apps", polls: 9, status: "ACTIVE_HEALTHY", paused: false });
-    await expect(ensureDemoBackend(k.app, cast(), k.deps)).rejects.toThrow(/Free plan allows 2 active projects.*Pause or delete a project/);
-    expect(k.fake.calls.some((x) => x.op === "createProject")).toBe(false);
-    const k2 = demoKit({ fake: { createFails: { status: 400, message: "The maximum limit of free projects has been reached" } } });
-    await expect(ensureDemoBackend(k2.app, cast(), k2.deps)).rejects.toMatchObject({ code: "limit" });
-  });
-
-  test("without day2's Supabase organization it says what's missing", async () => {
-    const k = demoKit({ operator: null });
-    await expect(ensureDemoBackend(k.app, cast(), k.deps)).rejects.toThrow(/SUPABASE_ACCESS_TOKEN/);
-  });
-
-  test("changed migrations: only the new one is applied (the paused project woken first by the caller); a failing one says which", async () => {
-    const k = demoKit();
-    const fp = migrationsFingerprint(k.app.repoPath);
-    await ensureDemoBackend(k.app, cast(), k.deps);
-    expect(await markMigrationsChanged(k.app, k.deps)).toBe(true);
-    writeFileSync(join(k.app.repoPath, "supabase/migrations/29990101000000_badges.sql"), "create table dotty.badges (id uuid primary key);\n");
-    expect(migrationsFingerprint(k.app.repoPath)).not.toBe(fp);
-    const before = k.fake.sql.filter((x) => x.query.includes("INSERT INTO supabase_migrations.schema_migrations")).length;
-    const d = await ensureDemoBackend(k.app, cast(), k.deps);
-    expect(k.fake.sql.filter((x) => x.query.includes("INSERT INTO supabase_migrations.schema_migrations")).length).toBe(before + 1);
-    expect(d.migrations).toMatchObject({ applied: readdirSync(FIX).length + 1, failed: null });
-    const k2 = demoKit({ fake: { failSql: /boom_table/ } });
-    await ensureDemoBackend(k2.app, cast(), k2.deps);
-    writeFileSync(join(k2.app.repoPath, "supabase/migrations/29990102000000_boom.sql"), "create table dotty.boom_table (id uuid);\n");
-    await markMigrationsChanged(k2.app, k2.deps);
-    await expect(ensureDemoBackend(k2.app, cast(), k2.deps)).rejects.toMatchObject({ code: "migration" });
-    expect((await k2.deps.store.state(k2.app.id)).demo!.migrations.failed).toMatchObject({ file: "29990102000000_boom.sql" });
-  });
-
-  test("deleting the demo project: only day2's own (guard + Supabase asked first); the demo secrets go; already gone is fine", async () => {
-    const k = demoKit();
-    expect(await deleteDemoBackend(k.app, k.deps)).toEqual({ deleted: null });
-    await ensureDemoBackend(k.app, cast(), k.deps);
-    const ref = (await k.deps.store.state(k.app.id)).demo!.ref;
-    k.fake.projects.get(ref)!.name = "someone-elses-project";
-    await expect(deleteDemoBackend(k.app, k.deps)).rejects.toThrow(/name or organization changed/);
-    expect(k.fake.calls.some((x) => x.op === "deleteProject")).toBe(false);
-    k.fake.projects.get(ref)!.name = (await k.deps.store.state(k.app.id)).demo!.name;
-    expect(await deleteDemoBackend(k.app, k.deps)).toEqual({ deleted: ref });
+describe("the one-time removal of an old standing demo project", () => {
+  test("no record: nothing to do; a recorded day2 demo project is deleted through the guard, the record and old secrets dropped", async () => {
+    const k = makeKit({ repo: dottyRepo() });
+    expect(await retireLegacyDemo(k.app, k.deps)).toEqual({ state: "none", note: null });
+    const ref = await legacyDemo(k);
+    const r = await retireLegacyDemo(k.app, k.deps);
+    expect(r.state).toBe("deleted");
+    expect(r.note).toContain("temporary database");
+    expect(k.fake.calls.filter((x) => x.op === "deleteProject")).toHaveLength(1);
     expect(k.fake.projects.has(ref)).toBe(false);
-    expect(await k.deps.secrets.get(k.app.id, "secret_key:demo")).toBeNull();
-    expect(await k.deps.secrets.get(k.app.id, "demo_login")).toBeNull();
     expect((await k.deps.store.state(k.app.id)).demo).toBeNull();
-    // Gone on Supabase already: the record is dropped all the same.
-    const k2 = demoKit();
-    await ensureDemoBackend(k2.app, cast(), k2.deps);
-    k2.fake.projects.clear();
-    expect((await deleteDemoBackend(k2.app, k2.deps)).deleted).toBeTruthy();
-    expect(isLimitError(new Error("The maximum limit of free projects has been reached"))).toBe(true);
-    expect(isLimitError(new Error("syntax error"))).toBe(false);
+    expect(await k.deps.secrets.get(k.app.id, "demo_login")).toBeNull();
+    expect(await retireLegacyDemo(k.app, k.deps)).toEqual({ state: "none", note: null });
   });
 
-  test("pausing after a capture goes through the guard too", async () => {
-    const k = demoKit();
-    await ensureDemoBackend(k.app, cast(), k.deps);
-    await pauseDemo(k.app, k.deps);
-    expect(k.fake.calls.some((x) => x.op === "pause")).toBe(true);
-    expect(demoView((await k.deps.store.state(k.app.id)).demo)!.state).toBe("paused");
+  test("the guard still decides: renamed on Supabase → not deleted, only forgotten; without the organization configured → kept with a note", async () => {
+    const k = makeKit({ repo: dottyRepo() });
+    const ref = await legacyDemo(k);
+    k.fake.projects.get(ref)!.name = "someone-elses-project";
+    const r = await retireLegacyDemo(k.app, k.deps);
+    expect(r.state).toBe("forgotten");
+    expect(k.fake.calls.some((x) => x.op === "deleteProject")).toBe(false);
+    expect(k.fake.projects.has(ref)).toBe(true);
+    expect((await k.deps.store.state(k.app.id)).demo).toBeNull();
+    const k2 = makeKit({ repo: dottyRepo(), operator: null });
+    await legacyDemo(k2);
+    const r2 = await retireLegacyDemo(k2.app, k2.deps);
+    expect(r2).toMatchObject({ state: "kept", note: expect.stringContaining("SUPABASE_ACCESS_TOKEN") });
+    expect((await k2.deps.store.state(k2.app.id)).demo).toBeTruthy();
+  });
+
+  test("deleteDemoBackend: already gone on Supabase counts as deleted; Supabase down keeps the record for the next try", async () => {
+    const k = makeKit({ repo: dottyRepo() });
+    expect(await deleteDemoBackend(k.app, k.deps)).toEqual({ deleted: null });
+    await legacyDemo(k);
+    k.fake.projects.clear();
+    expect((await deleteDemoBackend(k.app, k.deps)).deleted).toBeTruthy();
+    const k2 = makeKit({ repo: dottyRepo() });
+    await legacyDemo(k2);
+    const real = k2.deps.api;
+    k2.deps.api = (tok) => ({ ...real(tok), deleteProject: async () => Promise.reject(new Error("Supabase DELETE: 503 unavailable")) });
+    expect(await retireLegacyDemo(k2.app, k2.deps)).toMatchObject({ state: "kept", note: expect.stringContaining("503") });
+    expect((await k2.deps.store.state(k2.app.id)).demo).toBeTruthy();
   });
 });
 
-describe("the demo project's client", () => {
+describe("the demo database's client", () => {
   test("REST inserts as JSON with the app schema's profile header, storage uploads, and the key never in an error", async () => {
     const seen: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
     const key = ["sb", "secret", "demokey123456"].join("_");

@@ -194,14 +194,14 @@ export type HostingState = {
   takeover: { state: "none" | "ready" | "moved" | "failed"; orgSlug: string | null; at: string | null; by: string | null; error: string | null; warnings: string[] };
   problem: { text: string; at: string } | null;
   log: HostingLog[];
-  /** The app's separate demo project for marketing screens (hosting/demo.ts) — never the live database. */
+  /** Old design only: a standing demo project day2 created; removed once by retireLegacyDemo (hosting/demo.ts). New captures use a temporary database. */
   demo?: DemoBackend | null;
 };
 
 export const DEMO_STEPS = ["project", "healthy", "keys", "auth_config", "schemas", "migrations", "plan", "users", "rows", "uploads"] as const;
 export type DemoStep = (typeof DEMO_STEPS)[number];
 
-/** What day2 created and filled (nothing secret: keys and the demo login are in the encrypted secrets). */
+/** Old design: the standing demo project day2 created and filled — kept only so the one-time migration can delete it through the guard. */
 export type DemoBackend = {
   /** Who created it — only a project day2 created as a demo is ever seeded. */
   createdBy: "day2-demo";

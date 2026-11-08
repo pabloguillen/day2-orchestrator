@@ -396,22 +396,60 @@ step 7.
 Done: day2 connects to the "gora8" organization. It's on the Free plan, which
 is fine until go-live.
 
-Demo backends for real screens (creative-quality.md §2b) are created in the
-same organization (`<app>-<id>-demo`) — by day2 itself, for every app with
-growth on (the automatic pipeline: cast → approval → demo backend → flow PR
-→ capture). The Free plan allows **2 active projects**: with the hosting
-projects that's quickly full — the pipeline's "Demo backend" step then
-needs attention ("no room for another project") on Growth → Formats,
-creates nothing, and tries again once a day. On the Free plan day2 pauses a
-demo project after each capture (`DAY2_DEMO_PAUSE_AFTER_CAPTURE=off` keeps
-it running); paused projects don't count against the 2. **On a paid plan
-Supabase can't pause projects** — demo projects keep running and are billed
-compute (see go-live-checklist.md).
+Real screens (creative-quality.md §2b) need **no Supabase project and no
+Supabase access token**: there's no demo database between captures. For
+each capture day2 starts a **temporary database** on the machine that runs
+the capture (the Supabase CLI's local stack in Docker), with the app's
+migrations and the approved demo cast, and deletes it right after the run
+(`supabase stop --no-backup`). day2 keeps only the cast, its pictures and
+the checked seed plan. Demo projects from the earlier design (`<app>-<id>-demo`
+in this organization) are deleted once by day2 itself through its guard,
+while `SUPABASE_ACCESS_TOKEN` / `DAY2_SUPABASE_ORG_ID` are still set — or
+delete them by hand on supabase.com.
 
-Demo projects are deleted when an app is removed, or after its growth has
-been off for 30 days. Switches: `DAY2_REAL_SCREENS=off` stops the automatic
-pipeline (buttons still work), `DAY2_REAL_SCREENS_WAIT_MINUTES` (default 45)
-is how long the first How it works post waits for real screens.
+Switches: `DAY2_REAL_SCREENS=off` stops the automatic pipeline (buttons
+still work), `DAY2_REAL_SCREENS_WAIT_MINUTES` (default 45) is how long the
+first How it works post waits for real screens, `DAY2_EPHEMERAL_MAX`
+(default 2) how many temporary databases may run at once on this machine
+(more wait in line), `DAY2_EPHEMERAL_PORT_BASE` (default 55400) where their
+port blocks start (10 ports each), `DAY2_SUPABASE_CLI` a Supabase CLI binary
+to use instead of the pinned `npx supabase@2.122.1`.
+
+## 5a. Docker and the Supabase CLI (temporary capture databases)
+
+Needed wherever captures run — your Mac, and the server.
+
+**On the Mac**
+
+1. **Docker Desktop**: download from docker.com/products/docker-desktop,
+   install, open it once and leave it running (menu bar whale). Check in
+   Terminal: `docker info` prints a "Server" section. Give it at least 4 GB
+   of memory (Settings → Resources) — a stack without Studio and the other
+   extras needs about 2 GB.
+2. **Supabase CLI**: nothing to install if Node.js is there (day2 runs the
+   pinned `npx --yes supabase@2.122.1`; the first run downloads it). Without
+   Node: `brew install supabase/tap/supabase`.
+3. The first capture downloads Supabase's Docker images (about 2 GB, a few
+   minutes); later ones start in about a minute.
+4. **cloudflared** only if this Mac captures on EAS: `brew install cloudflared`.
+
+**On the server (Linux)**
+
+1. Docker Engine (deploy-hetzner.md already installs it) — the day2
+   container needs to reach the host's Docker: mount `/var/run/docker.sock`
+   into it, or run day2 on the host. The temporary databases publish their
+   ports on the host (55400–55799 by default); keep those closed in the
+   firewall — only `cloudflared` reaches the API port, from inside.
+2. Node.js (for `npx supabase@2.122.1`) or the `supabase` binary on PATH.
+3. **cloudflared** (pkg.cloudflare.com): EAS's cloud simulator reaches the
+   temporary database through a short-lived quick tunnel
+   (`cloudflared tunnel --url http://127.0.0.1:<port>`, no account, a random
+   `*.trycloudflare.com` name, closed after the run). It carries only the
+   demo data of that run.
+
+day2 removes stacks a crash left behind (`day2cap-…` projects older than two
+hours) when it starts and on every backlog tick. By hand:
+`docker ps -a --filter label=com.supabase.cli.project` lists them.
 
 ## 5b. Capturing real screens on your Mac (Xcode, Maestro, EAS)
 

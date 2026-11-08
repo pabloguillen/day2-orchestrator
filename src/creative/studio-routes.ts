@@ -137,7 +137,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
 
   route("GET", "/api/apps/:id/creative", async (_req, p, t) => h.json(await creativeView(await h.requireApp(t, p.id!), t)));
 
-  // ---- Real screens (docs/creative-quality.md): demo cast, demo backend, captures, uploads ----
+  // ---- Real screens (docs/creative-quality.md): demo cast, seed plan, captures with a temporary database, uploads ----
 
   /** Write a (new) demo cast with pictures (Regenerate) — the pipeline runs on in the background. */
   route("POST", "/api/apps/:id/creative/demo-cast", async (_req, p, t) => {
@@ -147,7 +147,7 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     return h.json(await creativeView(app, t), { status: 202 });
   });
 
-  /** The owner approves the cast; only an approved cast goes into the demo backend. Then the pipeline carries on. */
+  /** The owner approves the cast; only an approved cast is seeded into a capture's temporary database. Then the pipeline carries on. */
   route("POST", "/api/apps/:id/creative/demo-cast/approve", async (_req, p, t) => {
     const app = await h.requireApp(t, p.id!);
     h.requireManager(t);
@@ -199,14 +199,6 @@ export function registerCreativeRoutes(route: (method: string, pathname: string,
     const a = await assetStore().get(p.asset ?? "").catch(() => null);
     if (!a || a.appId !== app.id || a.purpose !== CAST_PURPOSE || !existsSync(a.path)) throw fail(404, "Not found.");
     return h.serveFile(req, a.path, a.mime, "private, max-age=600");
-  });
-
-  /** Create (once) and fill the separate demo backend, then ask for the flow — in the background. */
-  route("POST", "/api/apps/:id/creative/demo-backend", async (_req, p, t) => {
-    const app = await h.requireApp(t, p.id!);
-    h.requireManager(t);
-    void retryRealScreens(t, app, "backend");
-    return h.json(await creativeView(app, t), { status: 202 });
   });
 
   /** Capture screens now (on this Mac's simulator or on EAS) — in the background. */

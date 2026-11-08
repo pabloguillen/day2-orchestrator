@@ -235,7 +235,7 @@ import { autopilotAll } from "./growth-autopilot-run";
 import { messagesRoutes } from "./messages/routes";
 import { hostingRoutes } from "./hosting/routes";
 import { hostingAll, hostingStore } from "./hosting/runtime";
-import { realScreensAll } from "./creative/real-screens-auto";
+import { ephemeralJanitor, realScreensAll } from "./creative/real-screens-auto";
 import { hostingPrivacy } from "./hosting/privacy";
 import { ingestPushTokens } from "./messages/runtime";
 import { simulateAll } from "./simulation-run";
@@ -613,7 +613,7 @@ route("PATCH", "/api/apps/:id", async (req, params, t) => {
 route("DELETE", "/api/apps/:id", async (_req, params, t) => {
   requireManager(t);
   const app = await t.apps.find(params.id!);
-  // Its demo backend (day2's Supabase organization) and demo cast go first (creative/real-screens-auto.ts).
+  // Its demo cast, captures and seed plan go first (and an old demo project, if one is left) (creative/real-screens-auto.ts).
   if (app) {
     const { cleanupRealScreens } = await import("./creative/real-screens-auto");
     await Promise.race([cleanupRealScreens(t, app, "removed"), Bun.sleep(30_000)]).catch((err: Error) => console.error(`[day2-real-screens] ${app.name}: cleanup failed: ${err.message}`));
@@ -3335,6 +3335,8 @@ function startInboxDrain(): void {
  * advisory lock lets only one of them run each pass.
  */
 function startBacklogTimer(): void {
+  // On startup: temporary capture databases a crash or restart left behind (older than two hours).
+  void ephemeralJanitor();
   const minutes = Number(process.env.DAY2_BACKLOG_TICK_MINUTES ?? 15);
   if (!(minutes > 0)) return;
   let running = false;
@@ -3343,6 +3345,8 @@ function startBacklogTimer(): void {
     if (running) return;
     running = true;
     try {
+      // Temporary capture databases a crash left on this machine (each server its own Docker).
+      await ephemeralJanitor();
       // Abandoned Google sign-ins (Connect your stores): deleted and revoked after an hour.
       await purgeGoogleSessions().catch((err: Error) => console.error("[day2-connect] purge failed:", err.message));
       // Field reports past their keep-time go, once a day.

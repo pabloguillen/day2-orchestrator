@@ -22,7 +22,7 @@ None of these is done. The details are in the sections below.
       anonymous learning across apps starts over (section 6).
 - [ ] **Supabase Pro.** day2's "gora8" organization exists on the Free plan
       (tested 2026-11-05); upgrade it before hosting real apps (section 6,
-      Hosting).
+      Hosting). Demo screens don't need it any more (temporary databases).
 - [ ] **Supabase's data processing agreement (DPA)** signed, and Supabase
       listed as a subprocessor (end of section 8).
 - [ ] **An email sender for apps** (`DAY2_HOSTING_SMTP_URL`,
@@ -211,26 +211,25 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       metered as content generation like the writer.
 - [ ] First real post with captures: with growth on for Dotty, day2 runs
       the real-screens pipeline by itself (Growth → Formats → Real screens:
-      cast → approval → demo backend → flow PR → capture). Check each step
+      cast → approval → seed plan → flow PR → capture with a temporary
+      database). Check each step
       gets to Done; merge the "Real screens" ticket's pull request in
       Approvals (day2 never merges it itself); posts then use German
       captures instead of the App Store screenshots.
-- [ ] **day2's Supabase organization (`DAY2_SUPABASE_ORG_ID`) needs a paid
-      plan for production.** Free allows 2 active projects in total (hosting
-      + demo projects) — the third app's demo backend needs attention ("no
-      room for another project"). Pro: $25/month per organization, which
-      includes $10 of compute credits; every project is billed compute
-      hourly, and **projects on a paid plan can't be paused**, so each demo
-      project runs all the time: Micro ≈ $0.01344/h ≈ $10/month per app
-      (the default size, `DAY2_HOSTING_INSTANCE_SIZE=micro`). Estimate: $25 + ~$10 × (demo
-      projects + hosted projects) − $10 credits per month; e.g. 10 apps with
-      growth on ≈ $115/month for the demo projects. Check the current prices
-      on supabase.com/pricing, and decide whether that cost is in the plan
-      price or charged (today the pipeline only checks the account's
-      credits before each step; nothing charges for demo compute).
-- [ ] Cleanup works: remove a test app → its `-demo` project disappears
-      from the organization (or is retried by the timer); growth off for 30
-      days deletes it too.
+- [ ] **Docker on the server for captures.** Real screens start a temporary
+      database per capture (Supabase CLI local stack, Docker) and delete it
+      afterwards — no Supabase project or plan is needed for demos. The day2
+      container reaches the host's Docker (socket mounted) and Node.js or the
+      `supabase` binary is there (operator-setup.md §5a); first run pulls ~2 GB
+      of images. Capacity: ~2 GB RAM per running stack, `DAY2_EPHEMERAL_MAX`
+      (default 2) at a time.
+- [ ] **cloudflared on the server** (EAS captures): a quick tunnel per run
+      to the temporary database's API port, closed after it. Firewall: the
+      stack ports (55400–55799) stay closed to the outside.
+- [ ] Old demo projects gone: if `<app>-<id>-demo` projects from the earlier
+      design exist in the "gora8" organization, day2 deletes them once
+      (through its guard) while the Supabase token is set; check the
+      organization is empty of `-demo` projects afterwards.
 - [ ] Demo cast approval: the default is automatic when the cast passes
       day2's checks (schema, every picture, and a vision check of AI-made
       pictures: no text/logos, adults only). Look at the first few
@@ -240,7 +239,9 @@ The details are in [deploying.md](deploying.md) and each module's own doc.
       Dotty and confirm (a) `environment: preview` on the maestro job loads
       the secret `MAESTRO_DAY2_DEMO_*` variables, (b) the `after_maestro_tests`
       hook's `eas/upload_artifact` finds the `day2-shot-*.png` files, (c)
-      `eas workflow:view --json` returns a download link day2 finds
+      `eas workflow:view --json` returns a download link day2 finds, (d) the
+      demo build reaches the tunnel address and `eas env:delete` removes the
+      run's login variables afterwards
       (`artifactLinks`), from a host in `DAY2_CREATOR_HOSTS_EAS` / the
       built-in list. Each capture uses the owner's EAS build minutes.
 - [ ] Image tool for demo casts: OpenAI Images connected (day2's account or

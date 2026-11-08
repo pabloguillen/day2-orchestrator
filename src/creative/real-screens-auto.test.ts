@@ -7,7 +7,9 @@ import type { AppEntry } from "../apps-registry";
 import { withBacklog } from "../backlog";
 import { backlogFile } from "../backlog-work";
 import type { CreditCheck } from "../credits";
-import type { DemoClient, DemoDeps } from "../hosting/demo";
+import type { DemoDeps } from "../hosting/demo";
+import { EphemeralError } from "../hosting/ephemeral";
+import { loadSeedPlan } from "../hosting/seed-plan-cache";
 import { fakeSupabase } from "../hosting/fake-supabase";
 import { fileHostingSecrets, fileHostingStore } from "../hosting/store";
 import { OPERATOR } from "../hosting/test-kit";
@@ -47,12 +49,13 @@ import {
 import type { VisionRun } from "./vision";
 
 /**
- * The real-screens pipeline (real-screens-auto.ts) against fakes only: a
- * fake Supabase (fake-supabase.ts) and demo client, the built-in cast model,
- * the app's bundled pictures, fake EAS / Android capture runners and a fake
- * vision run. Transitions, backoff, idempotency, single flight, the
- * automatic approval, triggers (growth, new version, migrations, first
- * post) and cleanup.
+ * The real-screens pipeline (real-screens-auto.ts) against fakes only: the
+ * built-in cast model and seed planner, the app's bundled pictures, fake EAS
+ * / Android capture runners whose temporary database is a fake (opened and
+ * closed per run), a fake vision run, and a fake Supabase only for the
+ * one-time removal of an old demo project. Transitions, backoff,
+ * idempotency, single flight, the automatic approval, triggers (growth, new
+ * version, migrations, first post) and cleanup.
  */
 
 let data: string;
@@ -60,7 +63,7 @@ const saved: Record<string, string | undefined> = {};
 const ENV = { DAY2_SECRETS_KEY: Buffer.alloc(32, 7).toString("base64"), DAY2_CREDITS: "off", DAY2_CAPTURE: undefined as string | undefined };
 const t = localTenant();
 
-type World = { fake: ReturnType<typeof fakeSupabase>; client: DemoClient; deps: DemoDeps; repo: string; captures: number; android: number; capture: "eas" | "eas_no_artifact" | "device"; version: string };
+type World = { fake: ReturnType<typeof fakeSupabase>; deps: DemoDeps; repo: string; captures: number; android: number; capture: "eas" | "eas_no_artifact" | "device"; version: string; opened: number; closed: number; where: string[]; dbFail: EphemeralError | null };
 const worlds = new Map<string, World>();
 let vision: VisionRun | null = null;
 let credits: (s: string, usd: number) => CreditCheck = () => ({ ok: true, maxCredits: 0 });
@@ -94,7 +97,14 @@ function bump(dir: string, version: string) {
   writeFileSync(join(dir, "app.json"), JSON.stringify(j));
 }
 
-const demoValues = { url: "https://refdemo0000000000001.supabase.co", key: "sb_publishable_refdemo", login: { email: "demo-x@example.com", password: ["pass", "word", "7q"].join("-") }, ai: { aiGenerated: false, aiPerson: false } };
+const login = { email: "demo-x@example.com", password: ["pass", "word", "7q"].join("-") };
+/** The run's temporary database, faked: counted open/close, or a failure to start. */
+const demoFor = (w: World) => async (o: { where: string }) => {
+  if (w.dbFail) throw w.dbFail;
+  w.opened++;
+  w.where.push(o.where);
+  return { url: o.where === "eas" ? "https://calm-fox-1.trycloudflare.com" : "http://127.0.0.1:55400", key: ["eyJfake", "anon"].join("."), login, ai: { aiGenerated: false, aiPerson: false }, close: async () => void w.closed++ };
+};
 
 function captureRunner(w: World, o: { android?: boolean } = {}): CaptureRunDeps {
   const checkout = async () => {
@@ -108,7 +118,7 @@ function captureRunner(w: World, o: { android?: boolean } = {}): CaptureRunDeps 
     return {
       mode: "local",
       checkout,
-      demo: async () => demoValues,
+      demo: demoFor(w),
       local: {
         target: async (p) => (p === "android" ? { platform: "android", device: "Pixel 8 (emulator)", id: "emulator-5554", build: async () => ({ app: "/x.apk" }), install: async () => {}, uninstall: async () => {}, launch: async () => {}, screenshot: async () => true, running: async () => true, crashesSince: async () => [] } : { skip: "no iPhone Simulator" }),
         flow: async (f) => {
@@ -120,12 +130,12 @@ function captureRunner(w: World, o: { android?: boolean } = {}): CaptureRunDeps 
       },
     };
   if (w.capture === "device") {
-    return { mode: "local", checkout, demo: async () => demoValues, local: { target: async (p) => (p === "ios" && w.captures++, { skip: "the simulator didn't boot" }), flow: async () => ({ ok: false, why: "x" }), run: async () => ({ code: 0 }) } };
+    return { mode: "local", checkout, demo: demoFor(w), local: { target: async (p) => (p === "ios" && w.captures++, { skip: "the simulator didn't boot" }), flow: async () => ({ ok: false, why: "x" }), run: async () => ({ code: 0 }) } };
   }
   return {
     mode: "eas",
     checkout,
-    demo: async () => demoValues,
+    demo: demoFor(w),
     eas: {
       expoToken: async () => ["expo", "tok", "rsa"].join("_"),
       run: async (cmd) => {
@@ -144,21 +154,12 @@ function captureRunner(w: World, o: { android?: boolean } = {}): CaptureRunDeps 
   };
 }
 
-function world(id: string, o: { orgPlan?: string; failSql?: RegExp; capture?: World["capture"]; pauseRefused?: boolean } = {}): { app: AppEntry; w: World } {
+function world(id: string, o: { capture?: World["capture"]; operator?: boolean } = {}): { app: AppEntry; w: World } {
   const repo = repoFor(id);
-  const fake = fakeSupabase({ orgPlan: o.orgPlan, failSql: o.failSql, pauseRefused: o.pauseRefused });
-  const users = new Map<string, string>();
-  const client: DemoClient = {
-    createUser: async (u) => (users.set(u.email, `00000000-0000-4000-8000-${String(users.size + 1).padStart(12, "0")}`), { id: users.get(u.email)! }),
-    findUser: async (e) => (users.has(e) ? { id: users.get(e)! } : null),
-    deleteUser: async () => undefined,
-    insert: async () => undefined,
-    remove: async () => undefined,
-    upload: async () => undefined,
-  };
+  const fake = fakeSupabase({});
   const dir = join(data, `hosting-${id}`);
-  const deps: DemoDeps = { store: fileHostingStore(dir), secrets: fileHostingSecrets(dir), operator: OPERATOR, api: fake.api, ticket: async (i) => ({ id: "D2-1", state: "todo" as const, ...{ key: i.source.key } }), run: async () => ({ code: 0, stdout: "", stderr: "" }), expoToken: async () => null, sleep: async () => undefined, waitMs: 60_000, demoClient: () => client, planner: null };
-  const w: World = { fake, client, deps, repo, captures: 0, android: 0, capture: o.capture ?? "eas", version: "1.0.2" };
+  const deps: DemoDeps = { store: fileHostingStore(dir), secrets: fileHostingSecrets(dir), operator: o.operator === false ? null : OPERATOR, api: fake.api, ticket: async (i) => ({ id: "D2-1", state: "todo" as const, ...{ key: i.source.key } }), run: async () => ({ code: 0, stdout: "", stderr: "" }), expoToken: async () => null, sleep: async () => undefined, waitMs: 60_000 };
+  const w: World = { fake, deps, repo, captures: 0, android: 0, capture: o.capture ?? "eas", version: "1.0.2", opened: 0, closed: 0, where: [], dbFail: null };
   const app: AppEntry = { id, name: `App ${id}`, repoPath: repo, connectionMethod: "local_path", addedAt: new Date().toISOString() };
   worlds.set(id, w);
   return { app, w };
@@ -227,7 +228,7 @@ describe("the state machine, pure", () => {
     expect(r).toMatchObject({ status: "needs_attention", attempts: RETRY.max, nextRetryAt: null });
     expect(r.note).toContain(`tried ${RETRY.max} times`);
     expect(isDue(r, new Date(now.getTime() + 10 * 86_400_000))).toBe(false);
-    expect(failStep(emptyPipeline("a").steps.backend, "backend", "no room", now, { fatal: true })).toMatchObject({ status: "needs_attention", attempts: 1, note: "no room" });
+    expect(failStep(emptyPipeline("a").steps.seed_plan, "seed_plan", "no room", now, { fatal: true })).toMatchObject({ status: "needs_attention", attempts: 1, note: "no room" });
     // Re-armed: needs attention → pending (the daily re-arm keeps one more try).
     const s = emptyPipeline("a");
     s.steps.capture = r;
@@ -272,17 +273,19 @@ describe("the automatic cast check", () => {
 });
 
 describe("the pipeline end to end (fakes)", () => {
-  test("from nothing: cast → auto-approved → demo backend → flow ticket → waits for the flow PR; demo paused meanwhile", async () => {
+  test("from nothing: cast → auto-approved → seed plan → flow ticket → waits for the flow PR; no database exists meanwhile", async () => {
     const { app, w } = world("app_e2e");
     await run(app, "growth_on");
-    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "backend:done", "flow:done", "flow_merged:waiting", "capture:pending"]);
+    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "seed_plan:done", "flow:done", "flow_merged:waiting", "capture:pending"]);
     const cast = (await loadCast(app.id, assetStore()))!;
     expect(cast).toMatchObject({ status: "approved", approvedBy: AUTO_APPROVER });
     expect(cast.images.source).toBe("bundled");
     expect(pipelineView(app.id).steps[4]!.note).toContain("Waiting for the flow PR");
-    expect(count(w, "createProject")).toBe(1);
-    expect(count(w, "pause")).toBe(1);
-    expect((await w.deps.store.state(app.id)).demo).toMatchObject({ pausedAt: expect.any(String) });
+    // Nothing on Supabase, no standing database: only the cast and the validated plan are kept.
+    expect(w.fake.calls).toEqual([]);
+    expect(w.opened).toBe(0);
+    expect(loadSeedPlan(app.id)).toMatchObject({ plan: { source: "heuristic" }, files: 28 });
+    expect(pipelineView(app.id).steps[2]!.note).toContain("28 migrations");
   });
 
   test("idempotent and single-flight: again changes nothing; two calls at once share one run", async () => {
@@ -293,10 +296,10 @@ describe("the pipeline end to end (fakes)", () => {
     expect(a).toBe(b);
     await settleRealScreens(app.id);
     await run(app);
-    expect(count(w, "createProject")).toBe(1);
+    expect(w.fake.calls).toEqual([]);
     const tickets = (await withBacklog(backlogFile(app), (x) => ({ backlog: x, result: x }))).tickets.filter((x) => x.source.key === DEMO_FLOW_KEY);
     expect(tickets).toHaveLength(1);
-    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "backend:done", "flow:done", "flow_merged:waiting", "capture:pending"]);
+    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "seed_plan:done", "flow:done", "flow_merged:waiting", "capture:pending"]);
   });
 
   test("the flow PR: waiting names it; closed without merging needs attention; merged → captured on EAS → done", async () => {
@@ -313,10 +316,13 @@ describe("the pipeline end to end (fakes)", () => {
     mergeFlow(app.repoPath);
     await retryRealScreens(t, app);
     await settleRealScreens(app.id);
-    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "backend:done", "flow:done", "flow_merged:done", "capture:done"]);
+    expect(statuses(app.id)).toEqual(["cast:done", "approve:done", "seed_plan:done", "flow:done", "flow_merged:done", "capture:done"]);
     expect(pipelineView(app.id).done).toBe(true);
     expect(w.captures).toBe(1);
     expect(pipelineView(app.id).steps[5]!.note).toMatch(/screens captured|Captured 1 screens/);
+    // EAS: the temporary database was reached through the tunnel, and removed after the run.
+    expect(w.where).toEqual(["eas"]);
+    expect(w.closed).toBe(w.opened);
   });
 
   test("a new app version: the timer notices, captures again", async () => {
@@ -334,35 +340,46 @@ describe("the pipeline end to end (fakes)", () => {
     expect(statuses(app.id).at(-1)).toBe("capture:done");
   });
 
-  test("the app's migrations change: the new one goes onto the demo project; a failing one needs attention and the old captures stay", async () => {
+  test("the app's migrations change: the seed plan is checked again; one that breaks it needs attention naming the table and the old captures stay", async () => {
     const app = worldApp("app_e2e");
     const w = worlds.get(app.id)!;
+    const before = loadSeedPlan(app.id)!.migrations;
     writeFileSync(join(app.repoPath, "supabase/migrations/29990101000000_badges.sql"), "create table if not exists dotty.badges (id uuid primary key);\n");
     const tick = await realScreensTick(t, app);
     expect(tick.trigger).toBe("migrations_changed");
     await tick.run;
     await settleRealScreens(app.id);
-    expect(w.fake.sql.some((q) => q.query.includes("dotty.badges"))).toBe(true);
-    expect(statuses(app.id)[2]).toBe("backend:done");
-    // A migration that doesn't apply.
-    const { app: app2, w: w2 } = world("app_mig", { failSql: /boom_table/ });
+    expect(statuses(app.id)[2]).toBe("seed_plan:done");
+    expect(loadSeedPlan(app.id)!.migrations).not.toBe(before);
+    expect(loadSeedPlan(app.id)!.files).toBe(29);
+    // A migration the plan can't fill.
+    const { app: app2, w: w2 } = world("app_mig");
     mergeFlow(app2.repoPath);
     await (await realScreensTick(t, app2)).run;
     await settleRealScreens(app2.id);
     expect(pipelineView(app2.id).done).toBe(true);
-    const before = loadCaptureSet(app2.id, "en-US") ?? loadCaptureSet(app2.id, "de-DE");
-    expect(before).toBeTruthy();
-    writeFileSync(join(app2.repoPath, "supabase/migrations/29990102000000_boom.sql"), "create table dotty.boom_table (id uuid);\n");
+    const shots = loadCaptureSet(app2.id, "en-US") ?? loadCaptureSet(app2.id, "de-DE");
+    expect(shots).toBeTruthy();
+    writeFileSync(join(app2.repoPath, "supabase/migrations/29990102000000_shoe.sql"), "alter table dotty.profiles add column shoe_size int not null;\n");
     const t2 = await realScreensTick(t, app2);
     await t2.run;
     await settleRealScreens(app2.id);
-    const backend = pipelineView(app2.id).steps[2]!;
-    const note = String(backend.note);
-    expect(backend.status).toBe("needs_attention");
-    expect(note).toContain("didn't apply");
-    expect(note).toContain("Posts keep using the screens");
-    expect(loadCaptureSet(app2.id, before!.locale)).toMatchObject({ capturedAt: before!.capturedAt });
+    const plan = pipelineView(app2.id).steps[2]!;
+    expect(plan.status).toBe("needs_attention");
+    expect(String(plan.note)).toContain("dotty.profiles.shoe_size");
+    expect(String(plan.note)).toContain("Posts keep using the screens");
+    expect(loadCaptureSet(app2.id, shots!.locale)).toMatchObject({ capturedAt: shots!.capturedAt });
     expect(w2.captures).toBe(1);
+    void w;
+  });
+
+  test("a migration that doesn't apply on the temporary database: the capture needs attention naming it", async () => {
+    const { app, w } = world("app_migdb");
+    mergeFlow(app.repoPath);
+    w.dbFail = new EphemeralError("The app's migration 20261025110000_dotty_chats.sql didn't apply on the temporary database: ERROR: boom", "migration", [], "20261025110000_dotty_chats.sql");
+    await run(app);
+    expect(pipelineView(app.id).steps[5]).toMatchObject({ status: "needs_attention", note: expect.stringContaining("20261025110000_dotty_chats.sql") });
+    expect(loadCaptureSet(app.id, "en-US") ?? loadCaptureSet(app.id, "de-DE")).toBeNull();
   });
 });
 
@@ -415,15 +432,28 @@ describe("failures, backoff and capture fallbacks", () => {
     android = { ok: false, why: "no emulator here" };
   });
 
-  test("Supabase's plan limit: needs attention with the message, nothing created", async () => {
-    const { app, w } = world("app_limit", { orgPlan: "free" });
-    for (const n of ["a-demo", "b"]) await w.fake.api("x").createProject({ name: n, organization_slug: OPERATOR.orgSlug, db_pass: "x", region: "eu-central-1" });
+  test("no Docker here: the capture needs attention with the install hint, at once (no retries)", async () => {
+    const { app, w } = world("app_nodocker");
+    mergeFlow(app.repoPath);
+    w.dbFail = new EphemeralError("Docker isn't installed here, so day2 can't start a temporary database for the capture.", "no_docker", ["Install Docker Desktop (docker.com/products/docker-desktop) and start it."]);
     await run(app);
-    const b = pipelineView(app.id).steps[2]!;
-    expect(b).toMatchObject({ status: "needs_attention" });
-    expect(b.note).toContain("no room for another project");
-    expect(b.note).toContain("Free plan allows 2");
-    expect(count(w, "createProject")).toBe(2);
+    const c = pipelineView(app.id).steps[5]!;
+    expect(c).toMatchObject({ status: "needs_attention", attempts: 1 });
+    expect(c.note).toContain("Install Docker Desktop");
+    expect(c.note).toContain("posts use uploaded screenshots");
+    // Docker installed: Retry captures.
+    w.dbFail = null;
+    await retryRealScreens(t, app, "capture");
+    await settleRealScreens(app.id);
+    expect(pipelineView(app.id).steps[5]!.status).toBe("done");
+  });
+
+  test("a database that didn't start (something to retry): backoff, not attention", async () => {
+    const { app, w } = world("app_dbretry");
+    mergeFlow(app.repoPath);
+    w.dbFail = new EphemeralError("The temporary database didn't start: timeout", "start");
+    await run(app);
+    expect(pipelineView(app.id).steps[5]).toMatchObject({ status: "pending", attempts: 1, nextRetryAt: expect.any(String) });
   });
 
   test("credits: a step that would go over the app's cap needs attention and spends nothing", async () => {
@@ -436,14 +466,14 @@ describe("failures, backoff and capture fallbacks", () => {
   });
 });
 
-describe("hosting costs", () => {
-  test("a paid organization can't pause projects: day2 notes it and doesn't ask again for a day", async () => {
-    const { app, w } = world("app_paid", { pauseRefused: true });
+describe("the temporary database per run", () => {
+  test("opened for each capture and always closed — also when EAS's screenshots can't be fetched", async () => {
+    const { app, w } = world("app_eph", { capture: "eas_no_artifact" });
+    mergeFlow(app.repoPath);
     await run(app);
-    await run(app);
-    expect(statuses(app.id)[2]).toBe("backend:done");
-    expect(count(w, "pause")).toBe(1);
-    expect(loadPipeline(app.id).log.map((l) => l.text).join()).toContain("can't be paused");
+    expect(w.opened).toBe(1);
+    expect(w.closed).toBe(1);
+    expect(pipelineView(app.id).steps[5]!.status).toBe("needs_attention");
   });
 });
 
@@ -457,7 +487,7 @@ describe("approval policy", () => {
     await ownerApproved(t, app, "alice");
     await settleRealScreens(app.id);
     expect((await loadCast(app.id, assetStore()))!.approvedBy).toBe("alice");
-    expect(statuses(app.id).slice(0, 4)).toEqual(["cast:done", "approve:done", "backend:done", "flow:done"]);
+    expect(statuses(app.id).slice(0, 4)).toEqual(["cast:done", "approve:done", "seed_plan:done", "flow:done"]);
   });
 
   test("auto without an image tool or bundled pictures: placeholders are never approved automatically", async () => {
@@ -496,7 +526,7 @@ describe("approval policy", () => {
 });
 
 describe("triggers and cleanup", () => {
-  test("the first How it works post kicks the whole pipeline (no seeded backend needed) and gets real screens", async () => {
+  test("the first How it works post kicks the whole pipeline and gets real screens", async () => {
     const { app, w } = world("app_first");
     mergeFlow(app.repoPath);
     const r = await maybeAutoCapture(t, app, { making: "how-it-works", wait: true });
@@ -517,10 +547,9 @@ describe("triggers and cleanup", () => {
     expect(loadPipeline(app.id).posts?.why).toContain("Approve the cast");
   });
 
-  test("growth off: nothing runs; after 30 days the demo project and the cast's pictures are deleted", async () => {
-    const { app, w } = world("app_off");
+  test("growth off: nothing runs; after 30 days the cast and its pictures are deleted", async () => {
+    const { app } = world("app_off");
     await run(app);
-    expect((await w.deps.store.state(app.id)).demo).toBeTruthy();
     expect((await assetStore().list(app.id, CAST_PURPOSE)).length).toBeGreaterThan(0);
     growth = false;
     const now = new Date();
@@ -528,9 +557,6 @@ describe("triggers and cleanup", () => {
     expect(loadPipeline(app.id).growthOffSince).toBe(now.toISOString());
     expect((await realScreensTick(t, app, { now: new Date(now.getTime() + 29 * 86_400_000) })).cleaned).toBe(false);
     expect((await realScreensTick(t, app, { now: new Date(now.getTime() + 30 * 86_400_000) })).cleaned).toBe(true);
-    expect(count(w, "deleteProject")).toBe(1);
-    expect((await w.deps.store.state(app.id)).demo).toBeNull();
-    expect(await w.deps.secrets.get(app.id, "demo_login")).toBeNull();
     expect(await assetStore().list(app.id, CAST_PURPOSE)).toEqual([]);
     expect(existsSync(castDir(app.id))).toBe(false);
     expect(pipelineView(app.id).cleanup).toMatchObject({ reason: "growth_off" });
@@ -538,23 +564,46 @@ describe("triggers and cleanup", () => {
     growth = true;
     await (await realScreensTick(t, app)).run;
     await settleRealScreens(app.id);
-    expect(count(w, "createProject")).toBe(2);
+    expect(await loadCast(app.id, assetStore())).toBeTruthy();
     expect(pipelineView(app.id).cleanup).toBeNull();
   });
 
-  test("app removed: project, cast, captures and state go; a project Supabase won't delete now is retried later", async () => {
-    const { app, w } = world("app_removed");
+  test("an old standing demo project (previous design): deleted once through the guard on the next tick, then forgotten", async () => {
+    const { app, w } = world("app_legacy");
+    const ref = await legacyDemo(w, app);
+    await (await realScreensTick(t, app)).run;
+    await settleRealScreens(app.id);
+    expect(count(w, "deleteProject")).toBe(1);
+    expect(w.fake.projects.has(ref)).toBe(false);
+    expect((await w.deps.store.state(app.id)).demo).toBeNull();
+    expect(await w.deps.secrets.get(app.id, "demo_login")).toBeNull();
+    expect(loadPipeline(app.id).log.map((l) => l.text).join()).toContain("Deleted the old demo project");
+    await (await realScreensTick(t, app)).run;
+    expect(count(w, "deleteProject")).toBe(1);
+    // Without the organization configured it stays, with a note, and nothing else is blocked.
+    const { app: a2, w: w2 } = world("app_legacy2", { operator: false });
+    await legacyDemo(w2, a2);
+    await (await realScreensTick(t, a2)).run;
+    await settleRealScreens(a2.id);
+    expect((await w2.deps.store.state(a2.id)).demo).toBeTruthy();
+    expect(loadPipeline(a2.id).maintenance.legacy).toContain("SUPABASE_ACCESS_TOKEN");
+    expect(statuses(a2.id)[2]).toBe("seed_plan:done");
+  });
+
+  test("app removed: cast, captures, seed plan and state go; an old demo project Supabase won't delete now is retried later", async () => {
+    const { app } = world("app_removed");
     mergeFlow(app.repoPath);
     await run(app);
     expect(existsSync(capturesDir(app.id))).toBe(true);
     const r = await cleanupRealScreens(t, app, "removed");
-    expect(r).toMatchObject({ error: null, deleted: expect.any(String) });
+    expect(r).toMatchObject({ error: null, deleted: null });
     expect(existsSync(capturesDir(app.id))).toBe(false);
     expect(existsSync(castDir(app.id))).toBe(false);
+    expect(loadSeedPlan(app.id)).toBeNull();
     expect(loadPipeline(app.id).lastRunAt).toBeNull();
-    // Supabase down at removal time: remembered, deleted by the timer later.
+    // An old demo project, Supabase down at removal time: remembered, deleted by the timer later.
     const { app: a2, w: w2 } = world("app_removed2");
-    await run(a2);
+    await legacyDemo(w2, a2);
     const api = w2.fake.api;
     let down = true;
     w2.deps.api = (tok) => {
@@ -567,28 +616,42 @@ describe("triggers and cleanup", () => {
     expect(await retryOrphanDemos({ operator: OPERATOR, api: w2.deps.api })).toBe(1);
     expect(await retryOrphanDemos({ operator: OPERATOR, api: w2.deps.api })).toBe(0);
     expect(w2.fake.projects.size).toBe(0);
-    void w;
   });
 
   test("the daily tick re-arms what needs attention for one more try", async () => {
-    const { app } = world("app_daily", { orgPlan: "free" });
-    const w = worlds.get(app.id)!;
-    for (const n of ["x1", "x2"]) await w.fake.api("x").createProject({ name: n, organization_slug: OPERATOR.orgSlug, db_pass: "x", region: "eu-central-1" });
+    const { app, w } = world("app_daily");
+    mergeFlow(app.repoPath);
+    w.dbFail = new EphemeralError("Docker isn't installed here.", "no_docker", ["Install Docker."]);
+    let tries = 0;
+    const fail = w.dbFail;
+    Object.defineProperty(w, "dbFail", { get: () => (tries++, fail), configurable: true });
     const now = new Date();
     await (await realScreensTick(t, app, { now })).run;
     await settleRealScreens(app.id);
-    expect(pipelineView(app.id).steps[2]!.status).toBe("needs_attention");
-    // Same day: stays. Next day: one more try (still full → needs attention again).
+    expect(pipelineView(app.id).steps[5]!.status).toBe("needs_attention");
+    const after = tries;
+    // Same day: stays. Next day: one more try (still no Docker → needs attention again).
     await (await realScreensTick(t, app, { now: new Date(now.getTime() + 3600_000) })).run;
-    const creates = count(w, "createProject");
+    expect(tries).toBe(after);
     const next = await realScreensTick(t, app, { now: new Date(now.getTime() + 86_400_000 + 1) });
     expect(next.trigger).toBe("daily");
     await next.run;
     await settleRealScreens(app.id);
-    expect(pipelineView(app.id).steps[2]!.status).toBe("needs_attention");
-    expect(count(w, "organization")).toBeGreaterThan(1);
-    expect(count(w, "createProject")).toBe(creates);
+    expect(tries).toBeGreaterThan(after);
+    expect(pipelineView(app.id).steps[5]!.status).toBe("needs_attention");
   });
 });
+
+/** An old-design demo project: on the fake Supabase and recorded in the app's hosting state. */
+async function legacyDemo(w: World, app: AppEntry): Promise<string> {
+  const name = `app-${app.id.replace(/[^a-z0-9]/gi, "").slice(-6).toLowerCase()}-demo`;
+  const p = await w.fake.api("x").createProject({ name, organization_slug: OPERATOR.orgSlug, db_pass: "x", region: "eu-central-1" });
+  await w.deps.secrets.set(app.id, "demo_login", { email: "demo-old@example.com", password: ["old", "pw"].join("-") }, "Demo account (screens)");
+  await w.deps.store.update(app.id, (s) => {
+    s.demo = { createdBy: "day2-demo", ref: p.ref, name, orgSlug: OPERATOR.orgSlug, region: "eu-central-1", url: `https://${p.ref}.supabase.co`, publishableKey: null, createdAt: "2026-11-01T00:00:00Z", status: "ACTIVE_HEALTHY", done: ["project"], working: null, migrations: { applied: 0, total: 0, failed: null }, plan: null, seededAt: null, castSeed: null, rows: 0, uploads: 0, seeded: { users: [], rows: [] }, pausedAt: null, problem: null, log: [] };
+  });
+  w.fake.calls.length = 0;
+  return p.ref;
+}
 
 void ({} as PipelineStep);

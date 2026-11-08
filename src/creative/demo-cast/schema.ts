@@ -3,7 +3,7 @@ import { promptProblem } from "../kit";
 
 /**
  * The demo cast (docs/creative-quality.md, "Real screens"): fictional
- * friends who fill an app's demo backend so the screens day2 captures look
+ * friends who fill a capture's temporary database so the screens day2 captures look
  * lived-in — never a real person, never a minor, never a real end user's
  * data. It is plain data (JSON) that a model writes and this file checks;
  * nothing in it is ever run as code.

@@ -7,7 +7,7 @@ import { RESERVED_SCHEMAS, schemaSummary, type AppSchema, type ColumnInfo, type 
  * the entity's fields, ids or references goes in. Written by a model that
  * reads the app's schema (from its migrations) or by the built-in
  * heuristic; checked against that schema before anything runs; then turned
- * into plain rows that are sent as JSON to the demo project's REST API
+ * into plain rows that are sent as JSON to the REST API of a capture's temporary database
  * (parameterized by design — no SQL is ever built from it).
  */
 
@@ -253,7 +253,7 @@ export function heuristicSeedPlan(schema: AppSchema): { plan: SeedPlan | null; p
 // ---------------------------------------------------------------- the model's plan
 
 export function buildPlanPrompt(schema: AppSchema, appName: string, problems: string[] = []): string {
-  return `You map ${appName}'s DEMO CAST (fictional people and their activity) onto the app's own database tables, so a separate demo copy of the backend can be filled. You only write a mapping as JSON — never SQL, never code, never data values beyond short constants.
+  return `You map ${appName}'s DEMO CAST (fictional people and their activity) onto the app's own database tables, so a temporary demo copy of the backend (one per capture, deleted afterwards) can be filled. You only write a mapping as JSON — never SQL, never code, never data values beyond short constants.
 
 The app's tables, from its migrations (REQUIRED = must be filled; (auto)/(default) = leave out unless the cast has the value):
 ${schemaSummary(schema)}

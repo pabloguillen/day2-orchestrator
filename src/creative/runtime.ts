@@ -65,7 +65,7 @@ export type StudioCall = (o: { idea: SocialIdea; forced: TemplateId | null; vari
 export function socialStudio(app: AppEntry, profile: AppProfile, o: { language: string; assets: AssetStore; links: AppLinks | null; posts: number; music?: () => Promise<string | null>; log?: (t: string) => void }): StudioCall {
   return async ({ idea, forced, variants, want, tag }) => {
     const kit = ensureBrandKit(app.repoPath);
-    // Real screens first: the real-screens pipeline (cast → demo backend → flow → capture) is kicked;
+    // Real screens first: the real-screens pipeline (cast → seed plan → flow → capture with a temporary database) is kicked;
     // before the first How it works post it waits for it (bounded) — otherwise posts use the best screens there are.
     const tenant = currentTenant();
     if (tenant && process.env.DAY2_CAPTURE !== "off") {

@@ -5,9 +5,11 @@ import { authorize, CreditsError, type CreditService } from "../credits";
 import { dataDir } from "../day2-paths";
 import { has } from "../device-checks/run-cmd";
 import { AUTOPILOT_FILENAME, loadAutopilot } from "../growth-autopilot";
-import { deleteDemoBackend, DemoError, ensureDemoBackend, isLimitError, markMigrationsChanged, migrationsFingerprint, pauseDemo, resumeDemo, demoSupport, limitMessage } from "../hosting/demo";
+import { DemoError, demoSupport, retireLegacyDemo } from "../hosting/demo";
+import { janitor } from "../hosting/ephemeral";
+import { readMigrations } from "../hosting/migrations";
+import { ensureSeedPlan, migrationsHash, SeedPlanError, seedPlanState } from "../hosting/seed-plan-cache";
 import { SupabaseError, type SupabaseApi } from "../hosting/supabase";
-import { DEMO_STEPS } from "../hosting/types";
 import { profileOf, languageOf, socialAccounts } from "../social/runtime";
 import { paidFor } from "../store-listing/deps";
 import { storeIdsFromRepo } from "../ads/app-links";
@@ -18,24 +20,29 @@ import { CAST_PURPOSE } from "./demo-cast/images";
 import { validateCast, type DemoCast } from "./demo-cast/schema";
 import { castDir, loadCast, saveCast } from "./demo-cast/store";
 import { DEMO_FLOW_KEY } from "./demo-flow";
-import { approveCast, captureDeps, demoDeps, demoFlowInRepo, ensureFlowTicket, realScreensHooks, runJob, ticketsOf, trackJob, writeCast } from "./real-screens";
+import { approveCast, captureDeps, demoDeps, demoFlowInRepo, ephemeralDeps, ensureFlowTicket, realScreensHooks, runJob, seedPlanner, ticketsOf, trackJob, writeCast } from "./real-screens";
 import { jsonAfter, runVision, type VisionImage, type VisionRun } from "./vision";
 
 /**
  * Real screens without manual steps (docs/creative-quality.md §2b): one
  * resumable state machine per app —
  *
- *   cast → approve → backend → flow → flow_merged → capture → done
+ *   cast → approve → seed_plan → flow → flow_merged → capture → done
  *
  * persisted in `<data>/real-screens/<app>/pipeline.json`. Every step is
  * idempotent: before running, each step checks the world (is there a cast,
- * is it approved, is the demo backend filled with this cast, is the flow
- * ticket there, is the flow merged, is there a fresh capture) and only does
- * what's missing. A failed step records its attempts, the last error and
- * when to try again (exponential backoff); after RETRY.max attempts — or at
- * once for problems day2 can't fix by itself (plan limit, a migration that
- * doesn't apply, no Expo account) — it "needs attention" with a reason the
- * owner can act on, and a Retry button. One run per app at a time.
+ * is it approved, is there a seed plan validated against the current
+ * migrations, is the flow ticket there, is the flow merged, is there a
+ * fresh capture) and only does what's missing. There is no demo database
+ * between captures: the capture step starts a temporary one (Docker, the
+ * app's migrations, the cast seeded through the plan), builds and runs the
+ * flow against it, and removes it (creative/demo-session.ts,
+ * hosting/ephemeral.ts). A failed step records its attempts, the last error
+ * and when to try again (exponential backoff); after RETRY.max attempts — or
+ * at once for problems day2 can't fix by itself (no Docker, a migration
+ * that doesn't apply, a seed plan that doesn't fit, no Expo account, no
+ * cloudflared for EAS) — it "needs attention" with a reason the owner can
+ * act on, and a Retry button. One run per app at a time.
  *
  * Triggers: the backlog timer (growth/social on, daily maintenance, a new
  * app version, changed migrations), a post being made (maybeAutoCapture),
@@ -43,12 +50,13 @@ import { jsonAfter, runVision, type VisionImage, type VisionRun } from "./vision
  * a cast that passes the schema check and a vision check of its pictures;
  * otherwise (or with "owner") the owner approves. The flow's pull request
  * is merged the way every day2 PR is (the owner, in Approvals) — the
- * pipeline only waits for it. Cleanup: the demo project and the cast's
- * pictures are deleted when the app is removed, or after growth has been
- * off for 30 days.
+ * pipeline only waits for it. Cleanup: the cast's pictures (and, on removal,
+ * captures and state) are deleted when the app is removed, or after growth
+ * has been off for 30 days. An old standing demo project (the previous
+ * design) is deleted once through the guard.
  */
 
-export const PIPELINE_STEPS = ["cast", "approve", "backend", "flow", "flow_merged", "capture"] as const;
+export const PIPELINE_STEPS = ["cast", "approve", "seed_plan", "flow", "flow_merged", "capture"] as const;
 export type PipelineStep = (typeof PIPELINE_STEPS)[number];
 export type StepStatus = "pending" | "running" | "done" | "waiting" | "needs_attention" | "skipped";
 export type StepRecord = { status: StepStatus; attempts: number; lastError: string | null; nextRetryAt: string | null; note: string | null; updatedAt: string | null };
@@ -71,8 +79,8 @@ export type PipelineState = {
   /** The cast the owner declined (never auto-approved). */
   declined: string | null;
   autoApproval: AutoApproval | null;
-  /** pauseFailedAt: Supabase refused to pause the demo project (paid plans can't pause) — not asked again for a day. */
-  maintenance: { checkedAt: string | null; migrations: string | null; appVersion: string | null; pauseFailedAt?: string | null };
+  /** legacy: what happened to an old standing demo project (the previous design), once. */
+  maintenance: { checkedAt: string | null; migrations: string | null; appVersion: string | null; legacy?: string | null };
   growthOffSince: string | null;
   cleanup: { at: string | null; reason: "removed" | "growth_off" | null; note: string | null };
   /** The last post that went ahead without fresh real screens, and why. */
@@ -81,20 +89,20 @@ export type PipelineState = {
 };
 
 const MIN = 60_000;
-export const RETRY = { max: 5, capMs: 24 * 60 * MIN, base: { cast: 10 * MIN, approve: 30 * MIN, backend: 15 * MIN, flow: 30 * MIN, flow_merged: 60 * MIN, capture: 60 * MIN } as Record<PipelineStep, number> };
+export const RETRY = { max: 5, capMs: 24 * 60 * MIN, base: { cast: 10 * MIN, approve: 30 * MIN, seed_plan: 15 * MIN, flow: 30 * MIN, flow_merged: 60 * MIN, capture: 60 * MIN } as Record<PipelineStep, number> };
 export const GROWTH_OFF_CLEANUP_DAYS = 30;
 const DAY = 24 * 60 * MIN;
 /** Worst cases checked against the account's credits before a step spends. */
-export const STEP_COST_USD = { cast: 1.2, check: 0.3, backend: 0.6 };
+export const STEP_COST_USD = { cast: 1.2, check: 0.3, seedPlan: 0.5 };
 export const AUTO_APPROVER = "day2 (automatic check)";
 
 export const STEP_LABEL: Record<PipelineStep, string> = {
   cast: "Write the demo cast",
   approve: "Approve the cast",
-  backend: "Demo backend",
+  seed_plan: "Seed plan",
   flow: "Ask for the Maestro flow",
   flow_merged: "Flow pull request merged",
-  capture: "Capture screens",
+  capture: "Capture (temporary database)",
 };
 
 // ---------------------------------------------------------------- pure state helpers
@@ -163,7 +171,9 @@ export function loadPipeline(appId: string): PipelineState {
   try {
     const raw = JSON.parse(readFileSync(pipelineFile(appId), "utf-8")) as Partial<PipelineState>;
     const e = emptyPipeline(appId);
-    return { ...e, ...raw, settings: { ...e.settings, ...(raw.settings ?? {}) }, steps: { ...e.steps, ...(raw.steps ?? {}) }, maintenance: { ...e.maintenance, ...(raw.maintenance ?? {}) }, cleanup: { ...e.cleanup, ...(raw.cleanup ?? {}) } };
+    // Only today's steps (an old "backend" step is dropped).
+    const steps = Object.fromEntries(PIPELINE_STEPS.map((k) => [k, raw.steps?.[k] ?? e.steps[k]])) as PipelineState["steps"];
+    return { ...e, ...raw, settings: { ...e.settings, ...(raw.settings ?? {}) }, steps, maintenance: { ...e.maintenance, ...(raw.maintenance ?? {}) }, cleanup: { ...e.cleanup, ...(raw.cleanup ?? {}) } };
   } catch {
     return emptyPipeline(appId);
   }
@@ -202,7 +212,7 @@ export function setDemoCastPolicy(appId: string, policy: DemoCastPolicy): Pipeli
   });
 }
 
-/** The owner wants a new cast: the next run writes one (and fills the demo backend with it once approved). */
+/** The owner wants a new cast: the next run writes one (the next capture seeds it once approved). */
 export function regenerateCast(t: Tenant, app: AppEntry): Promise<PipelineState> {
   updatePipeline(app.id, (s) => {
     s.regenerate = true;
@@ -343,11 +353,10 @@ export async function autoApprovalCheck(cast: DemoCast, o: { vision: VisionRun |
 const runs = new Map<string, Promise<PipelineState>>();
 export const realScreensRunning = (appId: string) => runs.has(appId);
 
-/** Can the pipeline serve this app here (its backend kind, day2's Supabase organization)? */
-export function pipelineApplies(t: Tenant, app: AppEntry): boolean {
+/** Can the pipeline serve this app (a Supabase app with its migrations)? Docker is checked by the capture step, which says what to install. */
+export function pipelineApplies(_t: Tenant, app: AppEntry): boolean {
   if (process.env.DAY2_REAL_SCREENS === "off") return false;
-  if (!demoSupport(app.repoPath).ok) return false;
-  return Boolean(demoDeps(t, app).operator);
+  return demoSupport(app.repoPath).ok;
 }
 
 /**
@@ -387,21 +396,18 @@ async function budget(t: Tenant, app: AppEntry, service: CreditService, usd: num
   }
 }
 
-const backendComplete = (demo: { done: string[]; castSeed: number | null; seededAt: string | null } | null | undefined, cast: DemoCast | null) =>
-  Boolean(demo && cast && demo.seededAt && demo.castSeed === cast.seed && DEMO_STEPS.filter((x) => x !== "healthy").every((x) => demo.done.includes(x)));
-
 async function flowTicket(app: AppEntry) {
   const tickets = (await ticketsOf(app)) as Array<{ id: string; state: string; source: { key: string }; approval?: { kind: string; number?: number; url?: string } }>;
   return tickets.filter((x) => x.source.key === DEMO_FLOW_KEY).sort((a, b) => (a.state === "parked" ? 1 : 0) - (b.state === "parked" ? 1 : 0))[0] ?? null;
 }
 
-function freshCapture(app: AppEntry, seededAt: string | null): { ok: boolean; note: string | null } {
+function freshCapture(app: AppEntry, castApprovedAt: string | null): { ok: boolean; note: string | null } {
   const profile = profileOf(app);
   const set = loadCaptureSet(app.id, localeFor(languageOf(app, profile)));
   if (!set || set.source !== "capture") return { ok: false, note: null };
   const version = appVersion(app.repoPath);
   if (version && set.version && set.version !== version) return { ok: false, note: `The capture is from version ${set.version}; the app is at ${version}.` };
-  if (seededAt && Date.parse(set.capturedAt) < Date.parse(seededAt)) return { ok: false, note: "The demo backend has a newer cast than the capture." };
+  if (castApprovedAt && Date.parse(set.capturedAt) < Date.parse(castApprovedAt)) return { ok: false, note: "A newer demo cast was approved after the capture." };
   return { ok: true, note: `${set.screens.length} screens captured ${set.capturedAt.slice(0, 10)}${set.device ? ` on ${set.device}` : ""}.` };
 }
 
@@ -413,9 +419,9 @@ async function doneNote(t: Tenant, app: AppEntry, step: PipelineStep, st: Pipeli
       return cast && !st.regenerate ? `${cast.people.length} invented people, ${cast.moments.length} moments (${cast.images.source} pictures).` : null;
     case "approve":
       return cast?.status === "approved" ? `Approved${cast.approvedBy ? ` by ${cast.approvedBy}` : ""}.` : null;
-    case "backend": {
-      const demo = (await demoDeps(t, app).store.state(app.id).catch(() => null))?.demo;
-      return backendComplete(demo, cast) ? `${demo!.name}: ${demo!.rows} rows, ${demo!.uploads} pictures${demo!.pausedAt ? " (paused until the next capture)" : ""}.` : null;
+    case "seed_plan": {
+      const p = seedPlanState(app.id, app.repoPath);
+      return p.state === "ready" ? `${p.plan.source === "model" ? "Written by a model" : "Built-in"}, ${p.plan.steps.length} tables (${p.plan.steps.map((x) => x.table).join(", ")}), valid for the current ${p.files.length} migrations.` : null;
     }
     case "flow": {
       if (demoFlowInRepo(app)) return "The flow is in the app's repo.";
@@ -428,8 +434,7 @@ async function doneNote(t: Tenant, app: AppEntry, step: PipelineStep, st: Pipeli
       return tk?.state === "done" ? `Ticket ${tk.id} is done (its pull request was merged).` : null;
     }
     case "capture": {
-      const demo = (await demoDeps(t, app).store.state(app.id).catch(() => null))?.demo;
-      const f = freshCapture(app, demo?.seededAt ?? null);
+      const f = freshCapture(app, cast?.status === "approved" ? cast.approvedAt : null);
       return f.ok ? f.note : null;
     }
   }
@@ -437,16 +442,13 @@ async function doneNote(t: Tenant, app: AppEntry, step: PipelineStep, st: Pipeli
 
 function demoErrorOutcome(err: unknown): Outcome | null {
   if (err instanceof CreditsError) return { attention: `Not enough credits for this step: ${err.check.ok ? "" : err.check.reason}` };
-  if (err instanceof DemoError && ["limit", "unsupported", "not_configured", "guard", "migration", "not_approved"].includes(err.code)) {
-    if (err.code === "migration") return { attention: `${err.message} Fix the migration in the app's repo (or the demo project), then press Retry. Posts keep using the screens day2 already has.` };
-    return { attention: err.message };
-  }
+  if (err instanceof SeedPlanError) return { attention: `${err.message} Fix the migration or table in the app's repo, then press Retry. Posts keep using the screens day2 already has.` };
+  if (err instanceof DemoError && ["unsupported", "not_configured", "guard", "not_approved"].includes(err.code)) return { attention: err.message };
   return null;
 }
 
 async function runStep(t: Tenant, app: AppEntry, step: PipelineStep, st: PipelineState): Promise<Outcome> {
   const h = realScreensHooks();
-  const deps = demoDeps(t, app);
   switch (step) {
     case "cast": {
       const why = await budget(t, app, "content_generation", STEP_COST_USD.cast);
@@ -488,25 +490,15 @@ async function runStep(t: Tenant, app: AppEntry, step: PipelineStep, st: Pipelin
       await approveCast(app, AUTO_APPROVER);
       return { done: `Approved automatically: the cast passed the schema check${check.vision ? " and the picture check (no text or logos, adults only, every picture there)" : " and every picture is there"}.` };
     }
-    case "backend": {
-      const cast = await castOf(app);
-      if (!cast || cast.status !== "approved") throw new Error("The cast isn't approved.");
-      if (!deps.operator) return { attention: "Demo backends need day2's Supabase organization (SUPABASE_ACCESS_TOKEN, DAY2_SUPABASE_ORG_ID on the server)." };
-      const why = await budget(t, app, "infra", STEP_COST_USD.backend);
-      if (why) return { attention: `The demo backend needs credits: ${why}` };
-      return runJob(app.id, "backend", async () => {
-        const s = await deps.store.state(app.id);
-        if (s.demo?.pausedAt) {
-          try {
-            await resumeDemo(app, deps);
-          } catch (err) {
-            if (isLimitError(err)) throw new DemoError(limitMessage(deps.operator!.orgSlug, null), "limit");
-            throw err;
-          }
-        }
-        const demo = await ensureDemoBackend(app, cast, deps);
-        const note = `The demo backend is ready (${demo.rows} rows, ${demo.uploads} pictures, ${demo.migrations.applied}/${demo.migrations.total} migrations).`;
-        return { note, value: { done: note } as Outcome };
+    case "seed_plan": {
+      const planner = seedPlanner(t, app);
+      if (planner) {
+        const why = await budget(t, app, "agent_work", STEP_COST_USD.seedPlan);
+        if (why) return { attention: `The seed plan needs credits: ${why}` };
+      }
+      return runJob(app.id, "seed_plan", async () => {
+        const r = await ensureSeedPlan(app.id, app.repoPath, { planner, now: clock() });
+        return { note: r.note, value: { done: r.note } as Outcome };
       });
     }
     case "flow": {
@@ -551,6 +543,12 @@ async function captureStep(t: Tenant, app: AppEntry): Promise<Outcome> {
     case "no_token":
     case "off":
       return { attention: `${note} Until then posts use uploaded screenshots or the store's.` };
+    case "no_docker":
+    case "no_tunnel":
+      return { attention: `${note} Until then posts use uploaded screenshots or the store's.` };
+    case "migration":
+      return { attention: `${note} Fix the migration in the app's repo, then press Retry. Posts keep using the screens day2 already has.` };
+    case "database":
     case "no_flow":
     case "no_demo":
     case "device":
@@ -572,19 +570,12 @@ async function runPipeline(t: Tenant, app: AppEntry, trigger: PipelineTrigger): 
       for (const k of PIPELINE_STEPS) if (s.steps[k].status !== "done") s.steps[k] = { ...s.steps[k], status: "skipped", note: null };
     });
   }
-  if (!demoDeps(t, app).operator) {
-    return updatePipeline(app.id, (s) => {
-      s.blocked = "Demo backends need day2's Supabase organization (SUPABASE_ACCESS_TOKEN, DAY2_SUPABASE_ORG_ID on the server) — until then upload screenshots.";
-    });
-  }
   if (st.blocked)
     st = updatePipeline(app.id, (s) => {
       s.blocked = null;
       for (const k of PIPELINE_STEPS) if (s.steps[k].status === "skipped") s.steps[k] = emptyStep();
     });
-  let reachedCapture = false;
-  try {
-    for (const step of PIPELINE_STEPS) {
+  for (const step of PIPELINE_STEPS) {
       st = loadPipeline(app.id);
       const rec = st.steps[step];
       const done = await doneNote(t, app, step, st);
@@ -596,7 +587,6 @@ async function runPipeline(t: Tenant, app: AppEntry, trigger: PipelineTrigger): 
       if (rec.status === "done" || rec.status === "skipped" || rec.status === "running") setStep(app.id, step, { status: "pending", attempts: 0, nextRetryAt: null, note: null });
       else if (rec.status === "needs_attention") break;
       else if (rec.status === "pending" && !isDue(rec, clock())) break;
-      if (step === "capture") reachedCapture = true;
       setStep(app.id, step, { status: "running", note: null });
       let out: Outcome;
       try {
@@ -605,11 +595,10 @@ async function runPipeline(t: Tenant, app: AppEntry, trigger: PipelineTrigger): 
         const known = demoErrorOutcome(err);
         if (known) out = known;
         else {
-          const retryable = err instanceof DemoError && err.code === "starting";
           const msg = (err as Error).message.slice(0, 400);
           updatePipeline(app.id, (s) => {
             s.steps[step] = failStep(s.steps[step], step, msg, clock());
-            logLine(s, `${STEP_LABEL[step]}: ${retryable ? "still starting" : "failed"} — ${msg}`);
+            logLine(s, `${STEP_LABEL[step]}: failed — ${msg}`);
           });
           break;
         }
@@ -630,21 +619,6 @@ async function runPipeline(t: Tenant, app: AppEntry, trigger: PipelineTrigger): 
       });
       break;
     }
-  } finally {
-    // Keep the demo project paused between captures (it costs compute while it runs).
-    if (!reachedCapture && process.env.DAY2_DEMO_PAUSE_AFTER_CAPTURE !== "off" && !captureRunning(app.id)) {
-      const deps = demoDeps(t, app);
-      const d = (await deps.store.state(app.id).catch(() => null))?.demo;
-      const failedAt = loadPipeline(app.id).maintenance.pauseFailedAt;
-      if (d?.seededAt && !d.pausedAt && !d.working && !(failedAt && Date.now() - Date.parse(failedAt) < DAY))
-        await pauseDemo(app, deps).catch((err: Error) =>
-          updatePipeline(app.id, (s) => {
-            s.maintenance.pauseFailedAt = clock().toISOString();
-            logLine(s, `Supabase didn't pause the demo project (${err.message.slice(0, 120)}) — on a paid plan projects can't be paused; it keeps running.`);
-          }),
-        );
-    }
-  }
   return loadPipeline(app.id);
 }
 
@@ -660,21 +634,20 @@ export async function growthOn(app: AppEntry): Promise<boolean> {
 
 /**
  * One timer pass for an app (api-server's backlog timer): growth off for 30
- * days → clean up; otherwise notice a new app version and changed
- * migrations, re-arm stuck steps once a day, check the demo project still
- * exists, and run the pipeline (single-flight; cheap when there's nothing to
- * do). Returns what it started (tests await it).
+ * days → clean up; otherwise remove an old standing demo project once,
+ * notice a new app version and changed migrations (the seed plan is checked
+ * again), re-arm stuck steps once a day, and run the pipeline (single-flight;
+ * cheap when there's nothing to do). Returns what it started (tests await it).
  */
 export async function realScreensTick(t: Tenant, app: AppEntry, o: { now?: Date } = {}): Promise<{ trigger: PipelineTrigger | null; cleaned: boolean; run: Promise<PipelineState> | null }> {
   const now = o.now ?? clock();
   if (!pipelineApplies(t, app)) return { trigger: null, cleaned: false, run: null };
+  await migrateLegacyDemo(t, app, now);
   let st = loadPipeline(app.id);
   if (!(await growthOn(app))) {
     if (!st.growthOffSince) updatePipeline(app.id, (s) => void (s.growthOffSince = now.toISOString()));
     else if (now.getTime() - Date.parse(st.growthOffSince) >= GROWTH_OFF_CLEANUP_DAYS * DAY && !st.cleanup.at) {
-      const deps = demoDeps(t, app);
-      const hasDemo = Boolean((await deps.store.state(app.id).catch(() => null))?.demo);
-      if (hasDemo || existsSync(castDir(app.id))) {
+      if (existsSync(castDir(app.id))) {
         await cleanupRealScreens(t, app, "growth_off");
         return { trigger: null, cleaned: true, run: null };
       }
@@ -689,15 +662,13 @@ export async function realScreensTick(t: Tenant, app: AppEntry, o: { now?: Date 
     }
   });
   if (!st.lastRunAt) trigger = "growth_on";
-  const deps = demoDeps(t, app);
-  // The app's migrations changed: the new ones go onto the demo project.
-  const fp = migrationsFingerprint(app.repoPath);
-  if (st.maintenance.migrations && fp && fp !== st.maintenance.migrations && (await deps.store.state(app.id).catch(() => null))?.demo) {
-    await markMigrationsChanged(app, deps).catch(() => false);
+  // The app's migrations changed: the seed plan is checked against them again (the next capture applies them all to a fresh database).
+  const fp = migrationsHash(readMigrations(app.repoPath));
+  if (st.maintenance.migrations && fp && fp !== st.maintenance.migrations) {
     trigger = "migrations_changed";
     updatePipeline(app.id, (s) => {
-      s.steps.backend = { ...emptyStep(), note: "The app's migrations changed — applying the new ones to the demo project." };
-      logLine(s, "The app's database migrations changed: the new ones go onto the demo project.", now);
+      s.steps.seed_plan = { ...emptyStep(), note: "The app's migrations changed — checking the seed plan against them again." };
+      logLine(s, "The app's database migrations changed: the seed plan is checked against them again.", now);
     });
   }
   // A new app version: the capture is stale (the capture step sees it).
@@ -706,30 +677,29 @@ export async function realScreensTick(t: Tenant, app: AppEntry, o: { now?: Date 
     trigger ??= "new_version";
     updatePipeline(app.id, (s) => logLine(s, `New app version ${version}: capturing its screens again.`, now));
   }
-  // Once a day: re-arm what needs attention for one more try; the demo project still there?
+  // Once a day: re-arm what needs attention for one more try.
   const daily = !st.maintenance.checkedAt || now.getTime() - Date.parse(st.maintenance.checkedAt) >= DAY;
   if (daily) {
     trigger ??= st.lastRunAt ? "daily" : trigger;
     updatePipeline(app.id, (s) => rearm(s, { attempts: RETRY.max - 1, except: ["approve"], onlyAttention: true }));
-    const d = (await deps.store.state(app.id).catch(() => null))?.demo;
-    if (d && deps.operator) {
-      const api: SupabaseApi = deps.api(deps.operator.token);
-      await api.project(d.ref).catch(async (err) => {
-        if (err instanceof SupabaseError && err.status === 404) {
-          await deps.store.update(app.id, (s) => void (s.demo = null));
-          updatePipeline(app.id, (s) => {
-            s.steps.backend = { ...emptyStep(), note: "The demo project was gone on Supabase — day2 creates it again." };
-            logLine(s, "The demo project was gone on Supabase — day2 creates it again.", now);
-          });
-        }
-      });
-    }
   }
   updatePipeline(app.id, (s) => {
     s.maintenance = { ...s.maintenance, checkedAt: daily ? now.toISOString() : s.maintenance.checkedAt, migrations: fp, appVersion: version };
   });
   const run = ensureRealScreens(t, app, { trigger: trigger ?? "tick" });
   return { trigger, cleaned: false, run };
+}
+
+/** The one-time migration from the old design: an app's recorded demo project is deleted through the guard, then forgotten. */
+async function migrateLegacyDemo(t: Tenant, app: AppEntry, now = clock()): Promise<void> {
+  const deps = demoDeps(t, app);
+  const r = await retireLegacyDemo(app, deps).catch((err: Error) => ({ state: "kept" as const, note: err.message.slice(0, 200) }));
+  if (r.state === "none") return;
+  updatePipeline(app.id, (s) => {
+    if (s.maintenance.legacy !== r.note) logLine(s, r.note ?? "", now);
+    s.maintenance = { ...s.maintenance, legacy: r.note };
+  });
+  if (r.state === "deleted" || r.state === "forgotten") console.log(`[day2-real-screens] ${app.name}: ${r.note}`);
 }
 
 // ---------------------------------------------------------------- cleanup
@@ -749,24 +719,28 @@ const saveOrphans = (o: Orphan[]) => {
 };
 
 /**
- * Deletes an app's demo project and demo assets: the app was removed
- * ("removed": also its captures and pipeline state), or growth has been off
- * for 30 days ("growth_off": captures stay; the pipeline starts over when
- * growth comes back). A project that can't be deleted now is remembered and
- * retried by the timer (retryOrphanDemos).
+ * Deletes an app's demo assets: the app was removed ("removed": the cast,
+ * its pictures, captures, the seed plan and pipeline state), or growth has
+ * been off for 30 days ("growth_off": the cast and its pictures; captures
+ * and the seed plan stay; the pipeline starts over when growth comes back).
+ * There's no demo database to delete — only an old standing demo project
+ * from the previous design, through the guard; one Supabase won't delete
+ * now is remembered and retried by the timer (retryOrphanDemos).
  */
 export async function cleanupRealScreens(t: Tenant, app: AppEntry, reason: "removed" | "growth_off"): Promise<{ deleted: string | null; assets: number; error: string | null }> {
   const deps = demoDeps(t, app);
-  const demo = (await deps.store.state(app.id).catch(() => null))?.demo ?? null;
+  const old = (await deps.store.state(app.id).catch(() => null))?.demo ?? null;
   let deleted: string | null = null;
   let error: string | null = null;
-  if (demo) {
-    try {
-      deleted = (await deleteDemoBackend(app, deps)).deleted;
-    } catch (err) {
-      error = (err as Error).message.slice(0, 300);
-      if (reason === "removed" || !(err instanceof DemoError && err.code === "guard")) saveOrphans([...loadOrphans().filter((x) => x.ref !== demo.ref), { appId: app.id, ref: demo.ref, name: demo.name, orgSlug: demo.orgSlug, at: clock().toISOString(), error }]);
-      if (reason === "removed") await deps.store.update(app.id, (s) => void (s.demo = null)).catch(() => undefined);
+  if (old) {
+    const r = await retireLegacyDemo(app, deps).catch((err: Error) => ({ state: "kept" as const, note: err.message }));
+    if (r.state === "deleted") deleted = old.ref;
+    else if (r.state === "kept") {
+      error = (r.note ?? "").slice(0, 300);
+      if (reason === "removed") {
+        saveOrphans([...loadOrphans().filter((x) => x.ref !== old.ref), { appId: app.id, ref: old.ref, name: old.name, orgSlug: old.orgSlug, at: clock().toISOString(), error }]);
+        await deps.store.update(app.id, (s) => void (s.demo = null)).catch(() => undefined);
+      }
     }
   }
   let assets = 0;
@@ -780,17 +754,17 @@ export async function cleanupRealScreens(t: Tenant, app: AppEntry, reason: "remo
     rmSync(capturesDir(app.id), { recursive: true, force: true });
     rmSync(join(dataDir(), "real-screens", safe(app.id)), { recursive: true, force: true });
   } else {
-    const note = `Growth has been off for ${GROWTH_OFF_CLEANUP_DAYS} days: day2 deleted the demo backend${deleted ? "" : error ? " (or will, once Supabase answers)" : ""} and the demo cast. It sets them up again when growth is back on; screens captured before stay usable.`;
+    const note = `Growth has been off for ${GROWTH_OFF_CLEANUP_DAYS} days: day2 deleted the demo cast and its pictures. It writes a new one when growth is back on; screens captured before stay usable.`;
     updatePipeline(app.id, (s) => {
       const fresh = emptyPipeline(app.id);
       return { ...fresh, settings: s.settings, growthOffSince: s.growthOffSince, maintenance: s.maintenance, cleanup: { at: clock().toISOString(), reason, note }, log: [{ at: clock().toISOString(), text: note }, ...s.log].slice(0, 40) };
     });
   }
-  console.log(`[day2-real-screens] ${app.name}: cleaned up (${reason})${deleted ? `, deleted demo project ${deleted}` : ""}${error ? `; couldn't delete the project yet: ${error}` : ""}.`);
+  console.log(`[day2-real-screens] ${app.name}: cleaned up (${reason})${deleted ? `, deleted the old demo project ${deleted}` : ""}${error ? `; couldn't delete the old demo project yet: ${error}` : ""}.`);
   return { deleted, assets, error };
 }
 
-/** Demo projects of removed apps that couldn't be deleted at the time: tried again (only "-demo" projects in day2's organization). */
+/** Old demo projects of removed apps that couldn't be deleted at the time: tried again (only "-demo" projects in day2's organization). */
 export async function retryOrphanDemos(deps: { operator: { token: string; orgSlug: string } | null; api: (token: string) => SupabaseApi }): Promise<number> {
   const list = loadOrphans();
   if (!list.length || !deps.operator) return 0;
@@ -852,8 +826,8 @@ export async function realScreensAll(): Promise<void> {
   const { operatorConfig } = await import("../hosting/operator");
   const { supabaseApi } = await import("../hosting/supabase");
   const op = operatorConfig();
-  if (!op) return;
-  await retryOrphanDemos({ operator: op, api: supabaseApi }).catch((err: Error) => console.error(`[day2-real-screens] orphan demo projects: ${err.message}`));
+  // Old demo projects of removed apps (the previous design), only while day2's Supabase organization is configured.
+  if (op) await retryOrphanDemos({ operator: op, api: supabaseApi }).catch((err: Error) => console.error(`[day2-real-screens] orphan demo projects: ${err.message}`));
   for (const { tenant, app } of await work()) {
     await runAsTenant(tenant, async () => {
       try {
@@ -863,4 +837,13 @@ export async function realScreensAll(): Promise<void> {
       }
     });
   }
+}
+
+/** Leftover temporary databases (a crash, a restart) on this machine: removed when older than two hours. On startup and on the timer, per server. */
+export async function ephemeralJanitor(): Promise<string[]> {
+  if (process.env.DAY2_REAL_SCREENS === "off") return [];
+  return janitor(ephemeralDeps()).catch((err: Error) => {
+    console.error(`[day2-ephemeral] janitor: ${err.message}`);
+    return [];
+  });
 }
