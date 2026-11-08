@@ -1,3 +1,4 @@
+import { safeErrorLine } from "../ads/connect-callback";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AppEntry } from "../apps-registry";
@@ -285,7 +286,7 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
     async (req) => {
       const q = new URL(req.url).searchParams;
       const consoleUrl = authConfig().consoleUrl;
-      const pend = q.get("state") ? await adConnections().pendingByState(q.get("state")!) : null;
+      const pend = q.get("state") ? await adConnections().pendingByState(q.get("state")!).catch(() => null) : null;
       const page = pend?.appId ? `/apps/${encodeURIComponent(pend.appId)}/social` : "/";
       const back = (qs: string) => Response.redirect(`${consoleUrl}${page}?${qs}`, 302);
       try {
@@ -296,8 +297,10 @@ export function registerSocialRoutes(route: (method: string, pathname: string, h
         await adConnections().setPendingData(pend.id, { ...pend.pending, code: code.slice(0, 500) });
         return back(`ttconnect=${encodeURIComponent(pend.id)}`);
       } catch (err) {
+        const message = safeErrorLine((err as Error)?.message ?? String(err));
+        console.error(`[day2-social] tiktok sign-in callback failed: ${message}`);
         if (pend) await adConnections().endPending(pend.id).catch(() => {});
-        return back(`connectError=${encodeURIComponent((err as Error).message.slice(0, 300))}&platform=tiktok`);
+        return back(`connectError=${encodeURIComponent(message)}&platform=tiktok`);
       }
     },
     { public: true },

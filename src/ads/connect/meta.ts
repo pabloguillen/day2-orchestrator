@@ -60,9 +60,26 @@ function need(app: AppCredentials, key: string): string {
 
 type OAuthToken = { access_token?: string; expires_in?: number };
 
-async function oauthToken(app: AppCredentials, query: Record<string, string>, deps: PlatformDeps): Promise<OAuthToken> {
+/** Each Graph call during connecting gets this long: the sign-in callback waits on them (ads/connect-callback.ts). */
+export const GRAPH_CALL_TIMEOUT_MS = 15_000;
+
+const TIMED = Symbol("timed");
+
+/** The deps with a per-call timeout on every fetch (unless the caller set its own signal, or the deps are timed already). */
+export function timed(deps: PlatformDeps, ms = GRAPH_CALL_TIMEOUT_MS): PlatformDeps {
+  if (deps.fetch && (deps.fetch as { [TIMED]?: true })[TIMED]) return deps;
+  const f = deps.fetch ?? fetch;
+  const withTimeout = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => f(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(ms) });
+  return { ...deps, fetch: Object.assign(withTimeout, { [TIMED]: true as const }) as unknown as typeof fetch };
+}
+
+async function oauthToken(app: AppCredentials, query: Record<string, string>, deps: PlatformDeps, retries?: number): Promise<OAuthToken> {
   try {
-    return await request<OAuthToken>("meta", deps, `${GRAPH}/${version(app)}/oauth/access_token`, { method: "GET", query: { client_id: need(app, "appId"), client_secret: need(app, "appSecret"), ...query } });
+    return await request<OAuthToken>("meta", timed(deps), `${GRAPH}/${version(app)}/oauth/access_token`, {
+      method: "GET",
+      query: { client_id: need(app, "appId"), client_secret: need(app, "appSecret"), ...query },
+      ...(retries !== undefined ? { retries } : {}),
+    });
   } catch (err) {
     if (!(err instanceof PlatformError)) throw err;
     const { text, transient } = graphMessage(err);
@@ -70,7 +87,7 @@ async function oauthToken(app: AppCredentials, query: Record<string, string>, de
   }
 }
 
-const graphFor = (app: AppCredentials, tokens: Tokens, deps: PlatformDeps) => graphClient({ token: tokens.accessToken, appSecret: app.appSecret, apiVersion: version(app) }, deps);
+const graphFor = (app: AppCredentials, tokens: Tokens, deps: PlatformDeps) => graphClient({ token: tokens.accessToken, appSecret: app.appSecret, apiVersion: version(app) }, timed(deps));
 
 type PageRow = { id: string; name?: string; tasks?: string[]; instagram_business_account?: { id: string; username?: string } };
 
@@ -119,14 +136,16 @@ export const connect: PlatformConnect = {
     if (o.query.error) throw new PlatformError("meta", `login was not completed: ${o.query.error_description ?? o.query.error_reason ?? o.query.error}`);
     const code = o.query.code;
     if (!code) throw new PlatformError("meta", "login callback has no code");
-    const short = await oauthToken(app, { redirect_uri: o.redirectUri, code }, deps);
+    // One attempt: a sign-in code works once, so a retry after a timed-out
+    // exchange would only fail with "code already used".
+    const short = await oauthToken(app, { redirect_uri: o.redirectUri, code }, deps, 1);
     if (!short.access_token) throw new PlatformError("meta", "token exchange returned no access token");
     // Short-lived (~1-2 h) → long-lived (~60 days) user token.
     const long = await oauthToken(app, { grant_type: "fb_exchange_token", fb_exchange_token: short.access_token }, deps);
     const accessToken = long.access_token ?? short.access_token;
     const expiresIn = long.access_token ? long.expires_in : short.expires_in;
     const now = (deps.now ? deps.now() : new Date()).getTime();
-    const graph = graphClient({ token: accessToken, appSecret: app.appSecret, apiVersion: version(app) }, deps);
+    const graph = graphClient({ token: accessToken, appSecret: app.appSecret, apiVersion: version(app) }, timed(deps));
     const me = await graph<{ id?: string }>("who connected", "GET", "me", { query: { fields: "id" } });
     const perms = await graph<{ data?: Array<{ permission: string; status: string }> }>("granted permissions", "GET", "me/permissions");
     return {

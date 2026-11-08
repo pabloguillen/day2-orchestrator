@@ -11,7 +11,8 @@ import { authorize, CreditsError } from "./credits";
 import { AUTOPILOT_FILENAME, autopilotPass, loadAutopilot, type AutopilotDeps } from "./growth-autopilot";
 import { benchmarkGrowthFeatures } from "./growth-optimizer";
 import { GROWTH_CONFIG_FILENAME, loadGrowthConfig } from "./growth-config";
-import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
+import { deriveGrowthStrategy } from "./growth-strategy";
+import { resolveStageSignals } from "./stage-signals";
 import { withCreditContext, type CreditContext } from "./metered-query";
 import type { AppProfile } from "./onboarding";
 import { adIdentities, fieldStore, platformTools, runAsTenant, type Tenant } from "./tenant";
@@ -70,10 +71,10 @@ export async function autopilotDeps(tenant: Tenant, app: AppEntry): Promise<Auto
       return { result, credits: ctx.charged ?? 0 };
     },
     async paidGate(a: AppEntry, profile: AppProfile) {
-      if (!a.appBaseUrl) return { unlocked: false, reason: "the app's live address isn't set, so day2 can't see whether people stick around" };
       try {
         const config = loadGrowthConfig(resolve(a.repoPath, GROWTH_CONFIG_FILENAME));
-        const s = deriveGrowthStrategy(config.budget, profile, await fetchStageSignals(a.appBaseUrl), config.kpiGoals);
+        const signals = await resolveStageSignals({ store: fieldStore(), appId: a.id, appBaseUrl: a.appBaseUrl });
+        const s = deriveGrowthStrategy(config.budget, profile, signals, config.kpiGoals);
         return { unlocked: s.paidAcquisitionUnlocked, reason: s.unlockBasis };
       } catch (err) {
         return { unlocked: false, reason: `couldn't read the app's usage (${(err as Error).message.slice(0, 120)})` };

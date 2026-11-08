@@ -17,7 +17,8 @@ import { appKind } from "../field-work";
 import { GROWTH_CONFIG_FILENAME, loadGrowthConfig } from "../growth-config";
 import { checkAuthenticity, checkTruthfulClaims } from "../growth-creative";
 import { recordGrowthAction } from "../growth-feed";
-import { deriveGrowthStrategy, fetchStageSignals } from "../growth-strategy";
+import { deriveGrowthStrategy } from "../growth-strategy";
+import { resolveStageSignals } from "../stage-signals";
 import { recordOutcome, workedLines } from "../learning/runtime";
 import { categorize } from "../learning/taxonomy";
 import { loadResearch, MARKET_RESEARCH_FILENAME } from "../market-research";
@@ -119,11 +120,10 @@ export function languageOf(app: Pick<AppEntry, "repoPath">, profile: AppProfile 
   return loadSocialState(statePathOf(app)).language ?? guessLanguage([profile?.targetUsers, profile?.purpose, profile?.brand?.audience.primary, ...(profile?.brand?.voice.sampleLines ?? [])]);
 }
 
-/** social_content posts a week from the app's growth strategy; the launch stage's 3 when usage can't be read (e.g. a store-only app). */
+/** social_content posts a week from the app's growth strategy (usage from day2's field data; the launch stage's 3 when there is none yet). */
 async function postsPerWeek(app: AppEntry, profile: AppProfile): Promise<number> {
   const config = loadGrowthConfig(resolve(app.repoPath, GROWTH_CONFIG_FILENAME));
-  let signals = { activeUsers: 0, retentionSignal: null as number | null };
-  if (app.appBaseUrl) signals = await fetchStageSignals(app.appBaseUrl).catch(() => signals);
+  const signals = await resolveStageSignals({ store: fieldStore(), appId: app.id, appBaseUrl: app.appBaseUrl });
   const s = deriveGrowthStrategy(config.budget, profile, signals, config.kpiGoals);
   return s.allocations.find((a) => a.channel === "social_content")?.frequencyPerWeek ?? 3;
 }

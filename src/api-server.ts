@@ -101,6 +101,7 @@ import { USER_DAY_DAYS } from "./field-store";
 import { ADS_FILENAME, loadAds, platformResults, saveAds, type AdsFile } from "./ads/autopilot";
 import { ALL_PLATFORMS, CONNECTS, configuredPlatforms, connectable, platformInfo, resolvePlatforms } from "./ads/registry";
 import { redact } from "./ads/http";
+import { adsConnectCallback, isSlowCallbackPath } from "./ads/connect-callback";
 import { choices, chooseAccount, chooseIdentity, finishConnect as finishAdConnect, recheckIdentities, startConnect } from "./ads/connect-flow";
 import { fromUsd } from "./ads/fx";
 import { FORMAT_LABEL } from "./ads/learnings";
@@ -169,7 +170,8 @@ import {
   type GrowthConfig,
   type SpendCategory,
 } from "./spend-governance";
-import { deriveGrowthStrategy, fetchStageSignals } from "./growth-strategy";
+import { deriveGrowthStrategy } from "./growth-strategy";
+import { resolveStageSignals } from "./stage-signals";
 import { loadAllocatorState, type AllocatorState } from "./growth-allocator";
 import { loadGrowthActions } from "./growth-feed";
 import { listProposals } from "./proposals";
@@ -940,15 +942,12 @@ route("PUT", "/api/apps/:id/growth/website", async (req, params, t) => {
 
 route("GET", "/api/apps/:id/growth/strategy", async (_req, params, t) => {
   const app = await requireApp(t, params.id!);
-  if (!app.appBaseUrl) {
-    throw new HttpError(400, `"${app.name}" has no appBaseUrl configured — strategy needs a live /api/day2-stats endpoint to derive stage signals from.`);
-  }
   const profile = loadAppProfile(appFile(app, APP_PROFILE_FILENAME));
   if (!profile) {
     throw new HttpError(409, `"${app.name}" hasn't completed onboarding yet — no app profile to derive a strategy from.`);
   }
   const config = loadGrowthConfig(appFile(app, GROWTH_CONFIG_FILENAME));
-  const signals = await fetchStageSignals(app.appBaseUrl);
+  const signals = await resolveStageSignals({ store: fieldStore(), appId: app.id, appBaseUrl: app.appBaseUrl });
   const strategy = deriveGrowthStrategy(config.budget, profile, signals, config.kpiGoals);
   // Budgets here are at credit list value (the per-app cap), so this is a
   // unit change, not a cost — no markup is revealed.
@@ -2325,22 +2324,13 @@ route("DELETE", "/api/apps/:id/growth/ads/identities/:platform", async (_req, pa
 route(
   "GET",
   "/api/ads/connect/callback/:platform",
-  async (req, params) => {
-    const url = new URL(req.url);
-    const console = authConfig().consoleUrl;
-    if (!isPlatform(params.platform)) return Response.redirect(`${console}/`, 302);
-    const pageOf = (scope: "day2" | { appId: string } | undefined, purpose?: string) =>
-      !scope ? "/" : scope === "day2" ? "/operator" : purpose === "social" ? `/apps/${encodeURIComponent(scope.appId)}/social` : `/apps/${encodeURIComponent(scope.appId)}/growth/ads`;
-    // Where the person started, so an error lands back on the same page.
-    const q = url.searchParams;
-    const started = q.get("state") ? await adConnections().pendingByState(q.get("state")!) : q.get("p") ? await adConnections().pending(q.get("p")!) : null;
-    try {
-      const r = await finishAdConnect(flowDeps(), { platform: params.platform, query: Object.fromEntries(q), callbackUrl: adsCallbackUrl(params.platform) });
-      return Response.redirect(`${console}${pageOf(r.scope, r.purpose)}?connect=${encodeURIComponent(r.pendingId)}&platform=${params.platform}`, 302);
-    } catch (err) {
-      return Response.redirect(`${console}${pageOf(started?.scope, started?.purpose)}?platform=${params.platform}&connectError=${encodeURIComponent((err as Error).message.slice(0, 300))}`, 302);
-    }
-  },
+  async (req, params) =>
+    adsConnectCallback(req, params.platform ?? "", isPlatform, {
+      consoleUrl: authConfig().consoleUrl,
+      started: async (q) => (q.get("state") ? await adConnections().pendingByState(q.get("state")!) : q.get("p") ? await adConnections().pending(q.get("p")!) : null),
+      finish: (platform, query) => finishAdConnect(flowDeps(), { platform, query, callbackUrl: adsCallbackUrl(platform) }),
+      endPending: (id) => adConnections().endPending(id),
+    }),
   { public: true },
 );
 
@@ -3283,8 +3273,13 @@ if (import.meta.main) {
       // Bun closes a connection after 10s idle by default — shorter than a
       // real agent call (onboarding scan, Ask day2), which silently dropped
       // those requests as "Failed to fetch". Agent-backed POSTs get no idle
-      // limit; everything else keeps the default.
-      if (req.method === "POST" && isAgentBackedPath(new URL(req.url).pathname)) srv.timeout(req, 0);
+      // limit; everything else keeps the default. So do the sign-in
+      // callbacks (code exchange, long-lived token, permissions over a
+      // possibly slow tunnel): dropped, they showed a blank page. Their own
+      // deadline (ads/connect-callback.ts) sends the person back with an error.
+      const pathname = new URL(req.url).pathname;
+      if (req.method === "POST" && isAgentBackedPath(pathname)) srv.timeout(req, 0);
+      else if (isSlowCallbackPath(req.method, pathname)) srv.timeout(req, 120);
       return handleRequest(req);
     },
   });

@@ -4,7 +4,8 @@
  *
  * Depends on Component 1's `BudgetConfig`/`KpiGoal` (spend-governance.ts),
  * the real `AppProfile` (onboarding.ts), real per-device signals (fetched
- * live from expense-buddy's `/api/day2-stats`, W39's other half), and —
+ * from day2's own field data via stage-signals.ts, an app's `/api/day2-stats`
+ * only as an optional extra), and —
  * optionally — competitor/trend insights.
  *
  * v1 macro layer is a fixed rule table, same honesty discipline as
@@ -54,6 +55,9 @@ export type StageSignals = {
    * compute a fraction from (never fabricated as 0). Mirrors
    * expense-buddy's `Day2Stats.retentionSignal` exactly. */
   retentionSignal: number | null;
+  /** Where these numbers came from (e.g. "day2 field data: …", or "no usage
+   * data yet"), stated in the stage basis so a default is never silent. */
+  source?: string;
 };
 
 /**
@@ -122,6 +126,11 @@ const GROWTH_MIN_USERS = 5000;
 const TRACTION_RETENTION_THRESHOLD = 0.2;
 
 export function deriveAppStage(signals: StageSignals): { stage: AppStage; basis: string } {
+  const r = deriveAppStageFromCount(signals);
+  return signals.source ? { ...r, basis: `${r.basis} Source: ${signals.source}` } : r;
+}
+
+function deriveAppStageFromCount(signals: StageSignals): { stage: AppStage; basis: string } {
   const { activeUsers } = signals;
   if (activeUsers < TRACTION_MIN_USERS) {
     return {
@@ -316,20 +325,9 @@ export function deriveGrowthStrategy(
   };
 }
 
-/** Live signal fetch from expense-buddy's `/api/day2-stats` (W39, this
- * same component's other half). Fail-closed: any fetch failure or
- * malformed response is surfaced as a thrown error, never silently
- * defaulted to a fabricated `{ activeUsers: 0 }` — a caller who can't
- * reach the stats endpoint has no basis to derive *any* stage, launch
- * included, and should say so rather than guess launch by omission. */
-export async function fetchStageSignals(appBaseUrl: string): Promise<StageSignals> {
-  const res = await fetch(`${appBaseUrl}/api/day2-stats`, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) {
-    throw new Error(`day2-stats fetch failed: ${res.status} ${await res.text()}`);
-  }
-  const stats = (await res.json()) as { activeUsers: number; retentionSignal: number | null };
-  return { activeUsers: stats.activeUsers, retentionSignal: stats.retentionSignal };
-}
+/** Where stage signals come from now: `resolveStageSignals` in
+ * stage-signals.ts (day2's own field data first, an app's
+ * `/api/day2-stats` only as an optional extra). */
 
 export function renderGrowthStrategySummary(strategy: GrowthStrategy): string {
   const lines: string[] = [];
